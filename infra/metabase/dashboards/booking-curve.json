@@ -1,0 +1,36 @@
+{
+  "name": "Booking curve and pace",
+  "description": "Spec §14.3, §14.6: the booking curve by club and night, and booking pace by days before the night.",
+  "collection": "Data dashboard (internal)",
+  "parameters": [
+    {
+      "slug": "dataset",
+      "name": "Dataset",
+      "type": "text",
+      "default": "live",
+      "values": [
+        "live",
+        "demo"
+      ],
+      "description": "live = real clubs (analytics schema); demo = Velora only (analytics_demo schema)"
+    },
+    {
+      "slug": "club",
+      "name": "Club id",
+      "type": "text",
+      "required": false
+    }
+  ],
+  "cards": [
+    {
+      "name": "Booked share by snapshot",
+      "display": "line",
+      "sql": "select * from (select club_id, night_date, taken_at, lead_bucket, tables_active, tables_confirmed, tables_arrived, pax_booked, booked_share from analytics.booking_curve where {{dataset}} = 'live' union all select club_id, night_date, taken_at, lead_bucket, tables_active, tables_confirmed, tables_arrived, pax_booked, booked_share from analytics_demo.booking_curve where {{dataset}} = 'demo') d where true [[and d.club_id = {{club}}]] order by club_id, night_date, taken_at"
+    },
+    {
+      "name": "Booking pace (cumulative confirmed bookings by days before)",
+      "display": "line",
+      "sql": "select * from (select club_id, night_date, days_before, bookings, pax, cumulative_bookings from analytics.booking_pace where {{dataset}} = 'live' union all select club_id, night_date, days_before, bookings, pax, cumulative_bookings from analytics_demo.booking_pace where {{dataset}} = 'demo') d where true [[and d.club_id = {{club}}]] order by club_id, night_date, days_before desc"
+    }
+  ]
+}

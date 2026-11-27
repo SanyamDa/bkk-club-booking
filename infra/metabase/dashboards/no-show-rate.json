@@ -1,0 +1,31 @@
+{
+  "name": "No-show rate",
+  "description": "Spec §14.6: no-shows over bookings that were due, per club-night.",
+  "collection": "Data dashboard (internal)",
+  "parameters": [
+    {
+      "slug": "dataset",
+      "name": "Dataset",
+      "type": "text",
+      "default": "live",
+      "values": [
+        "live",
+        "demo"
+      ],
+      "description": "live = real clubs (analytics schema); demo = Velora only (analytics_demo schema)"
+    },
+    {
+      "slug": "club",
+      "name": "Club id",
+      "type": "text",
+      "required": false
+    }
+  ],
+  "cards": [
+    {
+      "name": "No-show rate per night",
+      "display": "line",
+      "sql": "select * from (select club_id, night_date, due, arrived, no_shows, no_show_rate from analytics.no_show_rate where {{dataset}} = 'live' union all select club_id, night_date, due, arrived, no_shows, no_show_rate from analytics_demo.no_show_rate where {{dataset}} = 'demo') d where true [[and d.club_id = {{club}}]] order by club_id, night_date"
+    }
+  ]
+}

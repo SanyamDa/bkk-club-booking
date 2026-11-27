@@ -1,0 +1,36 @@
+{
+  "name": "Booking funnel",
+  "description": "Spec §14.10: started, night, pax, table, details, rules, paid, confirmed, with drop-off.",
+  "collection": "Data dashboard (internal)",
+  "parameters": [
+    {
+      "slug": "dataset",
+      "name": "Dataset",
+      "type": "text",
+      "default": "live",
+      "values": [
+        "live",
+        "demo"
+      ],
+      "description": "live = real clubs (analytics schema); demo = Velora only (analytics_demo schema)"
+    },
+    {
+      "slug": "club",
+      "name": "Club id",
+      "type": "text",
+      "required": false
+    }
+  ],
+  "cards": [
+    {
+      "name": "Attempts reaching each step",
+      "display": "funnel",
+      "sql": "select step_no, step, sum(attempts)::int as attempts from (select * from (select club_id, started_on, step_no, step, attempts from analytics.booking_funnel where {{dataset}} = 'live' union all select club_id, started_on, step_no, step, attempts from analytics_demo.booking_funnel where {{dataset}} = 'demo') d where true [[and d.club_id = {{club}}]] order by started_on) f group by step_no, step order by step_no"
+    },
+    {
+      "name": "Funnel by club and start day",
+      "display": "table",
+      "sql": "select * from (select club_id, started_on, step_no, step, attempts from analytics.booking_funnel where {{dataset}} = 'live' union all select club_id, started_on, step_no, step, attempts from analytics_demo.booking_funnel where {{dataset}} = 'demo') d where true [[and d.club_id = {{club}}]] order by club_id, started_on, step_no"
+    }
+  ]
+}

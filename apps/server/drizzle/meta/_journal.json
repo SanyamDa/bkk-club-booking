@@ -36,6 +36,13 @@
       "when": 1795779874056,
       "tag": "0004_a20",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795814400382,
+      "tag": "0005_analytics_views",
+      "breakpoints": true
     }
   ]
 }

@@ -187,3 +187,26 @@ One session now builds both tracks on `track-a`. After the four tasks: `npm test
 **Closed:** the B15 note "the B19 approval screen is not built" is done. No code fallback waited on B19.
 
 **Tests:** `brain-ui.test.ts` (9 pass); `isolation.test.ts` passes with the brain routes.
+
+## 2026-11-27: B14 Data dashboard v1, built by Session A on track-c (not merged)
+
+**Migration:** `apps/server/drizzle/0005_analytics_views.sql` (custom, `--name analytics_views`): schemas `analytics_src` (private), `analytics` (real clubs), `analytics_demo` (Velora), role `metabase_ro`. Views and a role only, no table change. If `0005` is taken at merge into track-a: drop it, regenerate with `drizzle-kit generate --custom --name analytics_views` and paste the same SQL.
+
+**Published:**
+```ts
+// data/analytics.ts
+export const ANALYTICS_VIEWS: readonly ['clubs', 'events', 'booking_funnel', 'booking_pace', 'booking_curve', 'demand_no_table', 'no_show_rate', 'door_vs_bookings', 'busyness_by_hour'];
+export const METABASE_ROLE = 'metabase_ro';
+export async function testRowsInAnalytics(db: Db): Promise<number>; // must be 0
+```
+- **Request to B2:** `checkEventCompleteness(...).testInAggregates` = `await testRowsInAnalytics(db)`.
+- Analytics reads only `data_origin` in (`first_party`, `pos`), never `channel = 'instagram'`, never `bookings.source = 'instagram'`; a real club's test guest, booking or event is left out; every demo-club row is only in `analytics_demo`.
+- Metabase: compose profile `metabase` (`docker compose --profile metabase up -d`), new env `METABASE_DB_PASSWORD` (role `metabase_ro`) and `METABASE_APP_DB_PASSWORD` (role `metabase_app`, non-superuser owner of the `metabase` settings database), published on `127.0.0.1:3000` only. Boards in `infra/metabase/dashboards/*.json`, loaded with `infra/metabase/provision.mjs`.
+
+**Closed:** `instagram.test.ts` todo "the Metabase analytics view ... leave out instagram-origin rows" is a real test; the busyness-feed half stays a todo (busyness feed task).
+
+**Assumptions in place of a human decision:** no Metabase account exists, so the plan's assumption is used: self-hosted Metabase in compose, localhost-only, image `metabase/metabase:v0.50.0` (bump at deploy); admin user and boards created by `provision.mjs`.
+
+**Unverified:** no real Metabase run; `provision.mjs` (Metabase REST API) and the image tag untested; `init-role.sh` not run against a real Postgres (PGlite tests cover the role through `SET LOCAL ROLE`).
+
+**Tests:** `analytics.test.ts` (12 pass); `instagram.test.ts` (14 pass, 3 todo).

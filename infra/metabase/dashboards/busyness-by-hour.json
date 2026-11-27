@@ -1,0 +1,31 @@
+{
+  "name": "Busyness by club and hour",
+  "description": "Spec §14.6: door net, check-ins and staff crowd rating by Bangkok hour.",
+  "collection": "Data dashboard (internal)",
+  "parameters": [
+    {
+      "slug": "dataset",
+      "name": "Dataset",
+      "type": "text",
+      "default": "live",
+      "values": [
+        "live",
+        "demo"
+      ],
+      "description": "live = real clubs (analytics schema); demo = Velora only (analytics_demo schema)"
+    },
+    {
+      "slug": "club",
+      "name": "Club id",
+      "type": "text",
+      "required": false
+    }
+  ],
+  "cards": [
+    {
+      "name": "Busyness by hour",
+      "display": "line",
+      "sql": "select * from (select club_id, night_date, hour, door_net, checkins, crowd_rating_avg from analytics.busyness_by_hour where {{dataset}} = 'live' union all select club_id, night_date, hour, door_net, checkins, crowd_rating_avg from analytics_demo.busyness_by_hour where {{dataset}} = 'demo') d where true [[and d.club_id = {{club}}]] order by club_id, night_date, (hour + 12) % 24"
+    }
+  ]
+}

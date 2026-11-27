@@ -765,6 +765,28 @@ Expand with superpowers:writing-plans at the start of the phase.
 
 **Migration (Track B, Phase 1):** B14 yes (the custom migration in its row). B9, B9b, B10, B10b, B11, B12 and B13 no: W0 added `price_rules`, `deposits.slip_*`, `bookings.reminder_sent_at`, `removal_requests`, `notices`, `nights`, `door_counts`, `occupancy_snapshots`, `crowd_ratings` and `calendar_days`.
 
+#### Task B14: Data dashboard v1 (expanded)
+
+**Spec:** §14.5, §14.6, §14.8, §14.10 funnel.
+
+**Files:** Create `apps/server/drizzle/0005_analytics_views.sql` (custom, `--name analytics_views`), `apps/server/src/data/analytics.ts`, `infra/metabase/{README.md,init-role.sh,provision.mjs}`, `infra/metabase/dashboards/*.json` (six boards). Modify `docker-compose.yml` (append the `metabase-init` and `metabase` services, profile `metabase`). Test: `apps/server/test/analytics.test.ts`; `instagram.test.ts` (A18's Metabase todo turned real).
+
+**Decisions:**
+- Three schemas. `analytics_src` (never granted) holds base views with a `demo` column (club `status = 'demo'`); it drops real clubs' test rows (`events.is_test`, `bookings.is_test`, the booking's `guests.is_test`), keeps only events with `data_origin` in (`first_party`, `pos`) and `channel` not `instagram`, and drops bookings with `source = 'instagram'` (§14.8, no Meta data). `analytics` = the same views `WHERE NOT demo` (real clubs); `analytics_demo` = `WHERE demo` (Velora). No view has `raw`, `is_test`, names, phones or free text.
+- Views (same names in both schemas, each with `club_id`; `clubs` keys on `id`): `clubs`, `events`, `booking_funnel` (club, `started_on` Bangkok date of the attempt's first event, `step_no`, `step`, attempts with that step's event: `booking.started`, `night.selected`, `pax.selected`, `table.held`, `details.submitted`, `rules.accepted`, `deposit.verified`, `booking.confirmed`), `booking_pace` (bookings that reached confirmed, by `days_before` the night, with a cumulative count), `booking_curve` (occupancy snapshots, `booked_share = (confirmed + arrived) / active`), `demand_no_table` (zero-result `availability.searched` and `night.sold_out_shown` by night and pax range), `no_show_rate` (due = arrived, completed, no-show), `door_vs_bookings`, `busyness_by_hour` (Bangkok hour: door net, check-ins, average crowd rating).
+- "Velora only in a demo filter": every board card is native SQL over `analytics.X where {{dataset}} = 'live' union all analytics_demo.X where {{dataset}} = 'demo'`, with `dataset` defaulting to `live`, plus an optional `[[and club_id = {{club}}]]`.
+- Role `metabase_ro`: created `NOLOGIN` in the migration inside a guarded `DO` block (`insufficient_privilege` → notice), `default_transaction_read_only = on`, `USAGE` and `SELECT` on `analytics` and `analytics_demo` only. `infra/metabase/init-role.sh` (compose one-shot, superuser) adds `LOGIN` with `METABASE_DB_PASSWORD`, re-runs the grants and creates Metabase's own `metabase` database, owned by `metabase_app` (LOGIN, no superuser, password `METABASE_APP_DB_PASSWORD`). The Metabase container connects only as `metabase_app` and `metabase_ro`, never as the superuser. PGlite models roles, so the tests use `SET LOCAL ROLE metabase_ro`.
+- Metabase is published on `127.0.0.1:3000` only (SSH tunnel), never behind the public proxy, and no app route proxies to it: no club login reaches a board. Image `metabase/metabase:v0.50.0` (bump at deploy).
+- The nightly `testInAggregates` check (B2) calls `testRowsInAnalytics(db)`.
+
+**Interfaces (Produces):** `ANALYTICS_VIEWS` (readonly view names), `METABASE_ROLE = 'metabase_ro'`, `testRowsInAnalytics(db): Promise<number>` (demo-club rows in any `analytics` view plus `analytics.events` rows whose event is `is_test`; must be 0) in `data/analytics.ts`.
+
+**Tests (`analytics.test.ts`):** `funnel counts attempts reaching each step for a seeded week`; `booking pace counts confirmed bookings by days before the night`; `booking curve reads occupancy snapshots`; `demand with no table counts zero-result searches and sold-out views`; `no-show rate, door counts against bookings and busyness by hour match the seeded week`; `test rows, chat-origin and Instagram rows never appear in the analytics schema`; `Velora rows appear only in analytics_demo`; `the events view has no raw column`; `metabase_ro can read the analytics views and cannot write or read operations tables`; `every §14.6 starter board has a dashboard file and cards read only analytics schemas`; `every board card runs as metabase_ro for the live and demo dataset`; `compose binds Metabase to localhost and no app route reaches it`. `instagram.test.ts › the Metabase analytics view leaves out instagram-origin rows (B14)`.
+
+**Migration:** yes (custom, views and role only; regenerate the number at merge if `0005` is taken).
+
+**Unverified against a real service:** no real Metabase in tests; `provision.mjs` (Metabase REST API) and the image tag are not run.
+
 #### Task B13: Calendar days (expanded)
 
 **Spec:** §14.3 "The city calendar", §9 (`calendar_days`).
@@ -818,6 +840,27 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 | A17 Full onboarding wizard | §12.2: pre-call form link, minute table, deep links, live checks, go-live switch, timing recorded per step. The baseline FAQs are written through B15's brain store (`brain/notes.ts`), so that part is blocked by B15 | `pages/admin/LineWizard.tsx`, `pages/onboard/*` (pre-call form), `http/admin/onboarding.ts` | form submission creates tables, prices, rules, baseline FAQs and the club profile; each step's duration stored; three real onboardings timed |
 | A17b Per-club feature switches | §12.3 Controls, §10 Phase 2: `PATCH /api/admin/clubs/:slug/features {key: boolean}` stores the switches in `platform_flags` under `features:<clubId>`; each change is audited; `isFeatureOn` (signature under "Feature switches" above) reads per request, so a change needs no restart | `platform/features.ts`, `http/admin/controls.ts`, `pages/admin/Controls.tsx` | a switch takes effect on the next request without restart; an unknown key is 400; the change is in `audit_log`; the route is in `ADMIN_ROUTES` |
 
+#### Task A16 expanded: Club stats page
+
+**Files:** `platform/club-stats.ts` (new), `platform/club-report.ts` (shared range helpers moved out of `buildClubReport`, no behaviour change), `http/staff-report.ts` (`GET /clubs/:slug/stats`, mounted through `staffRoutes` with the report), `apps/web/src/pages/staff/Stats.tsx`, `apps/web/src/main.tsx` and `pages/staff/Layout.tsx` (one route, one nav link), test `test/club-stats.test.ts`. Migration: no.
+
+**Decisions:**
+- Range: `?from=YYYY-MM-DD&to=YYYY-MM-DD`, nights inclusive, at most 366 nights; without them, the last complete week (as `/report`). Chat, takeover and event times run from the first night's `nightEndHour` to the `nightEndHour` after the last night (A16b's window). `owner|manager` only, like `/report`.
+- Shared with A16b through `club-report.ts`: `nightRange`, `testGuestIds`, `bookingFigures` (held bookings, deposits, no-show rate, G1 no-staff-help count) and `chatFigures` (G9 runs, deflection, takeovers by topic). The stats page and the weekly report give the same figure for the same week.
+- Test rows (Global Constraints) excluded for every club not `demo`: `bookings.is_test`, `guests.is_test` (their messages and takeovers), `events.is_test`. A demo club counts its own rows.
+- Bookings: bot = held bookings whose `source` is not manual; manual = `manual|manual_phone|manual_walkin`. Minimum spend booked = sum of held bookings' `min_spend_satang`.
+- G2 median first response: for each inbound guest message, the time to the next outbound bot or staff message to that guest; `unanswered` counts inbound messages with no later outbound one.
+- G8 handoff response: per takeover, `started_at` to the first staff message to that guest at or after it; median; takeovers with no staff reply counted as `waiting`.
+- G5 booking time: per `booking.confirmed` event in range with an `attempt_id`, the time from the earliest event of that attempt (`booking.started`) to the confirmation; median. Manual bookings have no attempt and are left out.
+- Messages by channel: `messages.channel_id` → `channels.kind` (null = `line`), in and out counts.
+- Push quota: `lastKnownQuota` + `quotaView` (A5/A9), the current month, not the range.
+- AI cost: sum of `ai.call` `props.cost_usd_micros` in the range, and in the calendar month (Bangkok) of the range's last night against the cap. Assumption until B16 merges: the cap is `platform_flags['ai-cost-cap:<clubId>'].value.usdMicros`, null when unset (B16 writes or reads the same key).
+- Funnel (§14.10): started `booking.started`, night `night.selected`, pax `pax.selected`, table `table.held`, details `details.submitted`, rules `rules.accepted`, paid `deposit.verified`, confirmed `booking.confirmed`; distinct `attempt_id` per step (event id when the attempt is null), with drop-off to the step before.
+
+**Interfaces (Produces):** `buildClubStats(db: Db, clubId: string, from: string, to: string): Promise<ClubStats>` in `platform/club-stats.ts`; `GET /api/staff/clubs/:slug/stats?from&to` → `{ stats: ClubStats }`.
+
+**Tests (`club-stats.test.ts`):** `figures match a hand-counted seeded Velora week`; `test rows excluded for real clubs`; `club B data never appears in club A stats`; `stats and weekly report agree on the same week`; `GET /stats answers owner and manager with their own club only`; `it.todo` for the B7 Velora history seed.
+
 **Migration (Track A, Phase 2):** A14 no (`conversations.external_ref` and `messages.external_id` come from W0). A15: decide where alerts are stored in the phase-start writing-plans pass; a new table means yes. Others no.
 
 ### Track B, Phase 2
@@ -840,27 +883,6 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 
 **Decisions:**
 - Price lint (§8.4): a number next to ฿, บาท, baht or THB, or a number of 100 or more within 30 characters of "minimum spend", "min spend", "deposit", ขั้นต่ำ or มัดจำ, is a `price` issue. Times (`20:00`) and numbers followed by a time unit (hours, days, minutes, ชั่วโมง, วัน, นาที) are not amounts. "available" next to a table, seat or "tonight", "availability", "sold out", "fully booked", โต๊ะว่าง, ยังว่าง, เต็มแล้ว are `availability` issues ("valet parking is available" passes). An `event` note without `validUntil` is `event_needs_end_date`. A failing save throws `BrainLintError { issues }` and writes nothing; the error carries `fix: 'prices'` (the pricing screen).
-#### Task A16 expanded: Club stats page
-
-**Files:** `platform/club-stats.ts` (new), `platform/club-report.ts` (shared range helpers moved out of `buildClubReport`, no behaviour change), `http/staff-report.ts` (`GET /clubs/:slug/stats`, mounted through `staffRoutes` with the report), `apps/web/src/pages/staff/Stats.tsx`, `apps/web/src/main.tsx` and `pages/staff/Layout.tsx` (one route, one nav link), test `test/club-stats.test.ts`. Migration: no.
-
-**Decisions:**
-- Range: `?from=YYYY-MM-DD&to=YYYY-MM-DD`, nights inclusive, at most 366 nights; without them, the last complete week (as `/report`). Chat, takeover and event times run from the first night's `nightEndHour` to the `nightEndHour` after the last night (A16b's window). `owner|manager` only, like `/report`.
-- Shared with A16b through `club-report.ts`: `nightRange`, `testGuestIds`, `bookingFigures` (held bookings, deposits, no-show rate, G1 no-staff-help count) and `chatFigures` (G9 runs, deflection, takeovers by topic). The stats page and the weekly report give the same figure for the same week.
-- Test rows (Global Constraints) excluded for every club not `demo`: `bookings.is_test`, `guests.is_test` (their messages and takeovers), `events.is_test`. A demo club counts its own rows.
-- Bookings: bot = held bookings whose `source` is not manual; manual = `manual|manual_phone|manual_walkin`. Minimum spend booked = sum of held bookings' `min_spend_satang`.
-- G2 median first response: for each inbound guest message, the time to the next outbound bot or staff message to that guest; `unanswered` counts inbound messages with no later outbound one.
-- G8 handoff response: per takeover, `started_at` to the first staff message to that guest at or after it; median; takeovers with no staff reply counted as `waiting`.
-- G5 booking time: per `booking.confirmed` event in range with an `attempt_id`, the time from the earliest event of that attempt (`booking.started`) to the confirmation; median. Manual bookings have no attempt and are left out.
-- Messages by channel: `messages.channel_id` → `channels.kind` (null = `line`), in and out counts.
-- Push quota: `lastKnownQuota` + `quotaView` (A5/A9), the current month, not the range.
-- AI cost: sum of `ai.call` `props.cost_usd_micros` in the range, and in the calendar month (Bangkok) of the range's last night against the cap. Assumption until B16 merges: the cap is `platform_flags['ai-cost-cap:<clubId>'].value.usdMicros`, null when unset (B16 writes or reads the same key).
-- Funnel (§14.10): started `booking.started`, night `night.selected`, pax `pax.selected`, table `table.held`, details `details.submitted`, rules `rules.accepted`, paid `deposit.verified`, confirmed `booking.confirmed`; distinct `attempt_id` per step (event id when the attempt is null), with drop-off to the step before.
-
-**Interfaces (Produces):** `buildClubStats(db: Db, clubId: string, from: string, to: string): Promise<ClubStats>` in `platform/club-stats.ts`; `GET /api/staff/clubs/:slug/stats?from&to` → `{ stats: ClubStats }`.
-
-**Tests (`club-stats.test.ts`):** `figures match a hand-counted seeded Velora week`; `test rows excluded for real clubs`; `club B data never appears in club A stats`; `stats and weekly report agree on the same week`; `GET /stats answers owner and manager with their own club only`; `it.todo` for the B7 Velora history seed.
-
 - Expiry: event and promotion notes are `type: 'event'` and need `validUntil`. Other notes get `reviewBy` = club today + 90 days on create and on every edit. A note whose `validUntil` is before club today (`clubToday`, the night date) leaves the compile at once; the job also sets it `retired` with `frontmatter.retiredReason = 'expired'`. A note past `reviewBy` stays live and is listed for review in the digest (it is not removed).
 - Compile: live, in-date notes, ordered by type (policy, faq, layout, event, learned: the §8.4 source order) then slug; the text is pure (no time stamps), hashed with SHA-256. Tokens are estimated as `ceil(utf8 bytes / 4)` (no tokenizer dependency; Thai counts about 0.75 per character). Warn at 40,000, refuse at 60,000: an over-cap compile writes no snapshot, and an approve that would push the brain over the cap is refused and rolled back. A compile whose hash equals the latest snapshot writes nothing.
 - Folder import (Obsidian round trip) and paste/photo import create **draft** notes only (`source: 'import'`). A file whose slug exists with a different body becomes a draft with `supersedesId` (the approval screen's "replaces note X"); the same body is skipped. Paste splits on markdown headings, else on blank-line paragraphs; a section failing lint is returned as rejected, not saved. Photo import takes an injected `OcrFn`; there is no OCR provider yet (tests use a fake).
@@ -877,6 +899,27 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 - `jobs/brain-expiry.ts`: `runBrainExpiry(db, now)`, `brainDigest(db, clubId, now)`, `sendBrainDigests(db, now)`, `startBrainExpiry(ctx, now)`.
 
 **Tests (`brain-store.test.ts`):** `note with a price is rejected at save`; `compile is deterministic and hashed`; `over 60k refuses to publish`; `export then import round-trips notes and links`; `pasted text becomes draft notes, never live`; `photo import runs the injected OCR and makes draft notes`; `a table change regenerates the layout note`; `an event note without an end date is rejected`; `an expired note is absent from the next snapshot and listed in the digest`. A17: `onboarding.test.ts › apply writes the baseline FAQs into the brain` replaces its todo.
+
+**Migration:** no.
+
+#### Task B19: Brain manager UI (expanded)
+
+**Files:** `http/brain.ts` (router), `brain/gaps.ts` (gap query, reused by B18), `app.ts` (one mount line), `test/helpers/track-b.ts` (fixture `notes/:noteId`), `pages/staff/brain/Brain.tsx`, `pages/staff/Layout.tsx` (one nav item), `apps/web/src/main.tsx` (one route line), test `test/brain-ui.test.ts`.
+
+**Decisions:**
+- All routes are under `/api/staff/clubs/:slug/brain` with `requireClubRole('owner','manager')` (a host or door login is 403). A note id from another club is 404, checked before the body is read.
+- Notes (§6.6): every non-retired note with its type, source, `reviewBy`, `validUntil` and last edit; the page groups them by type. The response carries the latest snapshot's version and token count, with `BRAIN_TOKEN_WARN` and `BRAIN_TOKEN_CAP`.
+- Approval queue: draft notes. Each shows `frontmatter.question` and `frontmatter.hostReply` when present (B18 writes them; B15 drafts from import and onboarding have none), and the title of the note it replaces (`supersedesId`). Ranked by `frontmatter.takeovers` (count of takeovers on the topic, written by B18) descending, then newest first. Until B18 merges every draft has 0 takeovers, so the order is newest first.
+- Approve is one tap: `POST .../notes/:noteId/approve` with no body calls `approveNote`. [Edit] is `PATCH .../notes/:noteId` (`updateNote`, which writes a version row when the body changes) and then approve. [Reject] calls `rejectNote`.
+- A note the manager writes (`POST .../notes`, also [Write an answer] on a gap) is saved **live**: the manager is the approver. With `gapTopic`, the note stores `frontmatter.gapTopic`, which closes that gap.
+- Gaps: `faq.missed` events of the last 30 days, grouped by `props.topic` (or, with no topic, by the lower-cased question text), most frequent first, with the count, the last time asked and the latest question (`raw.text`, written by B16). A gap is closed when a live note has `frontmatter.gapTopic` equal to its key and was approved after the last miss. A live club does not see test events; the demo club does. B16 does not emit `faq.missed` yet, so gaps stay empty until it does.
+- Errors: lint failure 422 `{ error: 'lint', issues, fix }`; over the token cap 409 `{ error: 'over_cap', tokenCount }`; approving a retired note 409 `not_draft`.
+
+**Interfaces:**
+- `brain/gaps.ts`: `listGaps(db, club: Club, now: Date, opts?: { days?: number }): Promise<BrainGap[]>` with `BrainGap { key: string; topic: string | null; count: number; lastAskedAt: string; question: string | null }`.
+- `http/brain.ts`: `brainRoutes(app: AppContext)`, mounted with `app.route('/api/staff', brainRoutes(ctx))`. Routes: `GET /clubs/:slug/brain/notes`, `GET /clubs/:slug/brain/queue`, `GET /clubs/:slug/brain/gaps`, `POST /clubs/:slug/brain/notes`, `PATCH /clubs/:slug/brain/notes/:noteId`, `GET /clubs/:slug/brain/notes/:noteId/versions`, `POST /clubs/:slug/brain/notes/:noteId/approve`, `POST /clubs/:slug/brain/notes/:noteId/reject`.
+
+**Tests (`brain-ui.test.ts`):** `approve in one tap` (draft goes live and into the snapshot, queue empties); `edit creates a version`; `gaps list shows unanswered questions` (most frequent first, with the latest question); `writing an answer to a gap closes it`; `a live club's gaps exclude test events`; `a lint failure returns the issues`; `queue ranks drafts by takeovers`; `host gets 403`; `another club's note is 404`. `isolation.test.ts` passes with the brain routes (fixture `notes/:noteId`).
 
 **Migration:** no.
 
@@ -902,27 +945,6 @@ Gate (spec §10): 3 paying clubs; one club live on Instagram; the feed publishes
 ### Track B, Phase 3
 
 | Task | Scope (spec) | Files | Acceptance tests |
-#### Task B19: Brain manager UI (expanded)
-
-**Files:** `http/brain.ts` (router), `brain/gaps.ts` (gap query, reused by B18), `app.ts` (one mount line), `test/helpers/track-b.ts` (fixture `notes/:noteId`), `pages/staff/brain/Brain.tsx`, `pages/staff/Layout.tsx` (one nav item), `apps/web/src/main.tsx` (one route line), test `test/brain-ui.test.ts`.
-
-**Decisions:**
-- All routes are under `/api/staff/clubs/:slug/brain` with `requireClubRole('owner','manager')` (a host or door login is 403). A note id from another club is 404, checked before the body is read.
-- Notes (§6.6): every non-retired note with its type, source, `reviewBy`, `validUntil` and last edit; the page groups them by type. The response carries the latest snapshot's version and token count, with `BRAIN_TOKEN_WARN` and `BRAIN_TOKEN_CAP`.
-- Approval queue: draft notes. Each shows `frontmatter.question` and `frontmatter.hostReply` when present (B18 writes them; B15 drafts from import and onboarding have none), and the title of the note it replaces (`supersedesId`). Ranked by `frontmatter.takeovers` (count of takeovers on the topic, written by B18) descending, then newest first. Until B18 merges every draft has 0 takeovers, so the order is newest first.
-- Approve is one tap: `POST .../notes/:noteId/approve` with no body calls `approveNote`. [Edit] is `PATCH .../notes/:noteId` (`updateNote`, which writes a version row when the body changes) and then approve. [Reject] calls `rejectNote`.
-- A note the manager writes (`POST .../notes`, also [Write an answer] on a gap) is saved **live**: the manager is the approver. With `gapTopic`, the note stores `frontmatter.gapTopic`, which closes that gap.
-- Gaps: `faq.missed` events of the last 30 days, grouped by `props.topic` (or, with no topic, by the lower-cased question text), most frequent first, with the count, the last time asked and the latest question (`raw.text`, written by B16). A gap is closed when a live note has `frontmatter.gapTopic` equal to its key and was approved after the last miss. A live club does not see test events; the demo club does. B16 does not emit `faq.missed` yet, so gaps stay empty until it does.
-- Errors: lint failure 422 `{ error: 'lint', issues, fix }`; over the token cap 409 `{ error: 'over_cap', tokenCount }`; approving a retired note 409 `not_draft`.
-
-**Interfaces:**
-- `brain/gaps.ts`: `listGaps(db, club: Club, now: Date, opts?: { days?: number }): Promise<BrainGap[]>` with `BrainGap { key: string; topic: string | null; count: number; lastAskedAt: string; question: string | null }`.
-- `http/brain.ts`: `brainRoutes(app: AppContext)`, mounted with `app.route('/api/staff', brainRoutes(ctx))`. Routes: `GET /clubs/:slug/brain/notes`, `GET /clubs/:slug/brain/queue`, `GET /clubs/:slug/brain/gaps`, `POST /clubs/:slug/brain/notes`, `PATCH /clubs/:slug/brain/notes/:noteId`, `GET /clubs/:slug/brain/notes/:noteId/versions`, `POST /clubs/:slug/brain/notes/:noteId/approve`, `POST /clubs/:slug/brain/notes/:noteId/reject`.
-
-**Tests (`brain-ui.test.ts`):** `approve in one tap` (draft goes live and into the snapshot, queue empties); `edit creates a version`; `gaps list shows unanswered questions` (most frequent first, with the latest question); `writing an answer to a gap closes it`; `a live club's gaps exclude test events`; `a lint failure returns the issues`; `queue ranks drafts by takeovers`; `host gets 403`; `another club's note is 404`. `isolation.test.ts` passes with the brain routes (fixture `notes/:noteId`).
-
-**Migration:** no.
-
 |---|---|---|---|
 | B20 Cross-club identity map | §14.4: `person_id` across clubs, built on the `identity_map` pairs stored since Phase 1b (the shared LIFF is A4b, the first-use `sub` pair is B5, and the `liff.sendMessages()` device check is in the Phase 1b gate). Adds the phone-hash link and fills `events.person_id` | `data/identity.ts` | same LINE person at two clubs gets one `person_id`; the same phone hash at two clubs links to one `person_id`; removal (B10b) deletes the links |
 | B21 Busyness feed v1 | §14.7: `GET /data/v1/busyness`, 5-step level per club per 30-min bucket relative to capacity, "no data" when inputs are thin, staged model (booking heat → weekday baseline × pace) | `data/busyness.ts`, `http/data.ts` (API key auth for the separate app) | level for every live club on a night whose `nights.status` is not `closed`; demo club never appears; no guest-level field; reads only `first_party` and `pos` origins |

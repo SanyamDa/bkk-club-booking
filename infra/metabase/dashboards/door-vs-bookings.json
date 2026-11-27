@@ -1,0 +1,31 @@
+{
+  "name": "Door counts against bookings",
+  "description": "Spec §14.3, §14.6: door clicker totals against booked and arrived guests.",
+  "collection": "Data dashboard (internal)",
+  "parameters": [
+    {
+      "slug": "dataset",
+      "name": "Dataset",
+      "type": "text",
+      "default": "live",
+      "values": [
+        "live",
+        "demo"
+      ],
+      "description": "live = real clubs (analytics schema); demo = Velora only (analytics_demo schema)"
+    },
+    {
+      "slug": "club",
+      "name": "Club id",
+      "type": "text",
+      "required": false
+    }
+  ],
+  "cards": [
+    {
+      "name": "Door in, booked pax and arrived pax",
+      "display": "bar",
+      "sql": "select * from (select club_id, night_date, door_in, door_out, door_net, booked_pax, arrived_pax from analytics.door_vs_bookings where {{dataset}} = 'live' union all select club_id, night_date, door_in, door_out, door_net, booked_pax, arrived_pax from analytics_demo.door_vs_bookings where {{dataset}} = 'demo') d where true [[and d.club_id = {{club}}]] order by club_id, night_date"
+    }
+  ]
+}

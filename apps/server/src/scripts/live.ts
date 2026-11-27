@@ -79,7 +79,7 @@ function startTunnel(): Promise<string> {
   const ngrokDomain = process.env.NGROK_DOMAIN;
   if (has('cloudflared') && !ngrokDomain) {
     console.log(dim('Starting Cloudflare quick tunnel…'));
-    const p = spawn('cloudflared', ['tunnel', '--url', 'http://localhost:5173', '--no-autoupdate'], { detached: true });
+    const p = spawn('cloudflared', ['tunnel', '--url', 'http://127.0.0.1:5173', '--no-autoupdate'], { detached: true });
     children.push(p);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('cloudflared did not print a URL within 30s')), 30_000);
@@ -99,7 +99,7 @@ function startTunnel(): Promise<string> {
     console.log(dim(`Starting ngrok tunnel${ngrokDomain ? ` on ${ngrokDomain}` : ''}…`));
     const help = spawnSync('ngrok', ['http', '--help']).stdout?.toString() ?? '';
     const domainFlag = ngrokDomain ? [help.includes('--url') ? `--url=${ngrokDomain}` : `--domain=${ngrokDomain}`] : [];
-    const p = spawn('ngrok', ['http', '5173', ...domainFlag, '--log', 'stdout'], { detached: true });
+    const p = spawn('ngrok', ['http', '127.0.0.1:5173', ...domainFlag, '--log', 'stdout'], { detached: true });
     children.push(p);
     let output = '';
     p.stdout?.on('data', (d: Buffer) => (output += d.toString()));

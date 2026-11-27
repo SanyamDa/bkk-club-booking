@@ -39,7 +39,7 @@ export function richMenuRequest(club: Club): messagingApi.RichMenuRequest {
     size: { width: MENU_W, height: MENU_H },
     selected: true,
     name: `${RICH_MENU_PREFIX}:${club.slug}`.slice(0, 300),
-    chatBarText: 'Book a table · จองโต๊ะ',
+    chatBarText: 'Book a table', // LINE limit: 14 characters
     areas: menuCells(club).map((c) => ({
       bounds: { x: c.x, y: 0, width: c.w, height: MENU_H },
       action: c.action,

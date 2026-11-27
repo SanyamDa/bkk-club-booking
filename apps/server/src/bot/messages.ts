@@ -5,6 +5,10 @@ import type { Message } from '../line/gateway.js';
 import { addDays, currentNightDate, formatClock, formatNight } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
 import { t, type Lang } from './i18n.js';
+import type { Links } from './links.js';
+
+/** B4: what a message needs to send the club's map and drinks links through the counted `/r/` redirect. */
+export type TrackedLinks = Pick<Links, 'tracked'>;
 
 type FlexComponent = messagingApi.FlexComponent;
 type QuickReplyItem = messagingApi.QuickReplyItem;
@@ -72,18 +76,24 @@ function secondaryButton(action: messagingApi.Action): FlexComponent {
 
 // ---------- Menus ----------
 
-export function menuQuickReplies(club: Club, lang: Lang): QuickReplyItem[] {
+/**
+ * B4: postbacks that start or route a booking carry an entry tag `s=<where>_<action>` (spec §14.2
+ * "Entry points are tagged"): `qr_*` on the menu quick replies, `greet_*` on the greeting.
+ * In-flow buttons ("Another night", "Change") carry `s=other_night` / `s=change` and keep the attempt.
+ */
+export function menuQuickReplies(club: Club, lang: Lang, links: TrackedLinks, where: 'qr' | 'greet' = 'qr'): QuickReplyItem[] {
   return [
-    qr(postback(t(lang, 'bookTable'), { a: 'book' })),
-    qr(postback(t(lang, 'myBooking'), { a: 'my' })),
-    ...(club.settings.drinksMenuUrl ? [qr({ type: 'uri', label: t(lang, 'drinksMenu'), uri: club.settings.drinksMenuUrl })] : []),
-    qr({ type: 'uri', label: t(lang, 'location'), uri: club.settings.mapUrl }),
-    qr(postback(t(lang, 'talkToHost'), { a: 'host' })),
+    qr(postback(t(lang, 'bookTable'), { a: 'book', s: `${where}_book` })),
+    qr(postback(t(lang, 'myBooking'), { a: 'my', s: `${where}_my` })),
+    // B4: LINE opens these without telling us, so they go through the counted `/r/` redirect.
+    ...(club.settings.drinksMenuUrl ? [qr({ type: 'uri', label: t(lang, 'drinksMenu'), uri: links.tracked(club, 'drinks', `${where}_drinks`) })] : []),
+    qr({ type: 'uri', label: t(lang, 'location'), uri: links.tracked(club, 'map', `${where}_location`) }),
+    qr(postback(t(lang, 'talkToHost'), { a: 'host', s: `${where}_host` })),
     qr(postback(t(lang, 'myData'), { a: 'privacy' })), // B10b
   ];
 }
 
-export const menu = (club: Club, lang: Lang): Message => text(t(lang, 'menuPrompt'), menuQuickReplies(club, lang));
+export const menu = (club: Club, lang: Lang, links: TrackedLinks): Message => text(t(lang, 'menuPrompt'), menuQuickReplies(club, lang, links));
 
 /** B10b: the "My data" menu item: stop promotions or ask for removal (spec §5.5, §14.9). */
 export const myData = (lang: Lang): Message =>
@@ -96,9 +106,12 @@ export const myData = (lang: Lang): Message =>
 export const removeConfirm = (lang: Lang): Message =>
   text(t(lang, 'removeConfirmPrompt'), [qr(postback(t(lang, 'removeConfirm'), { a: 'remove_confirm' }))]);
 
-export function greeting(club: Club, lang: Lang): Message[] {
+/** B4: the one-line data notice with its link (spec §5.5); the club's name is inserted. */
+export const dataNotice = (club: Club, lang: Lang, url: string): Message => text(t(lang, 'dataNotice', { club: club.name, url }));
+
+export function greeting(club: Club, lang: Lang, links: TrackedLinks): Message[] {
   const rules = club.settings.rules[lang].map((r) => `• ${r}`).join('\n');
-  return [text(`${club.settings.greeting[lang]}\n\n${rules}`, menuQuickReplies(club, lang))];
+  return [text(`${club.settings.greeting[lang]}\n\n${rules}`, menuQuickReplies(club, lang, links, 'greet'))];
 }
 
 // ---------- Booking steps ----------
@@ -163,15 +176,17 @@ export function tablesCarousel(club: Club, lang: Lang, options: TableOption[], n
       altText: t(lang, 'tablesIntro', { night: formatNight(nightDate, lang), pax: paxLabel }),
       contents: { type: 'carousel', contents: bubbles },
       quickReply: {
-        items: [qr(postback(t(lang, 'otherNight'), { a: 'book' })), qr(postback(t(lang, 'talkToHost'), { a: 'host' }))],
+        items: [qr(postback(t(lang, 'otherNight'), { a: 'book', s: 'other_night' })), qr(postback(t(lang, 'talkToHost'), { a: 'host' }))],
       },
     },
   ];
 }
 
-export function noTables(lang: Lang, nightDate: string, paxLabel: string): Message {
+/** No table fits. With `rangeKey` (B22), the first chip is [Join waitlist] for that night and range. */
+export function noTables(lang: Lang, nightDate: string, paxLabel: string, rangeKey?: string): Message {
   return text(t(lang, 'noTables', { night: formatNight(nightDate, lang), pax: paxLabel }), [
-    qr(postback(t(lang, 'otherNight'), { a: 'book' })),
+    ...(rangeKey ? [qr(postback(t(lang, 'joinWaitlist'), { a: 'waitlist', d: nightDate, r: rangeKey }))] : []),
+    qr(postback(t(lang, 'otherNight'), { a: 'book', s: 'other_night' })),
     qr(postback(t(lang, 'talkToHost'), { a: 'host' })),
   ]);
 }
@@ -218,7 +233,7 @@ export function review(club: Club, lang: Lang, view: BookingView): Message {
       ],
       [
         primaryButton(postback(confirmLabel, { a: 'confirm', b: view.booking.id }), accent),
-        secondaryButton(postback(t(lang, 'change'), { a: 'book' })),
+        secondaryButton(postback(t(lang, 'change'), { a: 'book', s: 'change' })),
       ],
       { title: t(lang, 'reviewTitle'), accent },
     ),
@@ -258,7 +273,7 @@ export function paymentLink(club: Club, lang: Lang, view: BookingView, payUrl: s
   };
 }
 
-export function confirmation(club: Club, lang: Lang, view: BookingView, passImageUrl: string): Message {
+export function confirmation(club: Club, lang: Lang, view: BookingView, passImageUrl: string, links: TrackedLinks): Message {
   const b = view.booking;
   const paid = view.deposit?.status === 'verified' ? view.deposit.amountSatang : 0;
   return {
@@ -276,7 +291,7 @@ export function confirmation(club: Club, lang: Lang, view: BookingView, passImag
           { type: 'text', text: t(lang, 'arriveBy', { time: club.settings.arrivalBy }), size: 'xs', color: C.muted, wrap: true },
           { type: 'text', text: `${t(lang, 'showAtDoor')} · ${b.refCode}`, size: 'xs', color: C.muted, wrap: true },
         ],
-        [secondaryButton({ type: 'uri', label: t(lang, 'location'), uri: club.settings.mapUrl })],
+        [secondaryButton({ type: 'uri', label: t(lang, 'location'), uri: links.tracked(club, 'map', 'confirm_location') })],
         { title: t(lang, 'confirmedTitle'), accent: club.settings.accentColor },
       ),
       hero: { type: 'image', url: passImageUrl, size: 'full', aspectRatio: '1:1', aspectMode: 'fit', backgroundColor: '#FFFFFF' },
@@ -287,20 +302,107 @@ export function confirmation(club: Club, lang: Lang, view: BookingView, passImag
 export function inProgress(lang: Lang, code: string, nightDate: string, bookingId: string): Message {
   return text(t(lang, 'inProgress', { code, night: formatNight(nightDate, lang) }), [
     qr(postback(t(lang, 'continueBooking'), { a: 'continue', b: bookingId })),
-    qr(postback(t(lang, 'startOver'), { a: 'restart' })),
+    qr(postback(t(lang, 'startOver'), { a: 'restart', s: 'restart' })),
   ]);
 }
 
-export function alreadyBooked(club: Club, lang: Lang, view: BookingView): Message {
+export function alreadyBooked(club: Club, lang: Lang, view: BookingView, links: TrackedLinks): Message {
   const status = t(lang, `status_${view.booking.status}` as 'status_confirmed');
   return text(
     t(lang, 'alreadyBooked', { code: view.table.code, night: formatNight(view.booking.nightDate, lang), status }),
-    [qr(postback(t(lang, 'talkToHost'), { a: 'host' })), ...menuQuickReplies(club, lang).slice(2)],
+    [qr(postback(t(lang, 'talkToHost'), { a: 'host' })), ...menuQuickReplies(club, lang, links).slice(2)],
   );
 }
 
 export const plain = text;
 export const quickPostback = (label: string, data: Record<string, string>) => qr(postback(label, data));
+
+// ---------- B22: waitlist and bottle pre-orders ----------
+
+const rangeLabel = (key: string) => {
+  const r = PAX_RANGES.find((x) => x.key === key);
+  return r ? (r.key === '13+' ? '13+' : `${r.min}–${r.max}`) : key;
+};
+
+/** After a waitlist join (or a repeated one). */
+export function waitlistJoined(lang: Lang, nightDate: string, rangeKey: string, entryId: string, already = false): Message {
+  return text(t(lang, already ? 'waitlistAlready' : 'waitlistJoined', { night: formatNight(nightDate, lang), pax: rangeLabel(rangeKey) }), [
+    qr(postback(t(lang, 'waitlistLeave'), { a: 'waitlist_leave', w: entryId })),
+    qr(postback(t(lang, 'otherNight'), { a: 'book', s: 'other_night' })),
+    qr(postback(t(lang, 'talkToHost'), { a: 'host' })),
+  ]);
+}
+
+/** The push sent when a table frees up for a waiting guest. */
+export function waitlistOffer(lang: Lang, nightDate: string, rangeKey: string, entryId: string, minutes: number): Message {
+  return text(t(lang, 'waitlistOffer', { night: formatNight(nightDate, lang), pax: rangeLabel(rangeKey), minutes }), [
+    qr(postback(t(lang, 'waitlistBook'), { a: 'waitlist_book', w: entryId })),
+    qr(postback(t(lang, 'waitlistLeave'), { a: 'waitlist_leave', w: entryId })),
+  ]);
+}
+
+/** Sent after a confirmation when the club has a bottle menu. */
+export function preorderPrompt(lang: Lang, bookingId: string): Message {
+  return text(t(lang, 'preorderPrompt'), [qr(postback(t(lang, 'preorderBottles'), { a: 'bottles', b: bookingId }))]);
+}
+
+export interface BottleCard {
+  id: string;
+  name: string;
+  nameTh: string;
+  priceSatang: number;
+}
+
+export function bottlesCarousel(club: Club, lang: Lang, items: BottleCard[], bookingId: string): Message {
+  const accent = club.settings.accentColor;
+  const bubbles = items.slice(0, 10).map((i) =>
+    bubble(
+      [
+        { type: 'text', text: lang === 'th' ? i.nameTh : i.name, size: 'lg', weight: 'bold', color: C.text, wrap: true },
+        { type: 'text', text: formatBaht(i.priceSatang), size: 'md', color: C.muted },
+      ],
+      [primaryButton(postback(t(lang, 'preorderAdd'), { a: 'bottle_add', b: bookingId, i: i.id }, `+1 ${i.name}`), accent)],
+    ),
+  );
+  return {
+    type: 'flex',
+    altText: t(lang, 'preorderBottles'),
+    contents: { type: 'carousel', contents: bubbles },
+    quickReply: { items: [qr(postback(t(lang, 'preorderDone'), { a: 'bottle_done', b: bookingId }))] },
+  };
+}
+
+export interface PreorderView {
+  lines: { name: string; nameTh: string; qty: number; lineTotalSatang: number }[];
+  totalSatang: number;
+}
+
+const preorderLines = (lang: Lang, p: PreorderView) =>
+  p.lines.map((l) => `${l.qty}× ${lang === 'th' ? l.nameTh : l.name} · ${formatBaht(l.lineTotalSatang)}`).join('\n');
+
+export function preorderSummary(lang: Lang, view: BookingView, p: PreorderView): Message {
+  const b = view.booking;
+  const body = p.lines.length
+    ? t(lang, 'preorderSummary', { code: view.table.code, night: formatNight(b.nightDate, lang), lines: preorderLines(lang, p), total: formatBaht(p.totalSatang) })
+    : t(lang, 'preorderEmpty');
+  return text(body, [
+    qr(postback(t(lang, 'preorderAddMore'), { a: 'bottles', b: b.id })),
+    ...(p.lines.length ? [qr(postback(t(lang, 'preorderClear'), { a: 'bottle_clear', b: b.id }))] : []),
+    qr(postback(t(lang, 'preorderDone'), { a: 'bottle_done', b: b.id })),
+  ]);
+}
+
+export function staffPreorder(view: BookingView, p: PreorderView): Message {
+  const b = view.booking;
+  return text(
+    [
+      '🍾 Pre-order / สั่งขวดล่วงหน้า',
+      `${view.table.code} · ${formatNight(b.nightDate, 'en')} · ${b.refCode}`,
+      p.lines.length ? preorderLines('en', p) : 'Cleared / ยกเลิกรายการ',
+      `Total ${formatBaht(p.totalSatang)} (not charged)`,
+    ].join('\n'),
+  );
+}
 
 // ---------- Staff alerts (always Thai + English in one message) ----------
 

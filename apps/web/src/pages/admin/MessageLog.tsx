@@ -49,7 +49,7 @@ export function MessageLog() {
                   <td>
                     <span className={`chip ${m.deliveryStatus === 'failed' ? 's-rejected' : m.deliveryStatus === 'sent' ? 's-confirmed' : ''}`}>{m.deliveryStatus ?? '—'}</span>
                   </td>
-                  <td style={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.payload?.text ?? m.kind ?? ''}</td>
+                  <td style={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.payload?.text ?? m.payload?.message?.text ?? m.payload?.postback?.data ?? m.kind ?? ''}</td>
                   <td className="error">{typeof m.error === 'string' ? m.error : m.error ? JSON.stringify(m.error) : ''}</td>
                   <td>{m.conversationId ? <Link className="mono" to={`/admin/clubs/${slug}/conversations/${m.conversationId}`}>open</Link> : m.guestId ? <Link to={`/admin/events?club=${slug}&guest=${m.guestId}`}>guest events</Link> : ''}</td>
                 </tr>

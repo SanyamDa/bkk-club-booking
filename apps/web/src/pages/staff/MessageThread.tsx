@@ -7,7 +7,12 @@ export interface ThreadMessage {
 
 /** Plain-text summary of any LINE message, for staff views. */
 export function describe(m: ThreadMessage): string {
-  const p = m.payload ?? {};
+  const raw = m.payload ?? {};
+  // B4: inbound LINE rows hold the whole event (`message.text`, `postback.data`, `postback.params`).
+  const p =
+    m.direction === 'in'
+      ? { ...raw, text: raw.text ?? raw.message?.text, data: raw.data ?? raw.postback?.data, params: raw.params ?? raw.postback?.params }
+      : raw;
   if (m.direction === 'in') {
     if (m.kind === 'text') return p.text;
     if (m.kind === 'postback') {

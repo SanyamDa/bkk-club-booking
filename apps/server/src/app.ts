@@ -16,9 +16,11 @@ import { onboardPublicRoutes } from './http/admin/onboarding.js';
 import { authRoutes } from './http/auth.js';
 import { integrationRoutes } from './http/integrations.js';
 import { devRoutes } from './http/dev.js';
+import { crowdRatingRoutes } from './http/door.js';
 import type { AppContext } from './http/context.js';
 import { liffRoutes } from './http/liff.js';
 import { mediaRoutes } from './http/media.js';
+import { privacyRoutes, redirectRoutes } from './http/redirect.js';
 import { staffRoutes } from './http/staff.js';
 import { inviteAcceptRoutes } from './http/team.js';
 import { webhookRoutes } from './http/webhook.js';
@@ -130,10 +132,13 @@ export function createApp(
   app.get('/health', (c) => c.json({ ok: true }));
   app.route('/line/webhook', webhookRoutes(ctx));
   app.route('/media', mediaRoutes(ctx));
+  app.route('/r', redirectRoutes(ctx)); // B4: counted redirects (link.opened) and promoter links
+  app.route('/privacy', privacyRoutes()); // B4: the data notice page (spec §5.5)
   app.route('/api/liff', liffRoutes(ctx));
   app.route('/api/auth/invites', inviteAcceptRoutes(ctx)); // A8
   app.route('/api/auth', authRoutes(ctx));
   app.route('/api/staff', staffRoutes(ctx));
+  app.route('/api/staff', crowdRatingRoutes(ctx)); // B12: door crowd rating (B11 adds the door screen in http/door.ts)
   app.route('/api/admin', adminRoutes(ctx));
   app.route('/api/admin/demo', demoRoutes(ctx)); // B7: Velora reset and fast-forward (platform admin)
   app.route('/api/onboard', onboardPublicRoutes(ctx)); // A17 pre-call form (token in the path, hashed at rest)

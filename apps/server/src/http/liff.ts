@@ -5,7 +5,8 @@ import { BookingError, getBookingView, getBookingViewByRef, submitDetails, type 
 import { sendReview } from '../bot/flow.js';
 import { langOf, t } from '../bot/i18n.js';
 import { checkDetailsToken } from '../bot/links.js';
-import { linkLiffSub } from '../data/identity.js';
+import { emit } from '../data/events.js';
+import { linkLiffSub, linkPhone, phoneHashKey } from '../data/identity.js';
 import { clubs, type Club } from '../db/schema.js';
 import { SIM_USER_PREFIX } from '../line/gateway.js';
 import { formatClock, formatNight } from '../lib/time.js';
@@ -38,6 +39,7 @@ type Found = { view: BookingView; club: Club };
 export function liffRoutes(app: AppContext) {
   const r = new Hono();
   const { db } = app.deps;
+  const phoneKey = phoneHashKey(app.config.CREDENTIALS_KEY);
 
   /** The booking behind a signed details link: 404 for a bad signature, 410 `link_expired` past its expiry. */
   async function load(c: Context, ref: string, token: string | undefined): Promise<Found | Response> {
@@ -86,6 +88,24 @@ export function liffRoutes(app: AppContext) {
     const { view, club } = found;
     const lang = langOf(view.guest.lang);
     const b = view.booking;
+    // B4: the details link opens the LIFF app directly (a 302 to liff.line.me is unproven on a device),
+    // so its tap is counted here, at the first read of the booking; the attempt's entry tag comes along.
+    await emit(db, {
+      clubId: club.id,
+      type: 'link.opened',
+      occurredAt: app.deps.now(),
+      actorType: 'guest',
+      channel: 'line',
+      dataOrigin: 'first_party',
+      guestId: b.guestId,
+      bookingId: b.id,
+      tableId: b.tableId,
+      nightDate: b.nightDate,
+      attemptId: b.attemptId ?? undefined,
+      props: { kind: 'details' },
+      isTest: b.isTest,
+      dedupeKey: `link.opened:details:${b.id}`,
+    });
     return c.json({
       lang,
       club: { name: club.name, accentColor: club.settings.accentColor, rules: club.settings.rules[lang], arrivalBy: club.settings.arrivalBy, liffId: club.liffId },
@@ -126,6 +146,10 @@ export function liffRoutes(app: AppContext) {
     } catch (err) {
       if (err instanceof BookingError) return c.json({ error: err.code }, 409);
       throw err;
+    }
+    // Cross-club phone link (B20, §14.4): only the number typed in our form, never for a test guest.
+    if (!view.guest.isTest) {
+      await linkPhone(db, { clubId: club.id, guestId: view.guest.id, phone: input.phone }, phoneKey, app.deps.now());
     }
     // Inside LINE, the page sends "Details sent · REF" from the guest's own chat, so our reply is free.
     // Outside LINE (or if that fails), push the summary instead.

@@ -1,4 +1,5 @@
 import { expireStaleHolds } from '../bookings/service.js';
+import { runWaitlist } from '../bookings/waitlist.js';
 import type { AppContext } from '../http/context.js';
 import { replayUnprocessed } from '../http/webhook.js';
 import { sweepGrantInboxUsers } from '../integrations/chatwoot/provision.js';
@@ -10,6 +11,7 @@ import { runNightlyCheck } from './nightly-check.js';
 import { runNightsJob } from './nights.js';
 import { runRemovalRequests } from '../data/removal.js';
 import { runRetention } from './retention.js';
+import { runCrowdPrompts, runSnapshots } from './snapshots.js';
 import { Scheduler } from './scheduler.js';
 
 const MINUTE = 60_000;
@@ -27,6 +29,11 @@ export function buildScheduler(ctx: AppContext, now: () => Date): Scheduler {
     const expired = await expireStaleHolds(db, at);
     for (const b of expired) await ctx.notifier.holdExpired(b);
   });
+  // B22: offer freed tables to waitlisted guests, expire old offers and past nights.
+  s.register('waitlist', MINUTE, async (at) => {
+    const offers = await runWaitlist(db, at);
+    for (const o of offers) await ctx.notifier.waitlistOffer(o);
+  });
   s.register('nightly-check', 15 * MINUTE, async (at) => {
     await runNightlyCheck(db, at);
   });
@@ -38,6 +45,7 @@ export function buildScheduler(ctx: AppContext, now: () => Date): Scheduler {
   s.register('chatwoot-grant-sweep', MINUTE, async (at) => {
     await sweepGrantInboxUsers(db, ctx.chatwoot, at, ctx.deps.log); // A13
   });
+  s.register('chatwoot-mirror', 5_000, async (at) => (await import('../integrations/chatwoot/bridge.js')).mirrorAll(ctx, at)); // A14
   s.register('club-report', 15 * MINUTE, (at) => sendWeeklyReports(ctx, at)); // A16b
   s.register('handoff-timeout', MINUTE, async (at) => {
     await runHandoffTimeouts(db, at); // B14b
@@ -51,6 +59,13 @@ export function buildScheduler(ctx: AppContext, now: () => Date): Scheduler {
     await runRemovalRequests(db, at, ctx.deps.uploadsDir, ctx.deps.log);
   });
   s.register('retention', DAY, (at) => runRetention(db, at, ctx.deps.uploadsDir));
+  // B12: occupancy snapshots at each lead bucket, and the hourly "how full now?" (spec §14.3).
+  s.register('snapshots', 5 * MINUTE, async (at) => {
+    await runSnapshots(db, at);
+  });
+  s.register('crowd-prompt', 5 * MINUTE, async (at) => {
+    await runCrowdPrompts(db, at, (club, nightDate) => ctx.notifier.crowdPrompt(club, nightDate));
+  });
   return s;
 }
 

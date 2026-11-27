@@ -97,6 +97,7 @@ export function lineWizardRoutes(app: AppContext) {
         clients: found.clients,
         login: found.login,
         publicUrl: app.config.PUBLIC_URL,
+        links: app.deps.links,
         sampleMessages: await sampleMessages(db, fresh, app.deps.links, now),
       });
     } catch (err) {
@@ -223,6 +224,7 @@ export function lineWizardRoutes(app: AppContext) {
         clients: found.clients,
         login: found.login,
         publicUrl: app.config.PUBLIC_URL,
+        links: app.deps.links,
         sampleMessages: await sampleMessages(db, fresh, app.deps.links, now),
         refreshRichMenu: true,
         keepOldRichMenu: true,

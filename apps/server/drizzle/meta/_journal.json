@@ -43,6 +43,20 @@
       "when": 1795811824351,
       "tag": "0005_b6_test_rows",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795817354588,
+      "tag": "0006_b22_waitlist_preorders",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795818981253,
+      "tag": "0007_b4_notices_once",
+      "breakpoints": true
     }
   ]
 }

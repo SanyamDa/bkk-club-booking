@@ -203,7 +203,11 @@ export const notices = pgTable(
     acceptedAt: timestamp('accepted_at', { withTimezone: true }),
     withdrawnAt: timestamp('withdrawn_at', { withTimezone: true }),
   },
-  (t) => [index('notices_club_guest').on(t.clubId, t.guestId)],
+  (t) => [
+    index('notices_club_guest').on(t.clubId, t.guestId),
+    // B4: one row per notice version shown on a channel, so a raced first contact shows it once.
+    uniqueIndex('notices_once').on(t.clubId, t.guestId, t.purpose, t.textVersion, t.channel),
+  ],
 );
 
 export const handoffEpisodes = pgTable(

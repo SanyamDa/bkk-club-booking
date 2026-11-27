@@ -60,6 +60,13 @@ export interface ClubSettings {
   address: string;
   mapUrl: string;
   drinksMenuUrl?: string;
+  /**
+   * B19b: the club's own complaint and safety words (Thai and English, spec §6.4, §8.1). Unset or
+   * empty = the platform list `DEFAULT_URGENT_WORDS` in `bot/alerts.ts`.
+   */
+  urgentWords?: string[];
+  /** B12: local hours (0-23) the "how full now?" prompt goes to the staff group. Unset = 22, 23, 0, 1. */
+  crowdPromptHours?: number[];
 }
 
 export const clubs = pgTable('clubs', {
@@ -273,6 +280,12 @@ export interface ConversationState {
   paxRange?: string;
   /** B3: the pause (`club:<bot_paused_at>` or `global:<updated_at>`) the staff group was last alerted about. */
   pauseAlertedFor?: string;
+  /** B4: the entry tag (`s=`) of the current booking attempt, copied to `events.source`. */
+  entry?: string;
+  /** B4: the current booking attempt, created where the attempt starts; copied to `bookings.attempt_id`. */
+  attemptId?: string;
+  /** B4: promoter code carried in from `/r/p/<slug>/<code>`; the hold is attributed to it. */
+  promoterCode?: string;
 }
 
 export const conversations = pgTable(
@@ -365,6 +378,67 @@ export const auditLog = pgTable(
   (t) => [index('audit_entity').on(t.entity, t.entityId)],
 );
 
+/** B22: a club's bottle menu. Prices are integer satang; a pre-order copies the price at order time. */
+export const menuItems = pgTable(
+  'menu_items',
+  {
+    id: text('id').primaryKey(),
+    clubId: text('club_id').notNull().references(() => clubs.id),
+    name: text('name').notNull(),
+    nameTh: text('name_th').notNull(),
+    priceSatang: integer('price_satang').notNull(),
+    active: boolean('active').notNull().default(true),
+    sort: integer('sort').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('menu_items_club').on(t.clubId)],
+);
+
+/** B22: one line of a booking's bottle pre-order. A note for the bar, not a charge. */
+export const bookingPreorders = pgTable(
+  'booking_preorders',
+  {
+    id: text('id').primaryKey(),
+    clubId: text('club_id').notNull().references(() => clubs.id),
+    bookingId: text('booking_id').notNull().references(() => bookings.id),
+    menuItemId: text('menu_item_id').notNull().references(() => menuItems.id),
+    qty: integer('qty').notNull(),
+    /** The menu price when the line was ordered. */
+    unitPriceSatang: integer('unit_price_satang').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('booking_preorders_booking_item').on(t.bookingId, t.menuItemId), index('booking_preorders_club').on(t.clubId)],
+);
+
+export type WaitlistStatus = 'waiting' | 'offered' | 'booked' | 'expired' | 'cancelled';
+
+/** B22: a guest waiting for a table on a full night. */
+export const waitlistEntries = pgTable(
+  'waitlist_entries',
+  {
+    id: text('id').primaryKey(),
+    clubId: text('club_id').notNull().references(() => clubs.id),
+    guestId: text('guest_id').notNull().references(() => guests.id),
+    nightDate: text('night_date').notNull(),
+    paxRange: text('pax_range').notNull(),
+    status: text('status').$type<WaitlistStatus>().notNull().default('waiting'),
+    offeredAt: timestamp('offered_at', { withTimezone: true }),
+    offerExpiresAt: timestamp('offer_expires_at', { withTimezone: true }),
+    bookingId: text('booking_id').references(() => bookings.id),
+    endedAt: timestamp('ended_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('waitlist_one_open_per_guest_night')
+      .on(t.guestId, t.nightDate)
+      .where(sql`${t.status} in ('waiting','offered')`),
+    index('waitlist_club_night').on(t.clubId, t.nightDate),
+  ],
+);
+
+export type MenuItem = typeof menuItems.$inferSelect;
+export type BookingPreorder = typeof bookingPreorders.$inferSelect;
+export type WaitlistEntry = typeof waitlistEntries.$inferSelect;
 export type Club = typeof clubs.$inferSelect;
 export type Zone = typeof zones.$inferSelect;
 export type Table = typeof tables.$inferSelect;

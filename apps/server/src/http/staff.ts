@@ -45,6 +45,7 @@ import type { AppContext } from './context.js';
 import { staffAlertRoutes } from './staff-alerts.js';
 import { staffInboxRoutes } from './staff-inbox.js';
 import { staffCrmRoutes } from './staff-crm.js';
+import { staffExtrasRoutes } from './staff-extras.js';
 import { staffPromoterRoutes } from './staff-promoters.js';
 import { staffPosRoutes } from './staff-pos.js';
 import { staffReportRoutes } from './staff-report.js';
@@ -86,6 +87,7 @@ export function staffRoutes(app: AppContext) {
   r.route('/', staffInboxRoutes(app)); // A13 Chatwoot inbox SSO and booking panel
   r.route('/', staffPromoterRoutes(app)); // A20a promoters, attribution, promoter report
   r.route('/', staffCrmRoutes(app)); // A20c guest CRM and VIP tags
+  r.route('/', staffExtrasRoutes(app)); // B22 bottle menu, pre-orders, waitlist
 
   /** A staff-surface event for the club in the URL, attributed to the signed-in person. */
   function staffEvent(c: StaffContext, e: Omit<EventInput, 'clubId' | 'occurredAt' | 'actorType' | 'actorId' | 'dataOrigin' | 'isTest'>) {
@@ -415,6 +417,7 @@ export function staffRoutes(app: AppContext) {
       club,
       clients,
       publicUrl: app.config.PUBLIC_URL,
+      links: app.deps.links,
       sampleMessages: await sampleMessages(db, club, app.deps.links, app.deps.now()),
       refreshRichMenu: Boolean(refreshMenu),
     });

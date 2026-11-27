@@ -29,7 +29,10 @@ export function normalizeCode(code: string): string {
   return c;
 }
 
-/** The promoter's booking link. B's `http/redirect.ts` serves `/r/p/:slug/:code` (requested in the sync file). */
+/**
+ * The promoter's booking link, served by `http/redirect.ts` (B4): the tap is counted, the guest lands
+ * in the club's LINE chat with a pre-filled promo text, and the bot attributes the hold (`via: 'link'`).
+ */
 export function promoterLink(publicUrl: string, club: Pick<Club, 'slug'>, code: string): string {
   return `${publicUrl.replace(/\/$/, '')}/r/p/${encodeURIComponent(club.slug)}/${encodeURIComponent(code)}`;
 }
@@ -56,6 +59,12 @@ export async function createPromoter(
 
 export async function getPromoter(db: Db, clubId: string, id: string): Promise<Promoter | undefined> {
   return db.query.promoters.findFirst({ where: and(eq(promoters.clubId, clubId), eq(promoters.id, id)) });
+}
+
+/** The club's enabled promoter with this code (any case), if any (B4: the promoter-link text). */
+export async function activePromoterByCode(db: Db, clubId: string, code: string): Promise<Promoter | undefined> {
+  const found = await db.query.promoters.findFirst({ where: and(eq(promoters.clubId, clubId), eq(promoters.code, code.trim().toLowerCase())) });
+  return found && !found.disabledAt ? found : undefined;
 }
 
 export async function updatePromoter(

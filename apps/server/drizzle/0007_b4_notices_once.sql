@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "notices_once" ON "notices" USING btree ("club_id","guest_id","purpose","text_version","channel");

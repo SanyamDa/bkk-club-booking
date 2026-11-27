@@ -95,6 +95,7 @@ export function StaffLayout() {
           <NavLink to="/staff/report">Report</NavLink>
           <NavLink to="/staff/guests">Guests</NavLink>
           <NavLink to="/staff/promoters">Promoters</NavLink>
+          <NavLink to="/staff/extras">Bottles</NavLink>
           <NavLink to="/staff/settings">Setup</NavLink>
           <NavLink to="/staff/team">Team</NavLink>
           {club && <OpenInboxButton club={club} />}

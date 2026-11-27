@@ -2,6 +2,7 @@ import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { alerts, clubAlertSettings, clubs, type Alert, type AlertLevel, type Club } from '../db/schema.js';
 import { newId } from '../lib/util.js';
+import { isFeatureOn } from './features.js';
 
 export type { AlertLevel };
 
@@ -78,6 +79,8 @@ export async function raiseAlert(db: Db, input: AlertInput, now: Date): Promise<
   const toLine = input.level === 'urgent' || (input.level === 'info' && (await infoToLine(db, input.clubId)));
   const sender = senders.get(db);
   if (!toLine || !sender) return;
+  // A17b switch: the founder can turn the staff-group copy off per club; the feed row stays.
+  if (!(await isFeatureOn(db, input.clubId, 'alerts_line'))) return;
   const club = await db.query.clubs.findFirst({ where: eq(clubs.id, input.clubId) });
   if (!club) return;
   try {

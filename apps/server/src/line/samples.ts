@@ -95,8 +95,8 @@ export async function sampleMessages(db: Db, club: Club, links: Links, now: Date
   const out: Message[] = [];
   for (const lang of ['en', 'th'] as const) {
     out.push(
-      ...M.greeting(club, lang),
-      M.menu(club, lang),
+      ...M.greeting(club, lang, links),
+      M.menu(club, lang, links),
       M.askNight(club, lang, nights, now),
       M.askPax(lang, night),
       ...M.tablesCarousel(club, lang, options, night, '5–8'),
@@ -105,9 +105,9 @@ export async function sampleMessages(db: Db, club: Club, links: Links, now: Date
       M.review(club, lang, view),
       ...M.payment(club, lang, view, qr),
       ...M.payment(club, lang, view, null),
-      M.confirmation(club, lang, view, links.pass(booking)),
+      M.confirmation(club, lang, view, links.pass(booking), links),
       M.inProgress(lang, option.table.code, night, booking.id),
-      M.alreadyBooked(club, lang, view),
+      M.alreadyBooked(club, lang, view, links),
     );
   }
   out.push(M.staffNewBooking(view, 'confirmed'), M.staffNewBooking(view, 'review'), M.staffHandoff('Sample Guest', 'Guest tapped "Talk to a host"'));

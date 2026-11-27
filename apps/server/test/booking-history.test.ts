@@ -221,8 +221,8 @@ describe('scheduler (B2)', () => {
     const { ctx: app } = createApp(testConfig(), db, { bot: { now: () => now, log: () => {} } });
     expect(buildScheduler(app, () => now).names().sort()).toEqual(
       [
-        'alert-checks', 'brain-expiry', 'chatwoot-grant-sweep', 'club-report', 'handoff-timeout', 'hold-expiry', 'nightly-check',
-        'nights', 'removal', 'retention',
+        'alert-checks', 'brain-expiry', 'chatwoot-grant-sweep', 'chatwoot-mirror', 'club-report', 'handoff-timeout', 'hold-expiry', 'nightly-check',
+        'nights', 'removal', 'retention', 'snapshots', 'crowd-prompt', 'waitlist',
       ].sort(),
     );
   });

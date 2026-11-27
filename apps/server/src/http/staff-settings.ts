@@ -54,6 +54,7 @@ export const SETTINGS_FIELD_CODES: Record<string, string> = {
   rules: 'rules',
   address: 'address',
   drinksMenuUrl: 'menu',
+  urgentWords: 'words',
   greeting: 'greeting',
   mapUrl: 'map',
 };
@@ -69,6 +70,8 @@ const settingsBody = z
     rules: z.object({ en: z.array(z.string().trim().min(1).max(300)).max(30), th: z.array(z.string().trim().min(1).max(300)).max(30) }),
     address: z.string().trim().max(300),
     drinksMenuUrl: z.string().url().max(2000),
+    // B19b: complaint and safety words (§6.4); an empty list falls back to the platform list.
+    urgentWords: z.array(z.string().trim().min(2).max(60)).max(200),
   })
   .partial()
   .strict()

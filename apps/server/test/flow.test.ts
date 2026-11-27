@@ -1,25 +1,13 @@
 import { createHmac } from 'node:crypto';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { detectIntent } from '../src/bot/intents.js';
-import type { Config } from '../src/config.js';
 import { bookings } from '../src/db/schema.js';
 import { FRIDAY, FRIDAY_AFTERNOON, setupDb } from './helpers.js';
+import { staffCookie as loginStaff, staffUrl, testConfig } from './helpers/track-a.js';
 
-const config: Config = {
-  API_PORT: 0,
-  PUBLIC_URL: 'http://localhost:5173',
-  DATABASE_URL: undefined,
-  DATA_DIR: mkdtempSync(join(tmpdir(), 'club-test-')),
-  APP_SECRET: 'test-secret-test-secret-test-secret',
-  STAFF_PASSWORD: 'staffpass',
-  DEV_SIMULATOR: true,
-  NODE_ENV: 'test',
-};
+const config = testConfig({ PUBLIC_URL: 'http://localhost:5173', DEV_SIMULATOR: true });
 
 // Smallest valid JPEG header is enough: the bot sniffs magic bytes.
 const FAKE_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70, 0, 1]).toString('base64');
@@ -33,7 +21,7 @@ let clock: Date;
 beforeEach(async () => {
   ctx = await setupDb();
   clock = FRIDAY_AFTERNOON;
-  app = createApp(config, ctx.db, { now: () => clock, log: () => {} });
+  app = createApp(config, ctx.db, { bot: { now: () => clock, log: () => {} } });
 });
 afterEach(async () => {
   await ctx.close();
@@ -58,11 +46,7 @@ async function lastOut(userId: string): Promise<any> {
   const out = (await transcript(userId)).filter((m) => m.direction === 'out');
   return out[out.length - 1]!.payload;
 }
-async function staffCookie() {
-  const res = await req('/api/staff/login', json({ password: 'staffpass' }));
-  expect(res.status).toBe(200);
-  return res.headers.get('set-cookie')!.split(';')[0]!;
-}
+const staffCookie = () => loginStaff(app, ctx.club);
 
 describe('guest booking flow over LINE', () => {
   it('goes from "book a table" to a confirmed booking', async () => {
@@ -112,9 +96,9 @@ describe('guest booking flow over LINE', () => {
 
     // Staff approve in the dashboard → guest gets the confirmation card with the door QR.
     const cookie = await staffCookie();
-    const night = (await (await req(`/api/staff/clubs/demo/night?date=${FRIDAY}`, { headers: { cookie } })).json()) as any;
+    const night = (await (await req(staffUrl('demo', `/night?date=${FRIDAY}`), { headers: { cookie } })).json()) as any;
     expect(night.tables.find((t: any) => t.code === 'B1').booking.status).toBe('payment_review');
-    const approve = await req(`/api/staff/bookings/${booking.id}/approve`, { ...json({}), headers: { 'content-type': 'application/json', cookie } });
+    const approve = await req(staffUrl('demo', `/bookings/${booking.id}/approve`), { ...json({}), headers: { 'content-type': 'application/json', cookie } });
     expect(approve.status).toBe(200);
     const confirmation = await lastOut(u);
     expect(confirmation.altText).toContain('You’re booked');
@@ -165,9 +149,9 @@ describe('guest booking flow over LINE', () => {
     expect((await transcript(u)).filter((m) => m.direction === 'out').length).toBe(before);
 
     const cookie = await staffCookie();
-    const { handoffs } = (await (await req('/api/staff/clubs/demo/handoffs', { headers: { cookie } })).json()) as any;
+    const { handoffs } = (await (await req(staffUrl('demo', '/handoffs'), { headers: { cookie } })).json()) as any;
     expect(handoffs).toHaveLength(1);
-    await req(`/api/staff/conversations/${handoffs[0].id}/resolve`, { method: 'POST', headers: { cookie } });
+    await req(staffUrl('demo', `/conversations/${handoffs[0].id}/resolve`), { method: 'POST', headers: { cookie } });
     await sim(u, { type: 'text', text: 'hello' });
     expect((await lastOut(u)).text).toBe('I can help you with:');
   });
@@ -180,7 +164,7 @@ describe('guest booking flow over LINE', () => {
 
 describe('security', () => {
   it('rejects the dashboard API without a session', async () => {
-    expect((await req('/api/staff/clubs/demo/night')).status).toBe(401);
+    expect((await req(staffUrl('demo', '/night'))).status).toBe(401);
     expect((await req('/api/staff/login', json({ password: 'nope' }))).status).toBe(401);
   });
 

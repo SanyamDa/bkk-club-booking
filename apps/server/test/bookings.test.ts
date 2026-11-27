@@ -90,7 +90,7 @@ describe('deposit flow', () => {
     await submitDetails(ctx.db, ctx.club, b.id, details, now);
     expect((await requestDeposit(ctx.db, ctx.club, b.id, now)).status).toBe('awaiting_payment');
     await recordSlip(ctx.db, ctx.club, b.id, 'uploads/x.jpg', now);
-    const confirmed = await approveDeposit(ctx.db, b.id, 'staff', now);
+    const confirmed = await approveDeposit(ctx.db, ctx.club.id, b.id, { type: 'staff' }, now);
     expect(confirmed.status).toBe('confirmed');
   });
 
@@ -114,7 +114,7 @@ describe('manual bookings', () => {
       ctx.db,
       ctx.club,
       { tableId: 'table_demo_V2', nightDate: FRIDAY, pax: 10, name: 'VIP walk-in', depositPaid: true },
-      'staff',
+      { type: 'staff' },
       FRIDAY_AFTERNOON,
     );
     const g = await makeGuest(ctx.db);

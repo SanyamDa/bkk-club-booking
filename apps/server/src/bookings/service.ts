@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, lt, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, lt, or, type SQL } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { isUniqueViolation } from '../db/client.js';
 import {
@@ -143,9 +143,52 @@ export class BookingError extends Error {
   }
 }
 
-async function audit(db: Db, clubId: string, actor: string, action: string, entityId: string, data?: unknown) {
-  await db.insert(auditLog).values({ id: newId(), clubId, actor, action, entity: 'booking', entityId, data: data ?? null });
+// ---------- Actors and reasons (frozen contract, see build plan W0) ----------
+
+export type Actor = {
+  type: 'guest' | 'bot' | 'staff' | 'platform' | 'system';
+  id?: string;
+  sessionId?: string;
+  supportGrantId?: string;
+};
+
+export const REASON_CODES = [
+  'hold_expired',
+  'guest_abandoned',
+  'guest_cancelled',
+  'club_cancelled',
+  'payment_not_verified',
+  'table_taken',
+  'released',
+  'other',
+] as const;
+export type ReasonCode = (typeof REASON_CODES)[number];
+export type Reason = { code: ReasonCode; text?: string };
+
+/** Free text of a reason as stored in `bookings.status_reason` (max 200 characters). */
+function reasonText(reason: Reason | undefined): string | null {
+  if (!reason) return null;
+  return reason.text ? reason.text.slice(0, 200) : null;
 }
+
+async function audit(db: Db, clubId: string, actor: Actor, action: string, entityId: string, data?: unknown) {
+  // Until B2 lands, the old `actor` column carries `actor.type` alongside the new columns.
+  await db.insert(auditLog).values({
+    id: newId(),
+    clubId,
+    actor: actor.type,
+    actorType: actor.type,
+    actorId: actor.id ?? null,
+    sessionId: actor.sessionId ?? null,
+    supportGrantId: actor.supportGrantId ?? null,
+    action,
+    entity: 'booking',
+    entityId,
+    data: data ?? null,
+  });
+}
+
+const GUEST: Actor = { type: 'guest' };
 
 /**
  * Holds a table for a guest. Exactly one concurrent caller can win a given table+night: the
@@ -250,9 +293,9 @@ export async function submitDetails(db: Db, club: Club, bookingId: string, detai
       rulesAcceptedAt: now,
       updatedAt: now,
     })
-    .where(eq(bookings.id, bookingId))
+    .where(and(eq(bookings.id, bookingId), eq(bookings.clubId, club.id)))
     .returning();
-  await audit(db, club.id, 'guest', 'details_submitted', bookingId);
+  await audit(db, club.id, GUEST, 'details_submitted', bookingId);
   return updated!;
 }
 
@@ -273,7 +316,7 @@ export async function requestDeposit(db: Db, club: Club, bookingId: string, now:
       .set({ status: 'confirmed', holdExpiresAt: null, updatedAt: now })
       .where(eq(bookings.id, bookingId))
       .returning();
-    await audit(db, club.id, 'guest', 'confirmed_no_deposit', bookingId);
+    await audit(db, club.id, GUEST, 'confirmed_no_deposit', bookingId);
     return b!;
   }
   const [b] = await db
@@ -283,17 +326,23 @@ export async function requestDeposit(db: Db, club: Club, bookingId: string, now:
     .returning();
   await db.insert(deposits).values({
     id: newId(),
+    clubId: club.id,
     bookingId,
     amountSatang: booking.depositSatang,
     method: 'promptpay_slip',
     status: 'pending',
   });
-  await audit(db, club.id, 'guest', 'deposit_requested', bookingId);
+  await audit(db, club.id, GUEST, 'deposit_requested', bookingId);
   return b!;
 }
 
 export async function latestDeposit(db: Db, bookingId: string): Promise<Deposit | undefined> {
   return db.query.deposits.findFirst({ where: eq(deposits.bookingId, bookingId), orderBy: desc(deposits.createdAt) });
+}
+
+/** A deposit by id, only when it belongs to this club. */
+export async function getDepositForClub(db: Db, clubId: string, id: string): Promise<Deposit | undefined> {
+  return db.query.deposits.findFirst({ where: and(eq(deposits.clubId, clubId), eq(deposits.id, id)) });
 }
 
 /** The booking a slip image most likely belongs to, if any. */
@@ -325,7 +374,7 @@ export async function recordSlip(db: Db, club: Club, bookingId: string, slipPath
   if (!deposit) {
     [deposit] = await db
       .insert(deposits)
-      .values({ id: newId(), bookingId, amountSatang: booking.depositSatang, method: 'promptpay_slip', status: 'pending' })
+      .values({ id: newId(), clubId: club.id, bookingId, amountSatang: booking.depositSatang, method: 'promptpay_slip', status: 'pending' })
       .returning();
   }
   await db
@@ -347,7 +396,7 @@ export async function recordSlip(db: Db, club: Club, bookingId: string, slipPath
       .set({ statusReason: 'Slip arrived after hold expired; table was taken. Staff to reassign.', updatedAt: now })
       .where(eq(bookings.id, bookingId));
   }
-  await audit(db, club.id, 'guest', 'slip_received', bookingId, { tableLost });
+  await audit(db, club.id, GUEST, 'slip_received', bookingId, { tableLost });
   return { tableLost };
 }
 
@@ -355,14 +404,15 @@ export async function recordSlip(db: Db, club: Club, bookingId: string, slipPath
 
 async function transition(
   db: Db,
+  clubId: string,
   bookingId: string,
   from: BookingStatus[],
   to: BookingStatus,
-  actor: string,
+  actor: Actor,
   now: Date,
-  reason?: string,
+  reason?: Reason,
 ): Promise<Booking> {
-  const booking = await db.query.bookings.findFirst({ where: eq(bookings.id, bookingId) });
+  const booking = await db.query.bookings.findFirst({ where: and(eq(bookings.id, bookingId), eq(bookings.clubId, clubId)) });
   if (!booking) throw new BookingError('not_found');
   if (!from.includes(booking.status)) {
     throw new BookingError('invalid_state', `Cannot change a ${booking.status} booking to ${to}`);
@@ -371,44 +421,46 @@ async function transition(
   try {
     [updated] = (await db
       .update(bookings)
-      .set({ status: to, statusReason: reason ?? null, holdExpiresAt: null, updatedAt: now })
-      .where(eq(bookings.id, bookingId))
+      .set({ status: to, statusReason: reasonText(reason), holdExpiresAt: null, updatedAt: now })
+      .where(and(eq(bookings.id, bookingId), eq(bookings.clubId, clubId)))
       .returning()) as [Booking];
   } catch (err) {
     if (isUniqueViolation(err)) throw new BookingError('table_taken', 'That table is now booked by someone else');
     throw err;
   }
-  await audit(db, booking.clubId, actor, `status:${to}`, bookingId, { from: booking.status, reason });
+  await audit(db, booking.clubId, actor, `status:${to}`, bookingId, { from: booking.status, reason: reason?.code });
   return updated;
 }
 
-export async function approveDeposit(db: Db, bookingId: string, actor: string, now: Date) {
-  const booking = await transition(db, bookingId, ['payment_review', 'awaiting_payment', 'expired'], 'confirmed', actor, now);
+export async function approveDeposit(db: Db, clubId: string, bookingId: string, actor: Actor, now: Date) {
+  const booking = await transition(db, clubId, bookingId, ['payment_review', 'awaiting_payment', 'expired'], 'confirmed', actor, now);
   const deposit = await latestDeposit(db, bookingId);
   if (deposit) {
     await db
       .update(deposits)
-      .set({ status: 'verified', verifiedBy: actor, verifiedAt: now })
+      .set({ status: 'verified', verifiedBy: actor.id ?? actor.type, verifiedAt: now })
       .where(eq(deposits.id, deposit.id));
   }
   return booking;
 }
 
-export async function rejectDeposit(db: Db, bookingId: string, actor: string, reason: string, now: Date) {
-  const booking = await transition(db, bookingId, ['payment_review', 'awaiting_payment', 'expired'], 'rejected', actor, now, reason);
+export async function rejectDeposit(db: Db, clubId: string, bookingId: string, actor: Actor, reason: Reason, now: Date) {
+  const booking = await transition(db, clubId, bookingId, ['payment_review', 'awaiting_payment', 'expired'], 'rejected', actor, now, reason);
   const deposit = await latestDeposit(db, bookingId);
-  if (deposit) await db.update(deposits).set({ status: 'rejected', note: reason }).where(eq(deposits.id, deposit.id));
+  if (deposit) {
+    await db.update(deposits).set({ status: 'rejected', note: reasonText(reason) }).where(eq(deposits.id, deposit.id));
+  }
   return booking;
 }
 
-export const cancelBooking = (db: Db, id: string, actor: string, reason: string, now: Date) =>
-  transition(db, id, ['held', 'awaiting_payment', 'payment_review', 'confirmed'], 'cancelled', actor, now, reason);
+export const cancelBooking = (db: Db, clubId: string, id: string, actor: Actor, reason: Reason, now: Date) =>
+  transition(db, clubId, id, ['held', 'awaiting_payment', 'payment_review', 'confirmed'], 'cancelled', actor, now, reason);
 
-export const markArrived = (db: Db, id: string, actor: string, now: Date) =>
-  transition(db, id, ['confirmed'], 'arrived', actor, now);
+export const markArrived = (db: Db, clubId: string, id: string, actor: Actor, now: Date) =>
+  transition(db, clubId, id, ['confirmed'], 'arrived', actor, now);
 
-export const markNoShow = (db: Db, id: string, actor: string, now: Date) =>
-  transition(db, id, ['confirmed'], 'no_show', actor, now);
+export const markNoShow = (db: Db, clubId: string, id: string, actor: Actor, now: Date) =>
+  transition(db, clubId, id, ['confirmed'], 'no_show', actor, now);
 
 /** Holds whose time ran out. Returns them so the guests can be told. */
 export async function expireStaleHolds(db: Db, now: Date): Promise<Booking[]> {
@@ -424,7 +476,7 @@ export async function createManualBooking(
   db: Db,
   club: Club,
   input: { tableId: string; nightDate: string; pax: number; name: string; phone?: string; notes?: string; depositPaid: boolean },
-  actor: string,
+  actor: Actor,
   now: Date,
 ): Promise<Booking> {
   const option = (await listTableOptions(db, club.id)).find((o) => o.table.id === input.tableId);
@@ -466,11 +518,12 @@ export async function createManualBooking(
       if (input.depositPaid && option.depositSatang > 0) {
         await tx.insert(deposits).values({
           id: newId(),
+          clubId: club.id,
           bookingId: b!.id,
           amountSatang: option.depositSatang,
           method: 'manual',
           status: 'verified',
-          verifiedBy: actor,
+          verifiedBy: actor.id ?? actor.type,
           verifiedAt: now,
         });
       }
@@ -511,8 +564,26 @@ export interface BookingView {
   deposit?: Deposit;
 }
 
-export async function getBookingView(db: Db, where: { id?: string; refCode?: string }): Promise<BookingView | undefined> {
-  const cond = where.id ? eq(bookings.id, where.id) : eq(bookings.refCode, where.refCode ?? '');
+/** One booking with its table, zone, guest and latest deposit, only when it belongs to `where.clubId`. */
+export async function getBookingView(
+  db: Db,
+  where: { clubId: string; id?: string; refCode?: string },
+): Promise<BookingView | undefined> {
+  if (!where.id && !where.refCode) return undefined;
+  const key = where.id ? eq(bookings.id, where.id) : eq(bookings.refCode, where.refCode!);
+  return loadBookingView(db, and(eq(bookings.clubId, where.clubId), key)!);
+}
+
+/**
+ * The only unscoped booking lookup (`ref_code` is globally unique). Use it only after a signed
+ * link was verified (`http/liff.ts` load, `http/media.ts`); take the club from `view.booking.clubId`.
+ */
+export async function getBookingViewByRef(db: Db, refCode: string): Promise<BookingView | undefined> {
+  if (!refCode) return undefined;
+  return loadBookingView(db, eq(bookings.refCode, refCode));
+}
+
+async function loadBookingView(db: Db, cond: SQL): Promise<BookingView | undefined> {
   const [row] = await db
     .select({ booking: bookings, table: tables, zone: zones, guest: guests })
     .from(bookings)

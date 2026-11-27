@@ -170,7 +170,7 @@ async function handleText(turn: Turn, text: string) {
   const intent = detectIntent(text);
   switch (intent.kind) {
     case 'details_sent': {
-      const view = await getBookingView(turn.deps.db, { refCode: intent.ref });
+      const view = await getBookingView(turn.deps.db, { clubId: turn.club.id, refCode: intent.ref });
       if (view && view.booking.guestId === turn.guest.id) {
         await sendReview(turn, view.booking.id);
         return;
@@ -241,7 +241,7 @@ async function handlePostback(turn: Turn, data: string, params?: webhook.Postbac
 async function startBooking(turn: Turn, opts: { force?: boolean } = {}) {
   const current = await currentBookingForGuest(turn.deps.db, turn.club, turn.guest.id, turn.now);
   if (current) {
-    const view = (await getBookingView(turn.deps.db, { id: current.id }))!;
+    const view = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: current.id }))!;
     if (current.status === 'held' || current.status === 'awaiting_payment') {
       if (!opts.force) {
         // Repeated "book a table" never gets silence: offer to continue (spec §5.3).
@@ -271,7 +271,7 @@ async function abandonUnfinished(turn: Turn) {
 }
 
 async function continueBooking(turn: Turn, bookingId: string) {
-  const view = await getBookingView(turn.deps.db, { id: bookingId });
+  const view = await getBookingView(turn.deps.db, { clubId: turn.club.id, id: bookingId });
   if (!view || view.booking.guestId !== turn.guest.id) return startBooking(turn, { force: true });
   const b = view.booking;
   const expired = b.holdExpiresAt && b.holdExpiresAt <= turn.now;
@@ -334,7 +334,7 @@ async function chooseTable(turn: Turn, tableId: string, nightDate: string) {
       { guestId: turn.guest.id, tableId, nightDate, pax: range.max > SELF_BOOK_MAX_PAX ? range.min : range.max },
       turn.now,
     );
-    const view = (await getBookingView(turn.deps.db, { id: booking.id }))!;
+    const view = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: booking.id }))!;
     await send(turn, [M.held(turn.club, turn.lang, view, turn.deps.links.details(turn.club, booking))]);
   } catch (err) {
     if (err instanceof BookingError && err.code === 'table_taken') {
@@ -352,7 +352,7 @@ async function chooseTable(turn: Turn, tableId: string, nightDate: string) {
 
 /** After the guest submitted the details form: show the summary with the confirm button. */
 export async function sendReview(turn: Pick<Turn, 'deps' | 'club' | 'gateway' | 'guest' | 'lang' | 'replyToken'>, bookingId: string) {
-  const view = await getBookingView(turn.deps.db, { id: bookingId });
+  const view = await getBookingView(turn.deps.db, { clubId: turn.club.id, id: bookingId });
   if (!view) return;
   const replyToken = turn.replyToken;
   turn.replyToken = undefined;
@@ -360,11 +360,11 @@ export async function sendReview(turn: Pick<Turn, 'deps' | 'club' | 'gateway' | 
 }
 
 async function confirm(turn: Turn, bookingId: string) {
-  const view = await getBookingView(turn.deps.db, { id: bookingId });
+  const view = await getBookingView(turn.deps.db, { clubId: turn.club.id, id: bookingId });
   if (!view || view.booking.guestId !== turn.guest.id) return startBooking(turn, { force: true });
   try {
     const booking = await requestDeposit(turn.deps.db, turn.club, bookingId, turn.now);
-    const fresh = (await getBookingView(turn.deps.db, { id: booking.id }))!;
+    const fresh = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: booking.id }))!;
     if (booking.status === 'confirmed') {
       await send(turn, [M.confirmation(turn.club, turn.lang, fresh, turn.deps.links.pass(booking))]);
       await staff(turn, [M.staffNewBooking(fresh, 'confirmed')]);
@@ -419,7 +419,7 @@ async function handleImage(turn: Turn, messageId: string) {
 
   const { tableLost } = await recordSlip(turn.deps.db, turn.club, booking.id, relPath, turn.now);
   await send(turn, [M.plain(t(turn.lang, tableLost ? 'slipTableLost' : 'slipReceived'))]);
-  const view = (await getBookingView(turn.deps.db, { id: booking.id }))!;
+  const view = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: booking.id }))!;
   await staff(turn, [M.staffNewBooking(view, 'review')]);
   if (tableLost) await requestHandoff(turn, 'Paid after hold expired; table was taken. Reassign or refund.', { silent: true });
 }
@@ -432,7 +432,7 @@ async function showMyBooking(turn: Turn) {
     await send(turn, [M.plain(t(turn.lang, 'noBooking'), M.menuQuickReplies(turn.club, turn.lang))]);
     return;
   }
-  const view = (await getBookingView(turn.deps.db, { id: current.id }))!;
+  const view = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: current.id }))!;
   if (current.status === 'confirmed') {
     await send(turn, [M.confirmation(turn.club, turn.lang, view, turn.deps.links.pass(current))]);
     return;
@@ -455,7 +455,7 @@ async function requestHandoff(turn: Turn, reason: string, opts: { silent?: boole
   const current = await currentBookingForGuest(turn.deps.db, turn.club, turn.guest.id, turn.now);
   let summary = reason;
   if (current) {
-    const v = (await getBookingView(turn.deps.db, { id: current.id }))!;
+    const v = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: current.id }))!;
     summary += `\nBooking: ${v.table.code} · ${formatNight(current.nightDate, 'en')} · ${current.status} · ${current.refCode}`;
   } else if (turn.conv.state.nightDate) {
     summary += `\nWas looking at ${formatNight(turn.conv.state.nightDate, 'en')}${turn.conv.state.paxRange ? `, ${turn.conv.state.paxRange} guests` : ''}`;

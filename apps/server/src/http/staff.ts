@@ -24,14 +24,16 @@ import {
   cancelBooking,
   createManualBooking,
   getBookingView,
+  getDepositForClub,
   listTableOptions,
   markArrived,
   markNoShow,
   rejectDeposit,
+  type Actor,
 } from '../bookings/service.js';
-import { clubCredentials } from '../line/gateway.js';
+import { getConversationForClub } from '../chat/conversations.js';
 import { sampleMessages } from '../line/samples.js';
-import { describeLineError, loginChannel, runLineSetup } from '../line/setup.js';
+import { describeLineError, runLineSetup } from '../line/setup.js';
 import { currentNightDate, formatNight } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
 import type { AppContext } from './context.js';
@@ -97,6 +99,23 @@ export function staffRoutes(app: AppContext) {
   async function clubBySlug(slug: string): Promise<Club | undefined> {
     return db.query.clubs.findFirst({ where: eq(clubs.slug, slug) });
   }
+
+  // W0: the shared staff password covers every club and these URLs carry no club yet, so the
+  // club comes from the row itself. A2 moves these routes under /clubs/:slug and checks access.
+  async function clubIdOfBooking(id: string): Promise<string | undefined> {
+    const [row] = await db.select({ clubId: bookings.clubId }).from(bookings).where(eq(bookings.id, id)).limit(1);
+    return row?.clubId;
+  }
+  async function clubIdOfConversation(id: string): Promise<string | undefined> {
+    const [row] = await db.select({ clubId: conversations.clubId }).from(conversations).where(eq(conversations.id, id)).limit(1);
+    return row?.clubId;
+  }
+  async function clubIdOfDeposit(id: string): Promise<string | undefined> {
+    const [row] = await db.select({ clubId: deposits.clubId }).from(deposits).where(eq(deposits.id, id)).limit(1);
+    return row?.clubId;
+  }
+
+  const STAFF: Actor = { type: 'staff' };
 
   const shape = (b: Booking) => ({
     id: b.id,
@@ -174,7 +193,9 @@ export function staffRoutes(app: AppContext) {
 
   // ----- Booking detail + actions -----
   r.get('/bookings/:id', async (c) => {
-    const view = await getBookingView(db, { id: c.req.param('id') });
+    const id = c.req.param('id');
+    const clubId = await clubIdOfBooking(id);
+    const view = clubId ? await getBookingView(db, { clubId, id }) : undefined;
     if (!view) return c.json({ error: 'not_found' }, 404);
     const recent = await db
       .select()
@@ -201,11 +222,14 @@ export function staffRoutes(app: AppContext) {
   });
 
   const actionSchema = z.object({ reason: z.string().trim().max(200).optional() });
-  const act = (name: string, fn: (id: string, reason: string | undefined) => Promise<unknown>) =>
+  const act = (name: string, fn: (clubId: string, id: string, reason: string | undefined) => Promise<unknown>) =>
     r.post(`/bookings/:id/${name}`, async (c) => {
       const { reason } = actionSchema.parse(await c.req.json().catch(() => ({})));
+      const id = c.req.param('id');
+      const clubId = await clubIdOfBooking(id);
+      if (!clubId) return c.json({ error: 'not_found', message: 'not_found' }, 409);
       try {
-        await fn(c.req.param('id'), reason);
+        await fn(clubId, id, reason);
         return c.json({ ok: true });
       } catch (err) {
         if (err instanceof BookingError) return c.json({ error: err.code, message: err.message }, 409);
@@ -213,20 +237,20 @@ export function staffRoutes(app: AppContext) {
       }
     });
 
-  act('approve', async (id) => {
-    await approveDeposit(db, id, 'staff', app.deps.now());
-    await app.notifier.confirmed(id);
+  act('approve', async (clubId, id) => {
+    await approveDeposit(db, clubId, id, STAFF, app.deps.now());
+    await app.notifier.confirmed(clubId, id);
   });
-  act('reject', async (id, reason) => {
-    await rejectDeposit(db, id, 'staff', reason ?? 'Payment could not be verified', app.deps.now());
-    await app.notifier.rejected(id);
+  act('reject', async (clubId, id, reason) => {
+    await rejectDeposit(db, clubId, id, STAFF, { code: 'payment_not_verified', text: reason ?? 'Payment could not be verified' }, app.deps.now());
+    await app.notifier.rejected(clubId, id);
   });
-  act('cancel', async (id, reason) => {
-    await cancelBooking(db, id, 'staff', reason ?? 'Cancelled by the club', app.deps.now());
-    await app.notifier.cancelled(id, reason ?? '');
+  act('cancel', async (clubId, id, reason) => {
+    await cancelBooking(db, clubId, id, STAFF, { code: 'club_cancelled', text: reason ?? 'Cancelled by the club' }, app.deps.now());
+    await app.notifier.cancelled(clubId, id, reason ?? '');
   });
-  act('arrived', (id) => markArrived(db, id, 'staff', app.deps.now()));
-  act('no-show', (id) => markNoShow(db, id, 'staff', app.deps.now()));
+  act('arrived', (clubId, id) => markArrived(db, clubId, id, STAFF, app.deps.now()));
+  act('no-show', (clubId, id) => markNoShow(db, clubId, id, STAFF, app.deps.now()));
 
   // ----- Manual booking -----
   const manualSchema = z.object({
@@ -244,7 +268,7 @@ export function staffRoutes(app: AppContext) {
     const parsed = manualSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
     try {
-      const b = await createManualBooking(db, club, parsed.data, 'staff', app.deps.now());
+      const b = await createManualBooking(db, club, parsed.data, STAFF, app.deps.now());
       return c.json({ ok: true, id: b.id, ref: b.refCode });
     } catch (err) {
       if (err instanceof BookingError) return c.json({ error: err.code, message: err.message }, 409);
@@ -282,18 +306,24 @@ export function staffRoutes(app: AppContext) {
   });
 
   r.post('/conversations/:id/resolve', async (c) => {
+    const id = c.req.param('id');
+    const clubId = await clubIdOfConversation(id);
+    const conv = clubId ? await getConversationForClub(db, clubId, id) : undefined;
+    if (!conv) return c.json({ ok: true });
     await db
       .update(conversations)
       .set({ mode: 'bot', handoffRequestedAt: null, handoffReason: null, updatedAt: new Date() })
-      .where(eq(conversations.id, c.req.param('id')));
+      .where(and(eq(conversations.id, conv.id), eq(conversations.clubId, conv.clubId)));
     return c.json({ ok: true });
   });
 
   r.post('/conversations/:id/reply', async (c) => {
     const { text } = z.object({ text: z.string().trim().min(1).max(1000) }).parse(await c.req.json().catch(() => ({})));
-    const conv = await db.query.conversations.findFirst({ where: eq(conversations.id, c.req.param('id')) });
+    const id = c.req.param('id');
+    const clubId = await clubIdOfConversation(id);
+    const conv = clubId ? await getConversationForClub(db, clubId, id) : undefined;
     if (!conv) return c.json({ error: 'not_found' }, 404);
-    await app.notifier.hostReply(conv.guestId, text);
+    await app.notifier.hostReply(conv.clubId, conv.guestId, text, STAFF);
     return c.json({ ok: true });
   });
 
@@ -317,7 +347,7 @@ export function staffRoutes(app: AppContext) {
       name: club.name,
       staffLinkCode: club.staffLinkCode,
       staffGroupLinked: Boolean(club.staffGroupId),
-      lineConnected: Boolean(club.lineChannelSecretEnv && process.env[club.lineChannelSecretEnv] && club.lineAccessTokenEnv && process.env[club.lineAccessTokenEnv]),
+      lineConnected: (await app.credentials.line(club)) !== null,
       webhookUrl: `${app.config.PUBLIC_URL.replace(/\/$/, '')}/line/webhook/${club.slug}`,
       liffEndpoint: `${app.config.PUBLIC_URL.replace(/\/$/, '')}/liff/details`,
       liffConfigured: Boolean(club.liffId),
@@ -328,8 +358,8 @@ export function staffRoutes(app: AppContext) {
 
   // ----- LINE connection -----
   async function lineClientsFor(club: Club) {
-    const creds = clubCredentials(club);
-    return creds ? app.lineSetupClients(creds.accessToken, loginChannel(club)) : null;
+    const creds = await app.credentials.line(club);
+    return creds ? app.lineSetupClients(creds.accessToken, await app.credentials.login(club)) : null;
   }
 
   /** Connects the club's LINE account to this server (webhook, rich menu, LIFF) and checks every message type. */
@@ -375,7 +405,9 @@ export function staffRoutes(app: AppContext) {
 
   // ----- Slip images (private) -----
   r.get('/deposits/:id/slip', async (c) => {
-    const d = await db.query.deposits.findFirst({ where: eq(deposits.id, c.req.param('id')) });
+    const id = c.req.param('id');
+    const clubId = await clubIdOfDeposit(id);
+    const d = clubId ? await getDepositForClub(db, clubId, id) : undefined;
     if (!d?.slipPath) return c.text('Not found', 404);
     const root = resolve(app.deps.uploadsDir);
     const file = resolve(root, d.slipPath);

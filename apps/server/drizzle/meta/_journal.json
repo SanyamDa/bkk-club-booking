@@ -15,6 +15,13 @@
       "when": 1795750118386,
       "tag": "0001_live_line",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795769646925,
+      "tag": "0002_v2",
+      "breakpoints": true
     }
   ]
 }

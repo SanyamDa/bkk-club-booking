@@ -1,12 +1,11 @@
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { BookingError, getBookingView, submitDetails } from '../bookings/service.js';
+import { BookingError, getBookingView, getBookingViewByRef, submitDetails } from '../bookings/service.js';
 import { sendReview } from '../bot/flow.js';
 import { langOf, t } from '../bot/i18n.js';
 import { clubs } from '../db/schema.js';
 import { SIM_USER_PREFIX } from '../line/gateway.js';
-import { loginChannel } from '../line/setup.js';
 import { formatClock, formatNight } from '../lib/time.js';
 import { formatBaht, verifySignature } from '../lib/util.js';
 import type { AppContext } from './context.js';
@@ -35,7 +34,7 @@ export function liffRoutes(app: AppContext) {
 
   async function load(ref: string, token: string | undefined) {
     if (!verifySignature(app.config.APP_SECRET, 'details', ref, token)) return null;
-    const view = await getBookingView(db, { refCode: ref });
+    const view = await getBookingViewByRef(db, ref);
     if (!view) return null;
     const club = (await db.query.clubs.findFirst({ where: eq(clubs.id, view.booking.clubId) }))!;
     return { view, club };
@@ -79,7 +78,7 @@ export function liffRoutes(app: AppContext) {
     const { view, club } = found;
     // Inside LINE, prove the person submitting is the LINE user who holds the table,
     // so a forwarded link can't be used by someone else.
-    const login = loginChannel(club);
+    const login = await app.credentials.login(club);
     const lineUserId = view.guest.lineUserId;
     if (login && lineUserId && !lineUserId.startsWith(SIM_USER_PREFIX)) {
       if (!input.idToken) return c.json({ error: 'login_required' }, 401);
@@ -97,7 +96,7 @@ export function liffRoutes(app: AppContext) {
     }
     // Inside LINE, the page sends "Details sent · REF" from the guest's own chat, so our reply is free.
     // Outside LINE (or if that fails), push the summary instead.
-    if (!input.viaChat) await pushReview(view.booking.id);
+    if (!input.viaChat) await pushReview(club.id, view.booking.id);
     return c.json({ ok: true });
   });
 
@@ -106,15 +105,17 @@ export function liffRoutes(app: AppContext) {
     const body = (await c.req.json().catch(() => ({}))) as { ref?: string; t?: string };
     const found = await load(body.ref ?? '', body.t);
     if (!found) return c.json({ error: 'not_found' }, 404);
-    await pushReview(found.view.booking.id);
+    await pushReview(found.view.booking.clubId, found.view.booking.id);
     return c.json({ ok: true });
   });
 
-  async function pushReview(bookingId: string) {
-    const view = (await getBookingView(db, { id: bookingId }))!;
+  async function pushReview(clubId: string, bookingId: string) {
+    const view = await getBookingView(db, { clubId, id: bookingId });
+    if (!view) return;
     const club = (await db.query.clubs.findFirst({ where: eq(clubs.id, view.booking.clubId) }))!;
+    const gateway = await app.gateways.forClub(club, view.guest.lineUserId);
     await sendReview(
-      { deps: app.deps, club, gateway: app.gateways.forClub(club, view.guest.lineUserId), guest: view.guest, lang: langOf(view.guest.lang) },
+      { deps: app.deps, club, gateway, guest: view.guest, lang: langOf(view.guest.lang) },
       bookingId,
     );
   }

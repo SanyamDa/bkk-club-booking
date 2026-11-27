@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { clubs, tables, zones, type ClubSettings } from './schema.js';
+import { channels, clubs, tables, zones, type ClubSettings } from './schema.js';
 import { newLinkCode } from '../lib/util.js';
 
 /**
@@ -75,7 +75,9 @@ export async function seedDemoClub(db: Db, env: NodeJS.ProcessEnv = process.env)
     promptpayId: env.DEMO_PROMPTPAY_ID || null,
     promptpayName: 'Velora Demo Co., Ltd.',
     staffLinkCode: newLinkCode(),
+    status: 'demo',
   });
+  await db.insert(channels).values({ id: `chan_line_${DEMO_CLUB_ID}`, clubId: DEMO_CLUB_ID, kind: 'line' });
 
   const z = {
     vip: { id: 'zone_demo_vip', name: 'VIP riser', nameTh: 'โซนวีไอพี', sort: 1, minSpendSatang: 2_500_000, depositSatang: 1_000_000 },

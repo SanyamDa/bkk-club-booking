@@ -1,6 +1,7 @@
 import { channelAccessToken, HTTPFetchError, liff, messagingApi } from '@line/bot-sdk';
 import { Resvg } from '@resvg/resvg-js';
 import type { Club } from '../db/schema.js';
+import type { LoginChannel } from './credentials.js';
 import type { Message } from './gateway.js';
 
 /**
@@ -12,17 +13,6 @@ import type { Message } from './gateway.js';
 export const RICH_MENU_PREFIX = 'club-booking';
 const MENU_W = 2500;
 const MENU_H = 843;
-
-export interface LoginChannel {
-  channelId: string;
-  channelSecret: string;
-}
-
-export function loginChannel(club: Club, env: NodeJS.ProcessEnv = process.env): LoginChannel | null {
-  const channelId = club.lineLoginChannelIdEnv ? env[club.lineLoginChannelIdEnv] : undefined;
-  const channelSecret = club.lineLoginChannelSecretEnv ? env[club.lineLoginChannelSecretEnv] : undefined;
-  return channelId && channelSecret ? { channelId, channelSecret } : null;
-}
 
 // ---------- Rich menu ----------
 

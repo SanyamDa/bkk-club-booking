@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import generatePayload from 'promptpay-qr';
 import QRCode from 'qrcode';
+import { getBookingViewByRef } from '../bookings/service.js';
 import { bookings, clubs } from '../db/schema.js';
 import { verifySignature } from '../lib/util.js';
 import type { AppContext } from './context.js';
@@ -31,8 +32,8 @@ export function mediaRoutes(app: AppContext) {
   r.get('/pass/:file', async (c) => {
     const ref = c.req.param('file').replace(/\.png$/, '');
     if (!verifySignature(secret, 'pass', ref, c.req.query('s'))) return c.text('Not found', 404);
-    const booking = await app.deps.db.query.bookings.findFirst({ where: eq(bookings.refCode, ref) });
-    if (!booking) return c.text('Not found', 404);
+    const view = await getBookingViewByRef(app.deps.db, ref);
+    if (!view) return c.text('Not found', 404);
     return png(await QRCode.toBuffer(ref, { width: 720, margin: 4, errorCorrectionLevel: 'H' }));
   });
 

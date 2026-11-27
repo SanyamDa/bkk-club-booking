@@ -5,9 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
+import { buildBotDeps, type BotDepOptions } from './bot/deps.js';
 import { Notifier } from './bot/notify.js';
-import type { BotDeps } from './bot/flow.js';
-import { Links } from './bot/links.js';
 import type { Config } from './config.js';
 import type { Db } from './db/client.js';
 import { devRoutes } from './http/dev.js';
@@ -16,36 +15,31 @@ import { liffRoutes } from './http/liff.js';
 import { mediaRoutes } from './http/media.js';
 import { staffRoutes } from './http/staff.js';
 import { webhookRoutes } from './http/webhook.js';
+import { envCredentialStore } from './line/credentials.js';
 import { GatewayRegistry } from './line/gateway.js';
 import { lineIdTokenVerifier } from './line/idtoken.js';
 import { realSetupClients } from './line/setup.js';
-import { Outbox } from './line/outbox.js';
 
 export function createApp(
   config: Config,
   db: Db,
   opts: {
-    now?: () => Date;
-    log?: BotDeps['log'];
+    bot?: BotDepOptions;
+    credentials?: AppContext['credentials'];
     lineSetupClients?: AppContext['lineSetupClients'];
     verifyIdToken?: AppContext['verifyIdToken'];
   } = {},
 ) {
-  const log = opts.log ?? ((msg: string, err?: unknown) => (err ? console.error(msg, err) : console.log(msg)));
+  const deps = buildBotDeps(config, db, opts.bot);
+  const log = deps.log;
   const pending = new Set<Promise<unknown>>();
-  const deps: BotDeps = {
-    db,
-    outbox: new Outbox(db, log),
-    links: new Links(config.PUBLIC_URL, config.APP_SECRET),
-    uploadsDir: join(config.DATA_DIR, 'uploads'),
-    now: opts.now ?? (() => new Date()),
-    log,
-  };
-  const gateways = new GatewayRegistry();
+  const credentials = opts.credentials ?? envCredentialStore();
+  const gateways = new GatewayRegistry(credentials);
   const ctx: AppContext = {
     config,
     deps,
     gateways,
+    credentials,
     notifier: new Notifier(deps, gateways),
     track: (p) => {
       pending.add(p);

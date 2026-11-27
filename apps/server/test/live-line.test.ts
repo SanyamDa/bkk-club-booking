@@ -1,6 +1,3 @@
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { messagingApi, webhook } from '@line/bot-sdk';
 import { eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -8,23 +5,14 @@ import { createApp } from '../src/app.js';
 import { holdTable } from '../src/bookings/service.js';
 import { handleEvent } from '../src/bot/flow.js';
 import { Links } from '../src/bot/links.js';
-import type { Config } from '../src/config.js';
 import { guests } from '../src/db/schema.js';
 import { DevLineGateway } from '../src/line/gateway.js';
 import { sampleMessages } from '../src/line/samples.js';
 import { renderRichMenuPng, richMenuRequest, runLineSetup, type SetupClients } from '../src/line/setup.js';
 import { FRIDAY, FRIDAY_AFTERNOON, makeGuest, setupDb } from './helpers.js';
+import { testConfig } from './helpers/track-a.js';
 
-const config: Config = {
-  API_PORT: 0,
-  PUBLIC_URL: 'https://demo-tunnel.example.com',
-  DATABASE_URL: undefined,
-  DATA_DIR: mkdtempSync(join(tmpdir(), 'club-live-')),
-  APP_SECRET: 'test-secret-test-secret-test-secret',
-  STAFF_PASSWORD: 'staffpass',
-  DEV_SIMULATOR: false,
-  NODE_ENV: 'test',
-};
+const config = testConfig({ PUBLIC_URL: 'https://demo-tunnel.example.com', DEV_SIMULATOR: false });
 
 let ctx: Awaited<ReturnType<typeof setupDb>>;
 beforeEach(async () => {
@@ -167,7 +155,7 @@ describe('real-LINE behaviour', () => {
   });
 
   it('stops pushing to guests who block the club, and resumes when they come back', async () => {
-    const app = createApp(config, ctx.db, { log: () => {} });
+    const app = createApp(config, ctx.db, { bot: { log: () => {} } });
     const gw = new DevLineGateway();
     const push = vi.spyOn(gw, 'push');
     await handleEvent(app.ctx.deps, ctx.club, gw, { ...base('Ureal1'), type: 'unfollow' } as webhook.Event);
@@ -182,7 +170,7 @@ describe('real-LINE behaviour', () => {
   });
 
   it('explains how to link alerts when the bot is added to a group', async () => {
-    const app = createApp(config, ctx.db, { log: () => {} });
+    const app = createApp(config, ctx.db, { bot: { log: () => {} } });
     const gw = new DevLineGateway();
     const reply = vi.spyOn(gw, "reply");
     await handleEvent(app.ctx.deps, ctx.club, gw, {
@@ -200,8 +188,8 @@ describe('real-LINE behaviour', () => {
     vi.stubEnv('DEMO_LINE_LOGIN_CHANNEL_ID', '2000000000');
     vi.stubEnv('DEMO_LINE_LOGIN_CHANNEL_SECRET', 'login-secret');
     const verify = vi.fn(async (token: string) => (token === 'good-token' ? { sub: 'Uowner' } : token === 'other-token' ? { sub: 'Usomeoneelse' } : null));
-    const app = createApp(config, ctx.db, { now: () => FRIDAY_AFTERNOON, log: () => {}, verifyIdToken: verify });
-    const guest = await makeGuest(ctx.db, 'Uowner');
+    const app = createApp(config, ctx.db, { bot: { now: () => FRIDAY_AFTERNOON, log: () => {} }, verifyIdToken: verify });
+    const guest = await makeGuest(ctx.db, { lineUserId: 'Uowner' });
     const booking = await holdTable(ctx.db, ctx.club, { guestId: guest.id, tableId: 'table_demo_B4', nightDate: FRIDAY, pax: 6 }, FRIDAY_AFTERNOON);
     const t = links.detailsToken(booking);
     const submit = (idToken?: string) =>

@@ -1,5 +1,8 @@
 import { messagingApi } from '@line/bot-sdk';
 import type { Club } from '../db/schema.js';
+import type { CredentialStore } from './credentials.js';
+
+export type { ClubLineCredentials } from './credentials.js';
 
 export type Message = messagingApi.Message;
 
@@ -89,38 +92,29 @@ export class DevLineGateway implements LineGateway {
   }
 }
 
-export interface ClubLineCredentials {
-  channelSecret: string;
-  accessToken: string;
-}
-
-/** LINE secrets come from environment variables named on the club row, never from the DB. */
-export function clubCredentials(club: Club, env: NodeJS.ProcessEnv = process.env): ClubLineCredentials | null {
-  const channelSecret = club.lineChannelSecretEnv ? env[club.lineChannelSecretEnv] : undefined;
-  const accessToken = club.lineAccessTokenEnv ? env[club.lineAccessTokenEnv] : undefined;
-  return channelSecret && accessToken ? { channelSecret, accessToken } : null;
-}
-
 /** Real LINE user ids start with "U"; simulator ids start with this, so they can never collide. */
 export const SIM_USER_PREFIX = 'SIM-';
 
 export class GatewayRegistry {
-  private real = new Map<string, RealLineGateway>();
+  /** At most one live gateway per club, keyed by club id but rebuilt whenever the token changes. */
+  private real = new Map<string, { token: string; gateway: RealLineGateway }>();
   readonly dev = new DevLineGateway();
+
+  constructor(private credentials: CredentialStore) {}
 
   /**
    * The live gateway for a club, or the dev gateway when the club has no LINE credentials.
    * Simulator guests (ids starting with SIM_USER_PREFIX) always use the dev gateway.
+   * Reads the credentials on every call: access tokens can be short-lived.
    */
-  forClub(club: Club, lineUserId?: string | null): LineGateway {
+  async forClub(club: Club, lineUserId?: string | null): Promise<LineGateway> {
     if (lineUserId?.startsWith(SIM_USER_PREFIX)) return this.dev;
-    const creds = clubCredentials(club);
+    const creds = await this.credentials.line(club);
     if (!creds) return this.dev;
-    let gw = this.real.get(club.id);
-    if (!gw) {
-      gw = new RealLineGateway(creds.accessToken);
-      this.real.set(club.id, gw);
-    }
-    return gw;
+    const cached = this.real.get(club.id);
+    if (cached && cached.token === creds.accessToken) return cached.gateway;
+    const gateway = new RealLineGateway(creds.accessToken);
+    this.real.set(club.id, { token: creds.accessToken, gateway });
+    return gateway;
   }
 }

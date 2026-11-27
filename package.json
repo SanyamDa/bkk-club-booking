@@ -1,0 +1,20 @@
+{
+  "name": "bkk-club-booking",
+  "private": true,
+  "description": "LINE booking automation for Bangkok clubs (see clubs/SPEC.md)",
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "npm run dev -w @club/server & npm run dev -w @club/web & wait",
+    "build": "npm run build -w @club/web && npm run build -w @club/server",
+    "start": "npm run start -w @club/server",
+    "test": "npm test -w @club/server",
+    "typecheck": "npm run typecheck -w @club/server && npm run typecheck -w @club/web",
+    "db:generate": "npm run db:generate -w @club/server",
+    "live": "npm run live -w @club/server --"
+  }
+}

@@ -8,11 +8,17 @@ import { sendWeeklyReports } from '../platform/club-report.js';
 import { runBrainExpiry, sendBrainDigests } from './brain-expiry.js';
 import { runHandoffTimeouts } from './handoff-timeout.js';
 import { runNightlyCheck } from './nightly-check.js';
+import { releaseNoShows } from './no-show.js';
+import { sendDueReminders } from './reminders.js';
 import { runNightsJob } from './nights.js';
 import { runRemovalRequests } from '../data/removal.js';
 import { runRetention } from './retention.js';
 import { runCrowdPrompts, runSnapshots } from './snapshots.js';
 import { Scheduler } from './scheduler.js';
+import { BRAIN_DRAFT_EVERY_MS, runBrainDraft } from './brain-draft.js';
+import { runBrainLint } from './brain-lint.js';
+import { runBrainTestJob } from '../brain/testset.js';
+import { runSampleReview } from './brain-sample-review.js';
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -54,11 +60,27 @@ export function buildScheduler(ctx: AppContext, now: () => Date): Scheduler {
     await runBrainExpiry(db, at); // B15
     await sendBrainDigests(db, at);
   });
+  s.register('reminders', MINUTE, async (at) => {
+    await sendDueReminders(ctx, at); // B10
+  });
+  s.register('no-show', MINUTE, async (at) => {
+    await releaseNoShows(ctx, at); // B10
+  });
   // B10b: guest removal requests and retention (spec §14.9), daily and at start.
   s.register('removal', DAY, async (at) => {
     await runRemovalRequests(db, at, ctx.deps.uploadsDir, ctx.deps.log);
   });
   s.register('retention', DAY, (at) => runRetention(db, at, ctx.deps.uploadsDir));
+  // B18: learning loop (drafts within 60 s of a resolved takeover) and the weekly brain check.
+  s.register('brain-draft', BRAIN_DRAFT_EVERY_MS, async (at) => {
+    await runBrainDraft(ctx.deps, at);
+  });
+  s.register('brain-lint', 15 * MINUTE, (at) => runBrainLint(ctx.deps, at));
+  // B17: each club's test set after a snapshot compile or model change, and the daily sampled review.
+  s.register('brain-testset', MINUTE, (at) =>
+    runBrainTestJob(db, { client: ctx.deps.ai ?? null, judge: ctx.deps.judge ?? null, log: ctx.deps.log }, at),
+  );
+  s.register('brain-sample-review', 15 * MINUTE, (at) => runSampleReview(db, ctx.deps.judge ?? null, at));
   // B12: occupancy snapshots at each lead bucket, and the hourly "how full now?" (spec §14.3).
   s.register('snapshots', 5 * MINUTE, async (at) => {
     await runSnapshots(db, at);

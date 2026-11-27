@@ -9,6 +9,7 @@ import { newId } from '../lib/util.js';
 import { clubToday } from '../platform/club-settings.js';
 import { BrainCapError, compileSnapshot } from './compile.js';
 import { assertLint, type NoteType } from './lint.js';
+import { addTestSetQuestion, deactivateNoteCases, refreshNoteCases } from './testset.js';
 
 /**
  * Brain notes (spec §8.2, §8.4, plan B15). Every note is club-scoped, versioned and linted on save.
@@ -166,6 +167,7 @@ export async function updateNote(db: Db, clubId: string, noteId: string, patch: 
       .where(eq(brainNotes.id, before.id))
       .returning();
     if (next.bodyMd !== before.bodyMd) await tx.insert(brainNoteVersions).values({ id: newId(), noteId: before.id, bodyMd: next.bodyMd, editedBy: actor.id ?? actor.type, editedAt: now });
+    if (note!.status === 'live' && next.bodyMd !== before.bodyMd) await refreshNoteCases(tx, clubId, before.id, next.bodyMd);
     if (note!.status === 'live') await publishOrThrow(tx, clubId, now);
     return note!;
   });
@@ -189,9 +191,15 @@ export async function approveNote(db: Db, clubId: string, noteId: string, actor:
         .update(brainNotes)
         .set({ status: 'retired', updatedAt: now })
         .where(and(eq(brainNotes.id, before.supersedesId), eq(brainNotes.clubId, clubId)));
+      // The replaced note's cases stop; a question the new note shares is taken over below.
+      await deactivateNoteCases(tx, clubId, [before.supersedesId]);
     }
     await noteEvent(tx, club, 'brain.note_approved', note!, actor, now);
     await publishOrThrow(tx, clubId, now);
+    // B18 (§8.3 step 6): a learned note's question joins the club's test set.
+    const fm = (note!.frontmatter ?? {}) as Record<string, unknown>;
+    const questions = new Set([fm.question, fm.questionEn, fm.questionTh].filter((q): q is string => typeof q === 'string' && q.trim() !== ''));
+    for (const question of questions) await addTestSetQuestion(tx, clubId, { question, noteId: note!.id, source: 'learned' }, now);
     return note!;
   });
 }
@@ -203,6 +211,7 @@ export async function rejectNote(db: Db, clubId: string, noteId: string, actor: 
   return inTx(db, async (tx) => {
     const [note] = await tx.update(brainNotes).set({ status: 'retired', updatedAt: now }).where(eq(brainNotes.id, before.id)).returning();
     await noteEvent(tx, club, 'brain.note_rejected', note!, actor, now);
+    await deactivateNoteCases(tx, clubId, [before.id]);
     if (before.status === 'live') await compileSnapshot(tx, clubId, now);
     return note!;
   });

@@ -1,6 +1,7 @@
 import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { recordOps } from '../data/ops.js';
 import type { Db } from '../db/client.js';
+import { testRowsInAnalytics } from '../data/analytics.js';
 import { clubs, events, nights, platformFlags, type Club } from '../db/schema.js';
 import { addDays, bangkokParts, currentNightDate, weekdayOf } from '../lib/time.js';
 
@@ -47,8 +48,9 @@ async function wasOpen(db: Db, club: Club, nightDate: string): Promise<boolean> 
  *   the same booking, `to` status and time;
  * - `silentClubs`: live clubs that were open and wrote no event during their opening hours;
  * - `piiInProps`: events of that day with a props value that looks like a phone, email or Thai text;
- * - `testInAggregates`: `is_test` rows visible in any view of the `analytics` schema (B14's views
- *   are checked as soon as they exist: every view there with an `is_test` column).
+ * - `testInAggregates`: `is_test` rows visible in any view of the `analytics` schema that has an
+ *   `is_test` column, plus B14's `testRowsInAnalytics` (demo-club rows in any B14 view, and
+ *   `analytics.events` rows whose event is `is_test`).
  */
 export async function checkEventCompleteness(db: Db, nightDate: string, now: Date = new Date()): Promise<NightlyCheckResult> {
   const start = at(nightDate, DAY_CUT_HOUR);
@@ -149,6 +151,12 @@ export async function checkEventCompleteness(db: Db, nightDate: string, now: Dat
   }
   for (const [clubId, perView] of perClub) {
     await report(db, clubId, 'test_in_aggregates', { nightDate, views: perView }, now);
+  }
+  // B14's own check over its views (which carry no `is_test` column): reported with no club.
+  const leaked = await testRowsInAnalytics(db);
+  if (leaked > 0) {
+    testInAggregates += leaked;
+    await report(db, null, 'test_in_aggregates', { nightDate, analyticsRows: leaked }, now);
   }
 
   return { missing: missingRows.length, silentClubs, piiInProps, testInAggregates };

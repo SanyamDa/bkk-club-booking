@@ -136,6 +136,37 @@ const strings = {
     th: 'ขอบคุณสำหรับรูปภาพค่ะ หากเป็นสลิปโอนเงิน กรุณาเริ่มจองก่อน หรือคุยกับพนักงานค่ะ',
   },
 
+  // B10: reminder, running late, guest cancel
+  reminder: {
+    en: 'See you tonight. Table {code}, please arrive by {time}.',
+    th: 'แล้วพบกันคืนนี้ค่ะ โต๊ะ {code} กรุณามาถึงก่อน {time} น.',
+  },
+  runningLate: { en: 'Running late', th: 'มาสาย' },
+  needToCancel: { en: 'Need to cancel', th: 'ต้องการยกเลิก' },
+  cancelShort: { en: 'Cancel', th: 'ยกเลิก' },
+  askLate: { en: 'How late will you be?', th: 'จะมาสายประมาณเท่าไรคะ?' },
+  late15: { en: '15 min', th: '15 นาที' },
+  late30: { en: '30 min', th: '30 นาที' },
+  late60: { en: '1 hr', th: '1 ชม.' },
+  lateNoted: {
+    en: 'Thanks for letting us know. We’ve told the host and will hold {code} until {time}.',
+    th: 'ขอบคุณที่แจ้งค่ะ เราแจ้งพนักงานแล้ว และจะเก็บโต๊ะ {code} ไว้ให้ถึง {time} น.',
+  },
+  cancelAsk: {
+    en: 'Cancel {code} on {night}?\n{policy}',
+    th: 'ต้องการยกเลิกโต๊ะ {code} คืน {night} ใช่ไหมคะ?\n{policy}',
+  },
+  cancelYes: { en: 'Yes, cancel', th: 'ใช่ ยกเลิก' },
+  keepBooking: { en: 'Keep booking', th: 'เก็บการจองไว้' },
+  cancelledByGuest: {
+    en: 'Your booking {ref} for {night} is cancelled.',
+    th: 'ยกเลิกการจอง {ref} คืน {night} แล้วค่ะ',
+  },
+  cannotChangeBooking: {
+    en: 'This booking can’t be changed here any more. A host can help.',
+    th: 'ไม่สามารถเปลี่ยนแปลงการจองนี้ในแชทได้แล้ว พนักงานยินดีช่วยค่ะ',
+  },
+
   // B10b: data removal and marketing opt-out (spec §14.9, §5.5).
   myData: { en: 'My data', th: 'ข้อมูลของฉัน' },
   myDataPrompt: {

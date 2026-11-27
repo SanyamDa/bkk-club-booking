@@ -222,7 +222,9 @@ describe('scheduler (B2)', () => {
     expect(buildScheduler(app, () => now).names().sort()).toEqual(
       [
         'alert-checks', 'brain-expiry', 'chatwoot-grant-sweep', 'chatwoot-mirror', 'club-report', 'handoff-timeout', 'hold-expiry', 'nightly-check',
-        'nights', 'removal', 'retention', 'snapshots', 'crowd-prompt', 'waitlist',
+        'nights', 'no-show', 'reminders', 'removal', 'retention', 'snapshots', 'crowd-prompt', 'waitlist',
+        'brain-draft', 'brain-lint', // B18
+        'brain-testset', 'brain-sample-review', // B17
       ].sort(),
     );
   });

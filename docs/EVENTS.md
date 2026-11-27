@@ -78,7 +78,7 @@ Every event the platform records, written with `emit()` into the `events` table 
 | `booking.checked_in` | 1 | `arrived_pax` (none) | — | Guest arrived, with actual party size. |
 | `booking.no_show` | 1 | — | — | Guest did not arrive. |
 | `table.released` | 1 | — | — | Table released for resale. |
-| `door.count` | 1 | `count_in` (none), `count_out` (none), `total` (none) | — | Door count recorded. |
+| `door.count` | 1 | `kind` (none), `count_in` (none), `count_out` (none), `total` (none) | — | Door count recorded. |
 | `crowd.rated` | 1 | `rating` (none) | — | Staff crowd rating. |
 | `night.sold_out` | 1 | — | — | Last table of the night taken. |
 | `booking.completed` | 1 | `billRef` (pseudonymous), `totalSatang` (none) | — | Booking closed with its bill. |

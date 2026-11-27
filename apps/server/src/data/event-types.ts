@@ -95,7 +95,7 @@ export const EVENT_DECLARATIONS = {
   'booking.checked_in': { v: 1, area: 'The night', description: 'Guest arrived, with actual party size.', props: { arrived_pax: N } },
   'booking.no_show': { v: 1, area: 'The night', description: 'Guest did not arrive.', props: {} },
   'table.released': { v: 1, area: 'The night', description: 'Table released for resale.', props: {} },
-  'door.count': { v: 1, area: 'The night', description: 'Door count recorded.', props: { count_in: N, count_out: N, total: N } },
+  'door.count': { v: 1, area: 'The night', description: 'Door count recorded.', props: { kind: N, count_in: N, count_out: N, total: N } },
   'crowd.rated': { v: 1, area: 'The night', description: 'Staff crowd rating.', props: { rating: N } },
   'night.sold_out': { v: 1, area: 'The night', description: 'Last table of the night taken.', props: {} },
   'booking.completed': { v: 1, area: 'The night', description: 'Booking closed with its bill.', props: { billRef: P, totalSatang: N } },

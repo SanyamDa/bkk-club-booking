@@ -26,6 +26,8 @@ import {
   type Club,
 } from '../db/schema.js';
 import type { AppContext } from '../http/context.js';
+import { releaseNow } from '../jobs/no-show.js';
+import { remindNow } from '../jobs/reminders.js';
 import { currentNightDate } from '../lib/time.js';
 import { SEED_HIST, seedTonight } from './seed-history.js';
 
@@ -119,12 +121,21 @@ export async function resetDemoClub(db: Db, clubId: string, now: Date): Promise<
 /**
  * Demo fast-forward (plan B7, spec §12.4). Does not change the clock: moves the chosen booking's
  * `hold_expires_at` to just before `now`, expires that one hold with `expireHold` (never the global
- * sweep, which would also expire other clubs' stale holds), then tells the guest. B10 widens `what`
- * with `'reminder'` and `'release'`. `undefined` when the booking is not a hold of that club.
+ * sweep, which would also expire other clubs' stale holds), then tells the guest. B10: `'reminder'`
+ * sends that booking's reminder now (`remindNow`) and `'release'` releases it as a no-show now
+ * (`releaseNow`). `undefined` when nothing happened to a booking of that club (not a hold, reminder
+ * already sent, not confirmed).
  */
-export async function fastForward(ctx: AppContext, clubId: string, what: 'hold_expiry', bookingId: string, now: Date): Promise<Booking | undefined> {
+export type FastForwardWhat = 'hold_expiry' | 'reminder' | 'release';
+
+export async function fastForward(ctx: AppContext, clubId: string, what: FastForwardWhat, bookingId: string, now: Date): Promise<Booking | undefined> {
   const db = ctx.deps.db;
   await demoClub(db, clubId);
+  if (what === 'reminder' || what === 'release') {
+    const done = what === 'reminder' ? await remindNow(ctx, clubId, bookingId, now) : await releaseNow(ctx, clubId, bookingId, now);
+    if (!done) return undefined;
+    return db.query.bookings.findFirst({ where: and(eq(bookings.id, bookingId), eq(bookings.clubId, clubId)) });
+  }
   if (what !== 'hold_expiry') throw new Error(`fastForward: unsupported ${String(what)}`);
   const moved = await db
     .update(bookings)

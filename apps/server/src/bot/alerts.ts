@@ -122,13 +122,22 @@ export function alertNoArrival(db: Db, v: BookingView, now: Date): Promise<void>
   );
 }
 
-/** B10: guest says they are running late. Information. */
-export function alertRunningLate(db: Db, v: BookingView, now: Date, conversationId?: string): Promise<void> {
-  return raiseAlert(
-    db,
-    { clubId: v.booking.clubId, level: 'info', kind: 'running_late', bookingId: v.booking.id, conversationId, text: bookingText(v, 'Running late', 'มาสาย') },
-    now,
-  );
+/** B10: guest says they are running late. Information. `late` adds the minutes and the new release time. */
+export function alertRunningLate(
+  db: Db,
+  v: BookingView,
+  now: Date,
+  conversationId?: string,
+  late?: { minutes: number; releaseTime: string },
+): Promise<void> {
+  const text = late
+    ? bookingText(
+        v,
+        `Running late: ${late.minutes} min, release at ${late.releaseTime}`,
+        `มาสาย ${late.minutes} นาที ปล่อยโต๊ะเวลา ${late.releaseTime}`,
+      )
+    : bookingText(v, 'Running late', 'มาสาย');
+  return raiseAlert(db, { clubId: v.booking.clubId, level: 'info', kind: 'running_late', bookingId: v.booking.id, conversationId, text }, now);
 }
 
 /** B10: a booking was cancelled. Information. */
@@ -157,12 +166,29 @@ export async function alertBrainWaiting(
   await raiseAlert(db, { clubId: input.clubId, level: 'needs_input', kind: input.kind, text }, now);
 }
 
-/** B16: AI spend is near the club's cap. Urgent, so the owner hears before answers stop. */
-export function alertCostCap(db: Db, clubId: string, spentSatang: number, capSatang: number, now: Date): Promise<void> {
-  const text = {
-    en: `AI answers have used ${formatBaht(spentSatang)} of the ${formatBaht(capSatang)} monthly cap. At the cap, chats go to a host.`,
-    th: `ค่าใช้จ่าย AI ใช้ไป ${formatBaht(spentSatang)} จากเพดาน ${formatBaht(capSatang)} ต่อเดือน เมื่อถึงเพดาน แชทจะส่งต่อให้พนักงาน`,
-  };
+/**
+ * B16: AI spend near (`reached: false`, at the warning share) or at the club's monthly cap. Urgent
+ * `ai_cost_cap` both times, so the owner hears before answers stop. Amounts are US$ micros, the
+ * unit of the `ai.call` events' `cost_usd_micros`.
+ */
+export function alertCostCap(
+  db: Db,
+  clubId: string,
+  input: { spentUsdMicros: number; capUsdMicros: number; reached: boolean },
+  now: Date,
+): Promise<void> {
+  const usd = (n: number) => `US$${(n / 1_000_000).toFixed(2)}`;
+  const spent = usd(input.spentUsdMicros);
+  const cap = usd(input.capUsdMicros);
+  const text = input.reached
+    ? {
+        en: `AI answers reached the ${cap} monthly cap. Guest questions now go to a host until next month.`,
+        th: `ระบบตอบอัตโนมัติถึงเพดาน ${cap} ต่อเดือนแล้ว คำถามของลูกค้าจะส่งให้พนักงานจนถึงเดือนหน้า`,
+      }
+    : {
+        en: `AI answers have used ${spent} of the ${cap} monthly cap. At the cap, guest questions go to a host.`,
+        th: `ระบบตอบอัตโนมัติใช้ไปแล้ว ${spent} จากเพดาน ${cap} ต่อเดือน เมื่อถึงเพดาน คำถามของลูกค้าจะส่งให้พนักงาน`,
+      };
   return raiseAlert(db, { clubId, level: 'urgent', kind: 'ai_cost_cap', text }, now);
 }
 

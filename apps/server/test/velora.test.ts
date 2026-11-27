@@ -243,7 +243,11 @@ describe('B7 Velora seeded club', () => {
     expect((await post('/nope/reset', admin)).status).toBe(404);
 
     const [hold] = await db.select().from(bookings).where(and(like(bookings.id, `${SEED_TONIGHT}%`), eq(bookings.status, 'held')));
-    expect((await post('/demo/fast-forward', admin, { what: 'reminder', bookingId: hold!.id })).status).toBe(400);
+    expect((await post('/demo/fast-forward', admin, { what: 'party', bookingId: hold!.id })).status).toBe(400);
+    // B10 widened `what`: a hold has no reminder or release to run, so nothing happens and it is 404.
+    expect((await post('/demo/fast-forward', admin, { what: 'reminder', bookingId: hold!.id })).status).toBe(404);
+    expect((await post('/demo/fast-forward', admin, { what: 'release', bookingId: hold!.id })).status).toBe(404);
+    expect((await db.query.bookings.findFirst({ where: eq(bookings.id, hold!.id) }))!.status).toBe('held');
     const ff = await post('/demo/fast-forward', admin, { what: 'hold_expiry', bookingId: hold!.id });
     expect(ff.status).toBe(200);
     expect(await ff.json()).toMatchObject({ booking: { id: hold!.id, status: 'expired' } });

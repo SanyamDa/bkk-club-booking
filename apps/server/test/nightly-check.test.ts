@@ -109,6 +109,16 @@ describe('nightly check (B2)', () => {
     expect(await opsOf('test_in_aggregates')).toMatchObject([{ kind: 'bot_error', clubId: clubB.id, detail: { views: { b2_probe: 1 } } }]);
   });
 
+  it('a demo-club row leaking into a B14 analytics view is flagged', async () => {
+    await keepClubBAwake();
+    // Drop the view's "real clubs only" filter, so the demo fixture club shows in analytics.clubs.
+    await db.execute(sql`create or replace view analytics.clubs as select id, slug, name, status, created_at from analytics_src.clubs`);
+
+    const result = await checkEventCompleteness(db, FRIDAY);
+    expect(result.testInAggregates).toBeGreaterThan(0);
+    expect(await opsOf('test_in_aggregates')).toMatchObject([{ kind: 'bot_error', clubId: null, detail: { analyticsRows: result.testInAggregates } }]);
+  });
+
   it('a failed check frees the claim so a later tick retries the night', async () => {
     await keepClubBAwake();
     await db.execute(sql`create schema if not exists analytics`);

@@ -2,10 +2,13 @@ import { createHmac } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
-import { alertBrainWaiting, alertNoArrival } from '../src/bot/alerts.js';
-import { getBookingView, holdTable, requestDeposit, submitDetails } from '../src/bookings/service.js';
+import { fakeLearnClient } from '../src/bot/deps.js';
+import { createManualBooking, holdTable, requestDeposit, submitDetails } from '../src/bookings/service.js';
+import { endOpenEpisode, recordStaffReply } from '../src/chat/episodes.js';
 import type { Db } from '../src/db/client.js';
-import { alerts, clubs, conversations, guests, messages, platformFlags, type Club } from '../src/db/schema.js';
+import { alerts, bookings, clubs, conversations, guests, messages, platformFlags, type Club } from '../src/db/schema.js';
+import { buildScheduler } from '../src/jobs/index.js';
+import { releaseAt } from '../src/jobs/no-show.js';
 import { featuresFlagKey } from '../src/platform/features.js';
 import type { CredentialStore } from '../src/line/credentials.js';
 import type { LineGateway, Message } from '../src/line/gateway.js';
@@ -85,6 +88,11 @@ function event(userId: string, message: Record<string, unknown>) {
   };
 }
 const text = (userId: string, t: string) => event(userId, { type: 'text', text: t, quoteToken: 'q' });
+function postback(userId: string, data: string) {
+  const body = event(userId, {});
+  const { message: _m, ...rest } = body.events[0]!;
+  return { ...body, events: [{ ...rest, type: 'postback', postback: { data } }] };
+}
 const image = (userId: string) => event(userId, { type: 'image', contentProvider: { type: 'line' }, quoteToken: 'q' });
 
 async function post(body: unknown) {
@@ -105,6 +113,15 @@ const staffRows = () => db.select().from(messages).where(and(eq(messages.clubId,
 
 async function guestOf(userId: string) {
   return (await db.query.guests.findFirst({ where: and(eq(guests.clubId, club.id), eq(guests.lineUserId, userId)) }))!;
+}
+
+/** A confirmed booking of `userId` (made by staff, then given to the guest). */
+async function confirmedFor(userId: string, tableId = 'table_demo_B1') {
+  await post(text(userId, 'hello'));
+  const guest = await guestOf(userId);
+  const b = await createManualBooking(db, club, { tableId, nightDate: FRIDAY, pax: 4, name: 'Ari', depositPaid: false }, { type: 'staff', id: 'user_staff' }, clock);
+  await db.update(bookings).set({ guestId: guest.id }).where(eq(bookings.id, b.id));
+  return { ...b, guestId: guest.id };
 }
 
 /** A booking of `userId` waiting for its slip (held, details in, deposit requested). */
@@ -233,22 +250,65 @@ describe('B19b alert call sites', () => {
   });
 
   it('a release time passed with no arrival raises urgent', async () => {
-    const bookingId = await awaitingSlip('Unoshow1');
-    const view = (await getBookingView(db, { clubId: club.id, id: bookingId }))!;
-    await alertNoArrival(db, view, clock);
+    const b = await confirmedFor('Unoshow1');
+    const release = releaseAt(club, b);
+    await buildScheduler(created.ctx, () => release).runOnce('no-show', release); // the B10 job
     const [a] = (await clubAlerts()).filter((r) => r.kind === 'no_arrival');
-    expect(a).toMatchObject({ level: 'urgent', bookingId });
+    expect(a).toMatchObject({ level: 'urgent', bookingId: b.id });
+    expect(a!.textEn).toContain('Not arrived at release time');
     expect(a!.sentLineAt).not.toBeNull();
     expect(groupPushes()).toHaveLength(1);
   });
 
-  it('a waiting draft raises needs-input', async () => {
-    await alertBrainWaiting(db, { clubId: club.id, kind: 'brain_draft_waiting', count: 2 }, clock);
-    await alertBrainWaiting(db, { clubId: club.id, kind: 'brain_draft_waiting', count: 3 }, clock); // one open per kind
-    const rows = await clubAlerts();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ level: 'needs_input', kind: 'brain_draft_waiting', sentLineAt: null });
+  it('running late and a guest cancel raise info and send no LINE push by default', async () => {
+    const b = await confirmedFor('Ulate1');
+    await post(postback('Ulate1', `a=late&b=${b.id}&m=30`));
+    await post(postback('Ulate1', `a=cancel_yes&b=${b.id}`));
+    const rows = (await clubAlerts()).filter((r) => r.bookingId === b.id);
+    expect(rows.map((r) => [r.kind, r.level]).sort()).toEqual([
+      ['cancellation', 'info'],
+      ['running_late', 'info'],
+    ]);
+    expect(rows.find((r) => r.kind === 'running_late')!.textEn).toContain('Running late: 30 min');
+    expect(rows.every((r) => r.sentLineAt === null)).toBe(true);
     expect(groupPushes()).toHaveLength(0);
+  });
+
+  it('a waiting draft raises needs-input', async () => {
+    // B18 for real: a takeover a host answers and resolves, then the brain-draft job drafts a note.
+    const learn = fakeLearnClient(() => ({
+      worth_learning: true,
+      kind: 'new',
+      edits_slug: null,
+      title: 'Birthday cakes',
+      question_en: 'Can I bring a birthday cake?',
+      question_th: 'เอาเค้กวันเกิดมาได้ไหม',
+      answer: 'Yes, you may bring your own birthday cake. Tell the host at the door and we keep it cold.',
+      flags: { price_or_availability: false, personal_data: false, one_off: false },
+      contradicts: [],
+    }));
+    await created.settle();
+    created = createApp(testConfig(), db, { bot: { now: () => clock, log: () => {}, learn }, credentials });
+    useGateway(fakeGateway());
+    const draftOnce = async (userId: string) => {
+      await post(text(userId, 'can I talk to a staff member please'));
+      const guest = await guestOf(userId);
+      const conv = (await db.query.conversations.findFirst({ where: eq(conversations.guestId, guest.id) }))!;
+      const send = { outbox: created.ctx.deps.outbox, gateways: created.ctx.gateways };
+      await recordStaffReply(db, { clubId: club.id, conversationId: conv.id, userId: 'user_host', text: 'Yes, bring your cake and tell the door host.', channel: 'dashboard', occurredAt: clock, externalId: null }, send);
+      await db.transaction((tx) => endOpenEpisode(tx, { clubId: club.id, conversationId: conv.id, resolverUserId: 'user_host', now: clock }));
+      clock = new Date(clock.getTime() + 60_000);
+      await buildScheduler(created.ctx, () => clock).runOnce('brain-draft', clock);
+    };
+    await draftOnce('Udraft1');
+    await draftOnce('Udraft2'); // one open per kind
+    const rows = (await clubAlerts()).filter((r) => r.kind === 'brain_draft_waiting');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ level: 'needs_input', sentLineAt: null });
+    expect(rows[0]!.textEn).toContain('1 drafted brain note(s) waiting');
+    expect(learn.drafts).toHaveLength(2);
+    // Only the two handoff alerts (urgent) reached the group, not the draft.
+    expect(groupPushes()).toHaveLength(2);
   });
 
   it('alerts_line switched off keeps the alert in the feed and sends nothing to the staff group', async () => {

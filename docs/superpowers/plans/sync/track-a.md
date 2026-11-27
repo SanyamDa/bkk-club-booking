@@ -958,6 +958,15 @@ Route: `POST /integrations/pos/papaya/:slug`.
 
 The B0 request (`applyClubContent`, velora-like 501), the B13 request (`upsertCalendarDay`, A9 todo) and the B15 request (`brain/notes.ts`, A17 `faqs` step and todo) are done; earlier lines above that say "until B0/B13/B15" are historical. See `sync/track-b.md`, "Integration: B0 part 2, B1, B13, B15".
 
+## 2026-11-27: A16 club stats page, built by Session A on track-c
+
+- **Produces:** `buildClubStats(db: Db, clubId: string, from: string, to: string): Promise<ClubStats>` in `platform/club-stats.ts`; `GET /api/staff/clubs/:slug/stats?from=YYYY-MM-DD&to=YYYY-MM-DD` (owner/manager, nights inclusive, at most 366; no range = last complete week) → `{ stats }`; web `pages/staff/Stats.tsx` at `/staff/stats`.
+- **Shared helpers now exported from `platform/club-report.ts`** (A16b behaviour unchanged): `nightRange`, `testGuestIds`, `bookingFigures`, `chatFigures`, `bangkokAt`, `rate`, `HELD`, `MANUAL_SOURCES`, `CONVERSATION_GAP_MS`.
+- **Assumptions others must match:** B16 stores the monthly AI cost cap in `platform_flags['ai-cost-cap:<clubId>'].value.usdMicros` (`aiCostCapKey`) and emits `ai.call` with `props.cost_usd_micros`. Funnel counts distinct `attempt_id` per step (`booking.started`, `night.selected`, `pax.selected`, `table.held`, `details.submitted`, `rules.accepted`, `deposit.verified`, `booking.confirmed`), so B4b's emits must carry `attempt_id`. G5 booking time is first attempt event to `booking.confirmed`. G8 reads `handoff_episodes.started_at` and the first `messages.author_type = 'staff'` row to that guest.
+- **it.todo:** `club-stats.test.ts` keeps one for the B7-seeded Velora history week; until B7 merges the week is hand-seeded on `seedDemoClub`'s Velora.
+- **Unverified against a real service:** none called; push quota reads the stored `lastKnownQuota`, not a live LINE call. AI cost is 0 until B16 emits `ai.call`.
+- **Web:** `/staff/stats` builds; the browser walk is still to be done by a human.
+
 ## 2026-11-27 — A20b payment gateway option, built by Session A on track-a (legal gate waived by owner override)
 
 Supersedes the A20b blocker above. Migration: none (`deposits.method` gains `'gateway'` at type level only).

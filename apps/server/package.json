@@ -12,9 +12,11 @@
     "live": "tsx src/scripts/live.ts",
     "load": "tsx src/scripts/load.ts",
     "admin:create": "tsx src/scripts/create-admin.ts",
-    "events:doc": "tsx src/scripts/events-doc.ts"
+    "events:doc": "tsx src/scripts/events-doc.ts",
+    "eval:brain": "tsx src/scripts/eval-brain.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "1.14.0",
     "@electric-sql/pglite": "^0.6.0",
     "@hono/node-server": "^2.1.11",
     "@line/bot-sdk": "^11.4.0",

@@ -88,6 +88,13 @@ export class Notifier {
     ]);
   }
 
+  /** B10: day-of reminder with [Running late] [Need to cancel] [Location]. A push (counts against quota). */
+  async reminder(booking: Booking) {
+    const c = await this.ctx(booking.clubId, booking.id);
+    if (!c) return;
+    await this.deps.outbox.toGuest(c.gateway, c.club, c.view.guest, [M.reminder(c.club, c.lang, c.view)]);
+  }
+
   /**
    * Hourly "how full now?" to the club's staff group, where the door and host staff are (spec §14.3,
    * plan B12). Staff answer 1–5 on the door screen or the dashboard.

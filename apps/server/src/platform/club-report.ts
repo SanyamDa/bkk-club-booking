@@ -60,11 +60,11 @@ export interface ClubReport {
   door: { count: number; bookedPax: number; peakHour: number | null };
 }
 
-const HELD = ['confirmed', 'arrived', 'completed', 'no_show'] as const;
+export const HELD = ['confirmed', 'arrived', 'completed', 'no_show'] as const;
 const RESOLVED = new Set(['arrived', 'completed', 'no_show']);
-const MANUAL_SOURCES = new Set(['manual', 'manual_phone', 'manual_walkin']);
+export const MANUAL_SOURCES = new Set(['manual', 'manual_phone', 'manual_walkin']);
 /** §3.2: a free-text conversation ends after a gap longer than this. */
-const CONVERSATION_GAP_MS = 6 * 3600_000;
+export const CONVERSATION_GAP_MS = 6 * 3600_000;
 const BKK_OFFSET_MS = 7 * 3600_000;
 
 /** The Monday of the week that `date` (YYYY-MM-DD) falls in. */
@@ -78,30 +78,59 @@ export function lastCompleteWeek(club: Club, now: Date): string {
 }
 
 /** A Bangkok wall-clock hour on a date, as an instant. */
-function bangkokAt(date: string, hour: number): Date {
+export function bangkokAt(date: string, hour: number): Date {
   const [y, m, d] = date.split('-').map(Number) as [number, number, number];
   return new Date(Date.UTC(y, m - 1, d, hour) - BKK_OFFSET_MS);
 }
 
-const rate = (n: number, d: number) => (d > 0 ? n / d : null);
+export const rate = (n: number, d: number) => (d > 0 ? n / d : null);
 
-export async function buildClubReport(db: Db, clubId: string, weekStart: string): Promise<ClubReport> {
+/**
+ * A range of nights `start..end` (inclusive) for one club, shared by the weekly report (A16b) and
+ * the stats page (A16). `withTest` is true for a `demo` club, whose rows are all its own test rows.
+ * Chat and takeover times run from the first night's end hour to the end hour after the last night.
+ */
+export interface NightRange {
+  club: Club;
+  start: string;
+  end: string;
+  withTest: boolean;
+  from: Date;
+  to: Date;
+}
+
+export async function nightRange(db: Db, clubId: string, start: string, end: string): Promise<NightRange> {
   const club = await db.query.clubs.findFirst({ where: eq(clubs.id, clubId) });
   if (!club) throw new Error(`unknown club ${clubId}`);
-  const start = mondayOf(weekStart);
-  const end = addDays(start, 6);
-  const withTest = club.status === 'demo';
-  // Chat and takeover times: from the first night's end hour to the same hour seven days later.
-  const from = bangkokAt(start, club.settings.nightEndHour);
-  const to = bangkokAt(addDays(start, 7), club.settings.nightEndHour);
+  return {
+    club,
+    start,
+    end,
+    withTest: club.status === 'demo',
+    from: bangkokAt(start, club.settings.nightEndHour),
+    to: bangkokAt(addDays(end, 1), club.settings.nightEndHour),
+  };
+}
 
-  const weekBookings = (
+/** Ids of the club's test guests; empty for a demo club (its test rows count). */
+export async function testGuestIds(db: Db, r: NightRange): Promise<Set<string>> {
+  if (r.withTest) return new Set<string>();
+  const rows = await db.select({ id: guests.id }).from(guests).where(and(eq(guests.clubId, r.club.id), eq(guests.isTest, true)));
+  return new Set(rows.map((g) => g.id));
+}
+
+export type RangeBooking = typeof bookings.$inferSelect;
+
+/** Booking figures of a night range: held bookings, deposits, no-shows and the G1 no-staff-help count. */
+export async function bookingFigures(db: Db, r: NightRange) {
+  const clubId = r.club.id;
+  const rangeBookings = (
     await db
       .select()
       .from(bookings)
-      .where(and(eq(bookings.clubId, clubId), gte(bookings.nightDate, start), lt(bookings.nightDate, addDays(start, 7))))
-  ).filter((b) => withTest || !b.isTest);
-  const held = weekBookings.filter((b) => (HELD as readonly string[]).includes(b.status));
+      .where(and(eq(bookings.clubId, clubId), gte(bookings.nightDate, r.start), lt(bookings.nightDate, addDays(r.end, 1))))
+  ).filter((b) => r.withTest || !b.isTest);
+  const held = rangeBookings.filter((b) => (HELD as readonly string[]).includes(b.status));
   const heldIds = held.map((b) => b.id);
 
   const paid = heldIds.length
@@ -125,48 +154,29 @@ export async function buildClubReport(db: Db, clubId: string, weekStart: string)
   const unaided = held.filter((b) => {
     if (MANUAL_SOURCES.has(b.source)) return false;
     const lo = b.createdAt.getTime() - CONVERSATION_GAP_MS;
-    const hi = bangkokAt(addDays(b.nightDate, 1), club.settings.nightEndHour).getTime();
+    const hi = bangkokAt(addDays(b.nightDate, 1), r.club.settings.nightEndHour).getTime();
     return !staffMsgs.some((m) => m.guestId === b.guestId && m.at.getTime() >= lo && m.at.getTime() < hi);
   }).length;
 
-  const byNight = new Map<string, number>();
-  for (const b of held) byNight.set(b.nightDate, (byNight.get(b.nightDate) ?? 0) + 1);
-  const busiestNights = [...byNight.entries()]
-    .map(([nightDate, n]) => ({ nightDate, bookings: n }))
-    .sort((a, b) => b.bookings - a.bookings || a.nightDate.localeCompare(b.nightDate))
-    .slice(0, 3);
+  return {
+    rangeBookings,
+    held,
+    heldIds,
+    cancelled: rangeBookings.filter((b) => b.status === 'cancelled').length,
+    deposits: { count: paid.length, satang: paid.reduce((s, p) => s + p.amount, 0) },
+    noShowRate: rate(noShows, resolved.length),
+    unaided,
+    noStaffHelpRate: rate(unaided, held.length),
+  };
+}
 
-  const zoneRows = await db
-    .select({ tableId: tables.id, zoneId: zones.id, name: zones.name, nameTh: zones.nameTh, sort: zones.sort })
-    .from(tables)
-    .innerJoin(zones, eq(zones.id, tables.zoneId))
-    .where(eq(tables.clubId, clubId));
-  const zoneOf = new Map(zoneRows.map((z) => [z.tableId, z]));
-  const byZone = new Map<string, { zoneId: string; name: string; nameTh: string; sort: number; bookings: number }>();
-  for (const b of held) {
-    const z = zoneOf.get(b.tableId);
-    if (!z) continue;
-    const cur = byZone.get(z.zoneId) ?? { zoneId: z.zoneId, name: z.name, nameTh: z.nameTh, sort: z.sort, bookings: 0 };
-    cur.bookings += 1;
-    byZone.set(z.zoneId, cur);
-  }
-  const zoneList = [...byZone.values()]
-    .sort((a, b) => b.bookings - a.bookings || a.sort - b.sort)
-    .map(({ zoneId, name, nameTh, bookings: n }) => ({ zoneId, name, nameTh, bookings: n }));
-
-  const bills = heldIds.length
-    ? await db
-        .select({ total: posBills.totalSatang })
-        .from(posBills)
-        .where(and(eq(posBills.clubId, clubId), inArray(posBills.bookingId, heldIds)))
-    : [];
-  const billTotals = bills.map((b) => b.total).filter((t): t is number => t !== null);
-  const averageSpendSatang = billTotals.length ? Math.round(billTotals.reduce((s, t) => s + t, 0) / billTotals.length) : null;
-
-  // Deflection (§3.2): runs of typed guest messages split on a 6 h gap; deflected when no takeover starts in the run.
-  const testGuests = withTest
-    ? new Set<string>()
-    : new Set((await db.select({ id: guests.id }).from(guests).where(and(eq(guests.clubId, clubId), eq(guests.isTest, true)))).map((g) => g.id));
+/**
+ * Chat figures of a night range (§3.2 G9): runs of typed guest messages split on a 6 h gap, and the
+ * takeovers (`handoff_episodes`) that started in the range; a run is deflected when no takeover
+ * starts in it. Test guests are left out for real clubs.
+ */
+export async function chatFigures(db: Db, r: NightRange, testGuests: Set<string>) {
+  const clubId = r.club.id;
   const typed = (
     await db
       .select({ guestId: messages.guestId, at: messages.createdAt })
@@ -176,8 +186,8 @@ export async function buildClubReport(db: Db, clubId: string, weekStart: string)
           eq(messages.clubId, clubId),
           eq(messages.direction, 'in'),
           eq(messages.kind, 'text'),
-          gte(messages.createdAt, from),
-          lt(messages.createdAt, to),
+          gte(messages.createdAt, r.from),
+          lt(messages.createdAt, r.to),
         ),
       )
   ).filter((m): m is { guestId: string; at: Date } => m.guestId !== null && !testGuests.has(m.guestId));
@@ -186,7 +196,7 @@ export async function buildClubReport(db: Db, clubId: string, weekStart: string)
       .select({ guestId: conversations.guestId, startedAt: handoffEpisodes.startedAt, topic: handoffEpisodes.topic })
       .from(handoffEpisodes)
       .innerJoin(conversations, eq(conversations.id, handoffEpisodes.conversationId))
-      .where(and(eq(handoffEpisodes.clubId, clubId), gte(handoffEpisodes.startedAt, from), lt(handoffEpisodes.startedAt, to)))
+      .where(and(eq(handoffEpisodes.clubId, clubId), gte(handoffEpisodes.startedAt, r.from), lt(handoffEpisodes.startedAt, r.to)))
   ).filter((e) => !testGuests.has(e.guestId));
 
   const runs: { guestId: string; first: number; last: number }[] = [];
@@ -204,7 +214,7 @@ export async function buildClubReport(db: Db, clubId: string, weekStart: string)
     runs.push(run);
   }
   const deflected = runs.filter(
-    (r) => !episodes.some((e) => e.guestId === r.guestId && e.startedAt.getTime() >= r.first && e.startedAt.getTime() <= r.last + CONVERSATION_GAP_MS),
+    (run) => !episodes.some((e) => e.guestId === run.guestId && e.startedAt.getTime() >= run.first && e.startedAt.getTime() <= run.last + CONVERSATION_GAP_MS),
   ).length;
 
   const byTopic = new Map<string, number>();
@@ -212,6 +222,56 @@ export async function buildClubReport(db: Db, clubId: string, weekStart: string)
   const takeoversByTopic = [...byTopic.entries()]
     .map(([topic, n]) => ({ topic, n }))
     .sort((a, b) => b.n - a.n || a.topic.localeCompare(b.topic));
+
+  return {
+    episodes,
+    deflection: { conversations: runs.length, deflected, rate: rate(deflected, runs.length) },
+    takeoversByTopic,
+  };
+}
+
+export async function buildClubReport(db: Db, clubId: string, weekStart: string): Promise<ClubReport> {
+  const start = mondayOf(weekStart);
+  const end = addDays(start, 6);
+  const range = await nightRange(db, clubId, start, end);
+  const b = await bookingFigures(db, range);
+  const { held, heldIds } = b;
+
+  const byNight = new Map<string, number>();
+  for (const bk of held) byNight.set(bk.nightDate, (byNight.get(bk.nightDate) ?? 0) + 1);
+  const busiestNights = [...byNight.entries()]
+    .map(([nightDate, n]) => ({ nightDate, bookings: n }))
+    .sort((x, y) => y.bookings - x.bookings || x.nightDate.localeCompare(y.nightDate))
+    .slice(0, 3);
+
+  const zoneRows = await db
+    .select({ tableId: tables.id, zoneId: zones.id, name: zones.name, nameTh: zones.nameTh, sort: zones.sort })
+    .from(tables)
+    .innerJoin(zones, eq(zones.id, tables.zoneId))
+    .where(eq(tables.clubId, clubId));
+  const zoneOf = new Map(zoneRows.map((z) => [z.tableId, z]));
+  const byZone = new Map<string, { zoneId: string; name: string; nameTh: string; sort: number; bookings: number }>();
+  for (const bk of held) {
+    const z = zoneOf.get(bk.tableId);
+    if (!z) continue;
+    const cur = byZone.get(z.zoneId) ?? { zoneId: z.zoneId, name: z.name, nameTh: z.nameTh, sort: z.sort, bookings: 0 };
+    cur.bookings += 1;
+    byZone.set(z.zoneId, cur);
+  }
+  const zoneList = [...byZone.values()]
+    .sort((x, y) => y.bookings - x.bookings || x.sort - y.sort)
+    .map(({ zoneId, name, nameTh, bookings: n }) => ({ zoneId, name, nameTh, bookings: n }));
+
+  const bills = heldIds.length
+    ? await db
+        .select({ total: posBills.totalSatang })
+        .from(posBills)
+        .where(and(eq(posBills.clubId, clubId), inArray(posBills.bookingId, heldIds)))
+    : [];
+  const billTotals = bills.map((bl) => bl.total).filter((t): t is number => t !== null);
+  const averageSpendSatang = billTotals.length ? Math.round(billTotals.reduce((s, t) => s + t, 0) / billTotals.length) : null;
+
+  const chat = await chatFigures(db, range, await testGuestIds(db, range));
 
   // Door counts have no is_test column: they are test rows only when the club is demo (counted then).
   const clicks = await db
@@ -228,18 +288,18 @@ export async function buildClubReport(db: Db, clubId: string, weekStart: string)
     weekStart: start,
     weekEnd: end,
     bookings: held.length,
-    cancelled: weekBookings.filter((b) => b.status === 'cancelled').length,
-    deposits: { count: paid.length, satang: paid.reduce((s, p) => s + p.amount, 0) },
-    noShowRate: rate(noShows, resolved.length),
-    noStaffHelpRate: rate(unaided, held.length),
+    cancelled: b.cancelled,
+    deposits: b.deposits,
+    noShowRate: b.noShowRate,
+    noStaffHelpRate: b.noStaffHelpRate,
     busiestNights,
     zones: zoneList,
     averageSpendSatang,
     topPromoters: await topPromoters(db, clubId, start),
     vip: await vipSummary(db, clubId, start),
-    deflection: { conversations: runs.length, deflected, rate: rate(deflected, runs.length) },
-    takeoversByTopic,
-    door: { count: clicks.reduce((s, c) => s + c.delta, 0), bookedPax: held.reduce((s, b) => s + b.pax, 0), peakHour },
+    deflection: chat.deflection,
+    takeoversByTopic: chat.takeoversByTopic,
+    door: { count: clicks.reduce((s, c) => s + c.delta, 0), bookedPax: held.reduce((s, bk) => s + bk.pax, 0), peakHour },
   };
 }
 

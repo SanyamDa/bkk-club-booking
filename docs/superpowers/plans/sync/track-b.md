@@ -246,6 +246,144 @@ export async function listTableOptions(db: Db, clubId: string, nightDate?: strin
 - **B2 `arrivedPax`:** the staff route `POST /api/staff/clubs/:slug/bookings/:id/arrived` takes an optional body `arrivedPax` (integer 0–200) and passes it to `markArrived`. Test: `staff-events.test.ts › the arrived route stores the party size at the door`.
 - **Still open:** no scheduled job for `syncClosedBills` (A19 request 3); it is an A19 follow-up, one `s.register(...)` line in `buildScheduler` once its per-club night loop is decided.
 
+## 2026-11-27: B19 Brain manager UI, built by Session A on track-c (not merged)
+
+**Published (`http/brain.ts`, mounted with `app.route('/api/staff', brainRoutes(ctx))`; owner or manager; another club's note id is 404):**
+`GET /api/staff/clubs/:slug/brain/notes` (non-retired notes, latest snapshot version and token count, `tokenWarn`, `tokenCap`), `GET .../brain/queue` (drafts with `question`, `hostReply`, `takeovers`, `replaces`), `GET .../brain/gaps`, `POST .../brain/notes` (manager-written, saved **live**; optional `gapTopic`), `PATCH .../brain/notes/:noteId`, `GET .../brain/notes/:noteId/versions`, `POST .../brain/notes/:noteId/approve`, `POST .../brain/notes/:noteId/reject`. Errors: lint 422 `{ error: 'lint', issues, fix }`, cap 409 `{ error: 'over_cap', tokenCount }`, retired note approve 409 `not_draft`.
+`brain/gaps.ts`: `listGaps(db, club, now, { days? = 30 }): Promise<BrainGap[]>`, `BrainGap { key, topic, count, lastAskedAt, question }`.
+
+**Assumptions others must match:**
+- B16 emits `faq.missed` with `props.topic` (a code) and the guest's question in `raw.text`. Gaps group by topic, else the lower-cased question. Until B16 emits it, gaps are empty.
+- B18 writes on each learned draft `frontmatter.question`, `frontmatter.hostReply` and `frontmatter.takeovers` (a number: takeovers on the topic). The queue ranks by `takeovers` desc, then newest. Until B18, every draft ranks newest first.
+- A note with `frontmatter.gapTopic = <gap key>`, live and approved after the last miss, closes the gap. B18's gap handling should reuse `listGaps`.
+- `isolationFixtures` in `test/helpers/track-b.ts` now inserts one draft note per club (`notes/:noteId`).
+
+**Web:** `pages/staff/brain/Brain.tsx` (approval queue with Approve / Edit then approve / Reject, gaps with Write an answer, notes grouped by type with source, last edit and review date), nav item "Brain" in `Layout.tsx`, route `/staff/brain` in `main.tsx`. Builds; the browser walk is still to be done by a human.
+
+**Unverified against a real service:** none called; B16 `faq.missed` and B18 frontmatter are assumed shapes, tested with hand-written rows.
+
+**Closed:** the B15 note "the B19 approval screen is not built" is done. No code fallback waited on B19.
+
+**Tests:** `brain-ui.test.ts` (9 pass); `isolation.test.ts` passes with the brain routes.
+
+## 2026-11-27: B14 Data dashboard v1, built by Session A on track-c (not merged)
+
+**Migration:** `apps/server/drizzle/0008_analytics_views.sql` (custom, `--name analytics_views`): schemas `analytics_src` (private), `analytics` (real clubs), `analytics_demo` (Velora), role `metabase_ro`. Views and a role only, no table change. Renumbered from `0005` to `0006` at the merge of track-a into track-c (track-a took `0005_b6_test_rows`), and to `0008_analytics_views` at the wave-4 merge (track-a took `0006`, `0007`).
+
+**Published:**
+```ts
+// data/analytics.ts
+export const ANALYTICS_VIEWS: readonly ['clubs', 'events', 'booking_funnel', 'booking_pace', 'booking_curve', 'demand_no_table', 'no_show_rate', 'door_vs_bookings', 'busyness_by_hour'];
+export const METABASE_ROLE = 'metabase_ro';
+export async function testRowsInAnalytics(db: Db): Promise<number>; // must be 0
+```
+- **Request to B2:** `checkEventCompleteness(...).testInAggregates` = `await testRowsInAnalytics(db)`. Done at the merge of track-a into track-c: added to B2's `is_test`-column count, a leak is one `ops_events` row `test_in_aggregates` with no club and `detail.analyticsRows` (`nightly-check.test.ts › a demo-club row leaking into a B14 analytics view is flagged`).
+- Analytics reads only `data_origin` in (`first_party`, `pos`), never `channel = 'instagram'`, never `bookings.source = 'instagram'`; a real club's test guest, booking or event is left out; every demo-club row is only in `analytics_demo`.
+- Metabase: compose profile `metabase` (`docker compose --profile metabase up -d`), new env `METABASE_DB_PASSWORD` (role `metabase_ro`) and `METABASE_APP_DB_PASSWORD` (role `metabase_app`, non-superuser owner of the `metabase` settings database), published on `127.0.0.1:3000` only. Boards in `infra/metabase/dashboards/*.json`, loaded with `infra/metabase/provision.mjs`.
+
+**Closed:** `instagram.test.ts` todo "the Metabase analytics view ... leave out instagram-origin rows" is a real test; the busyness-feed half stays a todo (busyness feed task).
+
+**Assumptions in place of a human decision:** no Metabase account exists, so the plan's assumption is used: self-hosted Metabase in compose, localhost-only, image `metabase/metabase:v0.50.0` (bump at deploy); admin user and boards created by `provision.mjs`.
+
+**Unverified:** no real Metabase run; `provision.mjs` (Metabase REST API) and the image tag untested; `init-role.sh` not run against a real Postgres (PGlite tests cover the role through `SET LOCAL ROLE`).
+
+**Tests:** `analytics.test.ts` (12 pass); `instagram.test.ts` (14 pass, 3 todo).
+
+## 2026-11-27 B11 Door screen, built by Session A on track-c
+
+**Built:** `http/door.ts` mounted in `app.ts` (`app.route('/api/staff', doorRoutes(ctx))`), routes under `/api/staff/clubs/:slug/door` behind `requireClubRole(app, 'owner', 'manager', 'host', 'door')` (door role alone is enough; promoter 403): `GET /door?date=`, `GET /door/find?q=`, `POST /door/bookings/:id/check-in { arrivedPax? }` (B2 `markArrived`; 404 other club, 409 `wrong_night`, 409 `invalid_state`; A19 POS bill opens as on the staff `arrived` route), `POST /door/count { kind, delta: 1|-1, clickId? }` (one `door_counts` row + `door.count` event in one tx; 409 `below_zero`; repeated `clickId` writes nothing). Web: `pages/door/Door.tsx` at `/door` (route line in `main.tsx`), door-role login redirected there from `pages/staff/Layout.tsx`, "Door" nav item, door styles appended to `styles.css`.
+
+**Interfaces (Produces):**
+```ts
+export const DOOR_KINDS: readonly ['table_guest', 'guestlist', 'walk_in', 'ticket'];
+export type DoorKind = (typeof DOOR_KINDS)[number];
+export async function doorCounts(db: Db, clubId: string, nightDate: string): Promise<{ byKind: Record<DoorKind, number>; total: number }>; // in http/door.ts
+export function doorRoutes(app: AppContext): Hono<AuthEnv>;
+```
+- **Event change (additive, v stays 1):** `door.count` props gain `kind` (none): props are `kind`, `count_in`, `count_out`, `total` (night net after the click). `channel: 'door'`, `dataOrigin: 'first_party'`, `dedupe_key: door:<clickId>` when given. `docs/EVENTS.md` updated.
+- B12 (`crowd.rated` route) goes in the same `http/door.ts` router under `/clubs/:slug/door/...`.
+- Isolation: the check-in route reuses Track A's `bookings/:id` fixture; `isolationFixtures` (track-b) adds nothing.
+
+**Assumption in place of a human decision:** QR scan uses the browser's `BarcodeDetector` (Android Chrome); where it is missing (iOS Safari) the page falls back to ref/name/phone search, which spec §6.2 names as the fallback. No new web dependency.
+
+**Unverified against a real service:** the camera QR scan (`BarcodeDetector`) has not run on a real phone or a real printed pass; the A19 POS bill open on check-in runs only against the POS test fake.
+
+**Tests:** `door.test.ts` (10 pass); `isolation.test.ts` (6 pass); `events.test.ts` (8 pass). Web: typecheck and `vite build` only. The browser walk of `/door` (login as a door-role account, scan or search, check in, clicker +1/-1) is still to be done by a human.
+
+## 2026-11-27 B10 Reminders, running late, guest cancel, no-show job, built by Session A on track-c
+
+**Built:** jobs `reminders` and `no-show` (every minute) registered in `buildScheduler`. Bot postbacks `a=late&b=<id>[&m=15|30|60]`, `a=cancel&b=<id>`, `a=cancel_yes&b=<id>`; My booking on a confirmed booking carries [Running late] [Cancel] [Talk to a host] quick replies. Staff group alerts for running late, guest cancel and no-show release (TH + EN). Plan section "Task B10 (expanded)" added.
+
+**Interfaces (Produces):**
+```ts
+// jobs/reminders.ts
+export function reminderDueAt(club: Pick<Club, 'settings'>, nightDate: string): Date;
+export async function sendDueReminders(ctx: AppContext, now: Date, only?: { clubId: string; bookingId: string }): Promise<number>;
+export async function remindNow(ctx: AppContext, clubId: string, bookingId: string, now: Date): Promise<boolean>;
+// jobs/no-show.ts
+export function atNightTime(club: Pick<Club, 'settings'>, nightDate: string, hhmm: string): Date;
+export function releaseAt(club: Pick<Club, 'settings'>, booking: Pick<Booking, 'nightDate' | 'runningLateMinutes'>): Date;
+export async function releaseNoShows(ctx: AppContext, now: Date, only?: { clubId: string; bookingId: string }): Promise<number>;
+export async function releaseNow(ctx: AppContext, clubId: string, bookingId: string, now: Date): Promise<boolean>;
+// bookings/service.ts (new, frozen W0 signatures untouched)
+export async function releaseNoShow(db: Db, clubId: string, bookingId: string, actor: Actor, now: Date): Promise<Booking>; // changeStatus -> no_show (reason 'released') + releaseTable, one tx
+export const RUNNING_LATE_MINUTES: readonly [15, 30, 60];
+export async function setRunningLate(db: Db, clubId: string, bookingId: string, actor: Actor, minutes: number, now: Date): Promise<Booking>; // audit 'running_late' + event running_late
+// bot/notify.ts: Notifier.reminder(booking), Notifier.noShowReleased(booking)
+```
+- **New optional `ClubSettings` keys** (defaults in code, no migration): `reminderTime` ('18:00'), `arrivalGraceMinutes` (30), `runningLateExtendsRelease` (true), `autoNoShow` (true). A9's settings UI may expose them.
+- **For B7 (`demo/reset.ts`, not on this branch):** widen `fastForward`'s `what` to `'hold_expiry' | 'reminder' | 'release'`; `'reminder'` calls `remindNow(ctx, clubId, bookingId, now)`, `'release'` calls `releaseNow(ctx, clubId, bookingId, now)`. Both act on that one booking only.
+
+**Assumption in place of a human decision:** the spec's host prompt "17A not arrived — release table? [Release] [Keep 30 min]" is replaced by automatic release after arrival + running late + grace, with a staff alert; a club that wants to decide sets `autoNoShow: false` and marks no-shows from the dashboard. Guest cancel frees the table through the `cancelled` status (no `table.released` event; that event is the no-show release).
+
+**Unverified against a real service:** reminder, running-late, cancel and no-show pushes go through the LINE client test fake only; no real LINE push or quick-reply rendering has been seen on a phone. Fast-forward wiring into `demo/reset.ts` waits on B7.
+
+**Tests:** `reminders.test.ts` (10 pass); `booking-history.test.ts › buildScheduler registers every job` updated with the two jobs. No web change.
+
+## 2026-11-27 B16 AI answers, built by Session A on track-c
+
+**Built:** free-text guest messages answered from the compiled brain (`latestSnapshot`) by `claude-haiku-5-5`, fallback `claude-sonnet-5-5`, through an injectable model client; output guard; per-club monthly cost cap with warning; deterministic Thai/English booking-detail pre-fill. Plan section "Task B16 (expanded)" added. New dependency `@anthropic-ai/sdk@1.14.0` in `apps/server/package.json`.
+
+**Interfaces (Produces):**
+```ts
+// brain/answer.ts
+export interface ModelClient { call(req: ModelRequest): Promise<ModelReply> }
+export function anthropicModelClient(apiKey: string): ModelClient;
+export interface ModelRequest { model: AiModel; instructions: string; brain: string; tools: Anthropic.Tool[]; userContent: string }
+export interface ModelReply { toolCalls: { name: string; input: unknown }[]; text: string; usage: ModelUsage } // ModelUsage { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }
+export const AI_PRIMARY_MODEL = 'claude-haiku-5-5'; export const AI_FALLBACK_MODEL = 'claude-sonnet-5-5';
+export interface AnswerDeps { db: Db; client: ModelClient; log: (msg: string, err?: unknown) => void }
+export interface AnswerSession { club: Club; guest: Guest; conv: Conversation; lang: 'th' | 'en' }
+export type AiOutcome =
+  | { kind: 'answer'; text: string; lang: 'th' | 'en'; noteIds: string[]; topic: string }
+  | { kind: 'menu' }
+  | { kind: 'booking'; details: BookingDetails }
+  | { kind: 'my_booking' }
+  | { kind: 'handoff'; reason: 'ai_cost_cap' | 'ai_unavailable' | 'faq_missed' | 'guard' | 'guest_request'; topic: string | null; summary: string };
+export async function answerGuestMessage(deps: AnswerDeps, s: AnswerSession, text: string, now: Date): Promise<AiOutcome>;
+export async function aiCostCap(db: Db, clubId: string): Promise<number>;          // platform_flags['ai-cost-cap:<clubId>'].value.usdMicros, default DEFAULT_AI_COST_CAP_USD_MICROS (100_000_000)
+export async function aiSpendThisMonth(db: Db, clubId: string, now: Date): Promise<number>; // sum ai.call props.cost_usd_micros, Bangkok month
+export function callCostUsdMicros(model: AiModel, usage: ModelUsage): number;
+// brain/extract.ts
+export function extractBookingDetails(text: string, ctx: ExtractContext): BookingDetails; // { date?, pax?, tableCode?, zonePref? }
+export function normalizeDetails(input: unknown, ctx: ExtractContext): BookingDetails;
+// brain/guard.ts
+export function guardAnswer(text: string, clubTableCodes: readonly string[], facts?: TurnFacts): GuardIssue[];
+// brain/tools.ts: TOOL_DEFINITIONS (reply, check_availability, start_booking, get_booking, request_handoff), parseToolCall
+// bot/deps.ts: BotDepOptions.ai?: ModelClient | null (omitted: built from config.ANTHROPIC_API_KEY; null: AI off)
+export function fakeModelClient(respond: (req: ModelRequest) => Partial<ModelReply> | Promise<Partial<ModelReply>>): ModelClient & { calls: ModelRequest[] };
+```
+- Event shapes: `ai.answered` raw `{ noteIds: string[], snapshotVersion, question, answer }` (B18 reads `raw.noteIds`); `faq.missed` props `{ topic }`, raw `{ text }`; `ai.call` props as declared; `bot.fallback_menu` on an unclear message (AI path only).
+- Alerts: `ai_cost_warning` (needs_input, at 80 % of the cap) and `ai_cost_cap` (urgent), once per club per Bangkok month.
+
+**For B14b (`chat/episodes.ts`, not on this branch):** `requestHandoff(turn, reason, { topic })` in `bot/flow.ts` now receives the AI topic code (or the reason code `ai_cost_cap` / `ai_unavailable`); pass it to `startEpisode({ topic })` when B14b moves handoff into `chat/episodes.ts`.
+
+**Assumptions in place of a human decision:** default cap US$100/month when unset (A16 stats still shows `capUsdMicros: null` then); warning at 80 %; prices from the Anthropic list price table. No real Anthropic call in tests.
+
+**Unverified against a real service:** `anthropicModelClient` has never called the real Anthropic API (no key in this environment): the model ids `claude-haiku-5-5` / `claude-sonnet-5-5`, the `effort: low` parameter, prompt-cache hits and the list prices in `MODEL_PRICES` need one live check with a real key before launch. Answer quality on real Thai guest messages is untested.
+
+**Tests:** `ai-answers.test.ts` (12 pass); `flow.test.ts` (17 pass). No web change.
+
 ## 2026-11-27 · B8b: A row for every night, built by Session A on track-a
 
 - **Published (`jobs/nights.ts`):** `ensureNights(tx: Db, club: Club, from: string, days: number, now: Date): Promise<number>` (rows inserted or changed); `runNightsJob(db, now): Promise<number>` (every club, from `currentNightDate` across `bookingWindowDays + 1` dates); `defaultNight(club, date, banDates)`; `type NightClosedReason = 'weekday' | 'closed_date' | 'alcohol_ban'` (checked in that order). Rows with `edited_by` set are never touched; others are refreshed only when status or reason differ. A `sold_out` row the settings call open stays `sold_out`.
@@ -357,6 +495,41 @@ Routes (`http/demo.ts`, mounted at `/api/admin/demo`, `requirePlatformAdmin`): `
 - **B10b:** no external service; the confirm prompt and opt-out replies are tested against the dev gateway, not real LINE. Thai keywords and replies still need a native-speaker read. No web page changed.
 - **B7:** no external service; seeded guests have `SIM-` LINE ids, so no real push happens. The browser walk of demo steps 1, 2 and 7 is still to be done by a human.
 
+## 2026-11-27 · Integration of track-a wave 3 (B3, B7, B8b, B9, B10b, B14b, A20b) on track-c
+
+- **B16 / B14b:** `requestHandoff(turn, trigger, reason, { silent?, topic? })` in `bot/flow.ts` now always opens a `handoff_episodes` row through `startEpisode`. AI handoffs pass `trigger` = the reason code (`guest_request`, `faq_missed`, `ai_cost_cap`, `ai_unavailable`, `guard`), `topic` = the AI topic (else the reason code), and the reason text with the 2-line summary. Tests: `ai-answers.test.ts › handoff carries 2-line summary` (episode row with topic) and `› AI cost cap handoff opens an episode whose topic is the reason code`.
+- **B10 / B7:** `fastForward(ctx, clubId, what: 'hold_expiry' | 'reminder' | 'release', bookingId, now)` (`FastForwardWhat`); `'reminder'` runs `remindNow`, `'release'` runs `releaseNow`; `undefined` (route 404 `not_held`) when nothing happened. The demo route accepts all three. `reminders.test.ts` fast-forward test goes through `fastForward`.
+- **B8b:** the AI pre-fill (`prefillBooking`) uses `isNightOpen` (nights row first). B10 no-show and B11 door read bookings only, not `nights`, so they need no change.
+- **B11 / B7:** the seeded `door.count` events carry `kind`, like the door clicker's.
+- **A16 / B7:** `club-stats.test.ts` B7-seeded Velora week todo is now a test; the hand-counted week runs on the frozen fixture club (`seedFixtureClub`), since `seedDemoClub` now also seeds history.
+- **Still `it.todo`:** `line-migration.test.ts` (B4 `s=rm_*` tags), `admin-support.test.ts` (founder LINE id), `instagram.test.ts` x2 (B chat capture, B busyness feed).
+
+## 2026-11-27 · B17 Thai evaluation and per-club test set (built by Session A on track-c)
+
+- **Landed:** `brain/eval/thai-100.jsonl` (100 cases: 55 Thai, 15 mixed, 10 romanised, 10 English, 10 tricks) + `brain/eval/README.md`; `brain/judge.ts`; `brain/testset.ts`; `brain_test_cases` and `brain_test_runs` in `db/schema/brain.ts`; `compileSnapshot` queues a run after each published snapshot; jobs `brain-testset` (every minute) and `brain-sample-review` (every 15 min) in `jobs/index.ts`; `scripts/eval-brain.ts` + `package.json` script `eval:brain`; test `test/brain-eval.test.ts`.
+- **Migration:** `apps/server/drizzle/0009_b17_testset.sql` (+ `meta/0009_snapshot.json`, journal entry). Regenerated as `0009` at the wave-4 merge (track-a took `0007`).
+- **Published (`brain/judge.ts`):** `JUDGE_MODEL = 'claude-sonnet-5-5'`; `interface JudgeItem { id; question; answer; reference: string | null; brain?; lang }`; `interface JudgeVerdict { id; pass: boolean; score: number; reason: string }`; `interface JudgeClient { judge(items: JudgeItem[]): Promise<JudgeVerdict[]>; submitBatch(items: JudgeItem[]): Promise<string>; collectBatch(batchId: string): Promise<JudgeVerdict[] | null> }`; `anthropicJudgeClient(apiKey: string): JudgeClient` (batch mode = Message Batches API); `judgePrompt(item)`, `parseVerdict(id, text)`.
+- **Published (`bot/deps.ts`):** `BotDeps.judge?: JudgeClient | null` / `BotDepOptions.judge` (default from `ANTHROPIC_API_KEY`); `fakeJudgeClient(verdict: (item: JudgeItem) => boolean | Partial<JudgeVerdict> = () => true): JudgeClient & { judged; batches; pendingBatches }`.
+- **Published (`brain/testset.ts`):** `type CaseLang = 'th' | 'en' | 'mixed' | 'romanised'`; `type CaseKind = 'answer' | 'handoff' | 'booking' | 'menu' | 'trick'`; `interface TestCase`; `BASELINE_TRICKS: readonly TestCase[]`; `TESTSET_PASS_SCORE = 0.9`; `evaluateCases(opts: { client: ModelClient; judge: JudgeClient | null; model: string; brain: string; today: string; tableCodes: readonly string[]; cases: readonly TestCase[] }): Promise<EvalResult>`; `addTestCase(db, input: NewTestCase, now = new Date()): Promise<BrainTestCase>`; `listTestCases(db, clubId): Promise<BrainTestCase[]>`; `addTestSetQuestion(db, clubId, q: Omit<TestSetQuestion, 'addedAt'>, now): Promise<void>` (upserts a `kind 'answer'` row on (club, question), reference = note body); `clubTestSet(db, clubId): Promise<TestSetQuestion[]>`; `clubTestCases(db, clubId): Promise<TestCase[]>`; `deactivateNoteCases(db, clubId, noteIds: readonly string[])`; `refreshNoteCases(db, clubId, noteId, reference)`; `queueModelChangeRuns(db, model, now): Promise<string[]>`; `interface TestRunDeps { client: ModelClient | null; judge: JudgeClient | null; model?: string; log? }`; `runPendingTestRuns(db, deps: TestRunDeps, now): Promise<number>`; `requeueStaleRuns(db, now): Promise<number>` (`STALE_RUN_MS` 30 min); `runBrainTestJob(db, deps: TestRunDeps, now): Promise<void>`; `loadThai100(): TestCase[]`; `veloraEvalBrain(): string`; `runThai100(opts: { client; judge; model; cases? }): Promise<EvalResult>`; `recordModelEval(db, result, now): Promise<RecordedModelEval>` / `modelEvalResult(db, model)` (`platform_flags['brain-eval:thai-100:<model>']`); `thaiEvalDecision(result): { liveModel; reason }`; `MAX_CASE_QUESTION_CHARS = 500`.
+- **Published (`brain/compile.ts`):** `queueTestRun(db, clubId, trigger: 'snapshot' | 'model_change' | 'manual', snapshotVersion: number | null, now): Promise<void>` (one pending run per club, coalesced). `brain/answer.ts` exports `aiUserContent(today: string, lang: 'th' | 'en', text: string): string`.
+- **Published (`jobs/brain-sample-review.ts`):** `runSampleReview(db, judge: JudgeClient | null, now, log?): Promise<void>`; `SAMPLE_SIZE = 20`; claim `platform_flags['brain-sample-review:<clubId>:<date>']`, from 12:00 Bangkok, yesterday's `ai.answered` (test rows excluded except the demo club); a failed submit releases the claim.
+- **Alerts:** `brain_testset_failed`, `ai_quality_review` (both `needs_input`). A failed run changes no note (note stays live, §8.3 step 6).
+- **Script:** `npm run eval:brain -w @club/server -- --model <id> [--limit N] [--no-db]`, needs `ANTHROPIC_API_KEY`; writes `src/brain/eval/results/<model>.json`.
+- **Assumptions in place of a human decision:** pass mark 0.90 and every trick case passing (spec gives none). The live model stays the `AI_PRIMARY_MODEL` constant; a person changes it after reading the recorded result (`thaiEvalDecision`: haiku if it passed, else sonnet). The Thai-100 set is written by us, not reviewed by a native Thai speaker; `setReviewed: false` is recorded with every result.
+- **Unverified against a real service:** Anthropic never called (judge, Message Batches, model under test); the judge prompt and JSON verdict schema are untested against the real model. The real Thai-100 result is not recorded yet: a person must run `eval:brain` with a key.
+
+## 2026-11-27 · B18 learning loop (built by Session A on track-c)
+
+- **Landed:** `brain/learn.ts`; `jobs/brain-draft.ts` (job `brain-draft`, every minute); `jobs/brain-lint.ts` (job `brain-lint`, every 15 min, acts Monday from 10:00 Bangkok once per club per week); `approveNote` in `brain/notes.ts` adds the question to the club test set; each `runLearning` pass retires takeover drafts unreviewed for 28 days (`expireUnreviewedDrafts`); `updateNote`, `rejectNote` and `runBrainExpiry` keep the B17 test set in step; `BotDeps.learn`; test `test/learning-loop.test.ts`; `brain-ui.test.ts` queue tests now use real B18 drafts; `booking-history.test.ts` job list updated.
+- **Published (`brain/learn.ts`):** `LEARN_MODEL = 'claude-opus-5-5'`; `LEARN_PRICE = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 }` ($/MTok); `TAKEOVER_FLAG_WINDOW_MS = 10 * 60_000`; `DRAFT_EXPIRY_DAYS = 28`; `MAX_DRAFT_ATTEMPTS = 5`; `DRAFT_RETRY_BACKOFF_MS` (1, 5, 30, 120 min); `interface LearnClient { draft(reqs: DraftRequest[]): Promise<LearnResult[]>; check(req: CheckRequest): Promise<LearnResult> }`; `anthropicLearnClient(apiKey: string): LearnClient`; `runLearning(deps: { db: Db; client: LearnClient | null; log: (msg: string, err?: unknown) => void }, now: Date): Promise<LearnRunResult>`; `episodeTranscript(db, episode: HandoffEpisode): Promise<EpisodeTranscript>`; `redactText(text: string, names: readonly string[] = []): string`; `containsPersonalData(text: string): boolean`; `flagNotesBeforeTakeover(db, club: Club, episode: HandoffEpisode, now): Promise<string[]>`; `expireUnreviewedDrafts(db, now): Promise<number>`; `discardReason(d: NoteDraft)`, `learnedBody(d: NoteDraft)`, `learnClaimKey(episodeId)`.
+- **Published (jobs):** `runBrainDraft(deps: { db: Db; learn?: LearnClient | null; log }, now): Promise<LearnRunResult>`, `BRAIN_DRAFT_EVERY_MS = 60_000`; `lintClubBrain(deps: { db; learn?; log }, club: Club, now): Promise<BrainLintIssue[]>`, `runBrainLint(deps, now): Promise<void>`, `type BrainLintKind = 'contradiction' | 'duplicate' | 'price' | 'personal_data'`.
+- **Published (`bot/deps.ts`):** `BotDeps.learn?: LearnClient | null` / `BotDepOptions.learn` (default from `ANTHROPIC_API_KEY`); `fakeLearnClient(draft: (req: DraftRequest) => unknown, check: (req: CheckRequest) => unknown = () => ({ issues: [] })): LearnClient & { drafts; checks }`.
+- **Frontmatter on learned drafts (B19 reads):** `question` (redacted guest question), `questionEn`, `questionTh`, `hostReply`, `takeovers` (episodes on the topic in 30 days), `topic`, `episodeId`, `gapTopic?` (approval closes the gap), `contradicts?`. Flagged notes: `flaggedForReview { episodeId, takeoverAt }` and `reviewBy` = today. Weekly lint: `lintIssues [{ kind, detail }]`, one `info` alert `brain_lint`. Expired drafts: `retiredReason: 'unreviewed'` (no event).
+- **Claims:** `platform_flags['brain-learn:<episodeId>']` `{ outcome, noteId? }` or `{ outcome: 'retrying', attempts, retryAfter }`; `platform_flags['brain-lint:<clubId>:<monday>']`. `LearnResult.permanent?` marks a failure claimed `invalid` at once. Drafting `ai.call` events carry `guestId`/`conversationId` and `isTest`, and count toward the B16 cost cap.
+- **For B19b:** `jobs/brain-draft.ts` is where the "draft waiting" `needs_input` alert goes (raised since the wave-4 merge).
+- **Assumptions in place of a human decision:** drafting is a direct `claude-opus-5-5` call per episode (spec §8.3 60 s), run in parallel per job run, not the Message Batches API; the weekly check is a direct call too. Booking refs match `XX-XXXX` (2-5 capitals, dash, 4-6 letters/digits), so text like `VIP-ROOM` counts as personal data. Episodes ended over 28 days ago are never drafted. Without `ANTHROPIC_API_KEY` episodes are claimed `no_client` and never drafted later.
+- **Unverified against a real service:** Anthropic never called; draft and check prompts and the structured-output JSON schema are untested against the real model. Redacting a name in Thai script relies on the exact display name.
+
 ## 2026-11-27 · B20: Cross-club identity map, built by Session A on track-a
 
 - **Published (`data/identity.ts`):** `normalizePhone(phone): string | null` (E.164, Thai default); `phoneHashKey(credentialsKey: Buffer): Buffer` (HKDF-SHA256, info `identity_map.phone_hash`); `hashPhone(key, phone): string | null` (base64url HMAC-SHA256); `linkPhone(tx, { clubId, guestId, phone }, key, now): Promise<{ personId } | null>`; `personIdOf(db, clubId, guestId): Promise<string | null>`. `linkLiffSub` unchanged in signature and results.
@@ -414,6 +587,14 @@ Landed on `track-a` (one session builds both tracks). Tests: `test/waitlist.test
 - **Assumptions others must match:** an offer is a message, not a hold; open offers per night and side never exceed free tables. Any active booking of the guest that night marks the entry `booked` (times are not compared). Pre-orders are not charged and not counted toward minimum spend or the deposit; a line keeps the price it was first ordered at. Demo reset deletes all of the club's pre-orders and waitlist entries. Velora has no bottle menu seeded yet (add items to `demo/velora-content.ts` if the demo should show [Pre-order bottles]).
 - **Unverified:** no external service (no POS or payment for pre-orders); bot flow tested against the dev gateway only.
 - **Web:** `/staff/extras` ("Bottles": menu editor, pre-orders, waitlist) builds and typechecks; the browser walk is still to be done by a human.
+
+## 2026-11-27 · Integration of track-a wave 4 (B4, B12, A14, B19b, B20, B22) on track-c
+
+- **Migrations:** track-a's `0006_b22_waitlist_preorders` and `0007_b4_notices_once` kept; track-c's `0006_analytics_views` is now `0008_analytics_views` (custom) and `0007_b17_testset` is now `0009_b17_testset` (SQL unchanged, snapshots regenerated). `drizzle-kit generate` reports no schema changes.
+- **B19b wired on track-c:** B10 running late raises info `running_late` (`alertRunningLate`, now with an optional `{ minutes, releaseTime }` for the text), guest cancel raises info `cancellation`, the no-show job raises urgent `no_arrival` (`Notifier.noShowReleased` and the `staffRunningLate`/`staffGuestCancelled`/`staffNoShow` group texts are gone). B16's cost alerts go through `alertCostCap`: the 80% warning and the cap are both urgent `ai_cost_cap` (the B16 `ai_cost_warning` needs-input kind is gone). `alertCostCap` now takes `{ spentUsdMicros, capUsdMicros, reached }` (B16 counts US$ micros, not satang). The `brain-draft` job raises needs-input `brain_draft_waiting` per club that got a draft (count of the club's drafts; one open per club). `gap_waiting` is still not raised.
+- **B4 on track-c code:** inbound rows store the whole LINE event, so the B18 transcript reads `payload.message.text` first. Track-c message calls pass `TrackedLinks`. A typed booking request (B16 prefill) starts an attempt with entry tag `text_intent`; prefill keeps the attempt fields in `conversations.state`. My booking keeps the B10 actions and adds B22's [Pre-order bottles].
+- **Door routes:** `http/door.ts` holds B11's `doorRoutes` and B12's `crowdRatingRoutes`; both mounted at `/api/staff`.
+- **Still `it.todo`:** `instagram.test.ts` "an Instagram message from a guest reaches the club's brain" (no Instagram AI answer path through Chatwoot yet: B16 answers LINE only) and the busyness-feed half; `admin-support.test.ts` (founder LINE id).
 
 ## 2026-11-27 · B21: Busyness feed v1, built by Session A on track-a
 

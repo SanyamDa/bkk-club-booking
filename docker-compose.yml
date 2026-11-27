@@ -69,6 +69,49 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # B14 data dashboard (internal only, infra/metabase/README.md). Started on demand:
+  #   docker compose --profile metabase up -d     (needs METABASE_DB_PASSWORD and METABASE_APP_DB_PASSWORD)
+  metabase-init:
+    image: postgres:16
+    profiles: ["metabase"]
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-club}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-club}
+      METABASE_DB_PASSWORD: ${METABASE_DB_PASSWORD:-}
+      METABASE_APP_DB_PASSWORD: ${METABASE_APP_DB_PASSWORD:-}
+    volumes:
+      - ./infra/metabase/init-role.sh:/init-role.sh:ro
+    entrypoint: ["sh", "/init-role.sh"]
+    restart: "no"
+
+  metabase:
+    image: metabase/metabase:v0.50.0
+    profiles: ["metabase"]
+    restart: unless-stopped
+    depends_on:
+      metabase-init:
+        condition: service_completed_successfully
+    environment:
+      # Metabase's own settings live in a separate `metabase` database. The club data is added as a
+      # data source with the read-only role metabase_ro (provision.mjs), never the app user.
+      # The settings database is reached as metabase_app, a non-superuser that owns only `metabase`.
+      # The superuser credentials stay in metabase-init.
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: db
+      MB_DB_PORT: 5432
+      MB_DB_DBNAME: metabase
+      MB_DB_USER: metabase_app
+      MB_DB_PASS: ${METABASE_APP_DB_PASSWORD:?set METABASE_APP_DB_PASSWORD}
+      MB_ANON_TRACKING_ENABLED: "false"
+    # Localhost only: reach it through an SSH tunnel, never through the public proxy or a club login.
+    ports:
+      - "127.0.0.1:${METABASE_PORT:-3000}:3000"
+
 volumes:
   pgdata:
   appdata:

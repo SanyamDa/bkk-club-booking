@@ -427,7 +427,7 @@ export async function seedHistory(tx: Db, club: Club, now: Date): Promise<void> 
         if (delta <= 0) continue;
         total += delta;
         w.door.push({ id: w.id('door'), clubId: club.id, nightDate: night, at, delta, kind });
-        w.events.push({ clubId: club.id, type: 'door.count', occurredAt: at, actorType: 'staff', dataOrigin: 'first_party', nightDate: night, props: { count_in: delta, count_out: 0, total }, isTest: true });
+        w.events.push({ clubId: club.id, type: 'door.count', occurredAt: at, actorType: 'staff', dataOrigin: 'first_party', nightDate: night, props: { kind, count_in: delta, count_out: 0, total }, isTest: true });
       }
     });
 

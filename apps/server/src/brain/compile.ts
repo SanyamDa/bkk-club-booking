@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, ne } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { brainNotes, brainSnapshots, clubs, type BrainNote } from '../db/schema.js';
+import { brainNotes, brainSnapshots, brainTestRuns, clubs, type BrainNote } from '../db/schema.js';
 import { newId } from '../lib/util.js';
 import { clubToday } from '../platform/club-settings.js';
 
@@ -82,5 +82,30 @@ export async function compileSnapshot(db: Db, clubId: string, now: Date): Promis
     .insert(brainSnapshots)
     .values({ id: newId(), clubId, version: (latest?.version ?? 0) + 1, compiledText: text, tokenCount, hash, createdAt: now })
     .returning();
+  await queueTestRun(db, clubId, 'snapshot', snapshot!.version, now);
   return { status: 'published', snapshot: snapshot!, warn };
+}
+
+/**
+ * B17: queues a run of the club's test set (spec §8.5). The `brain-testset` job runs it later, so
+ * a compile never waits on the model (§8.3 step 6). One pending run per club: a later compile or
+ * model change updates the waiting run instead of adding another.
+ */
+export async function queueTestRun(
+  db: Db,
+  clubId: string,
+  trigger: 'snapshot' | 'model_change' | 'manual',
+  snapshotVersion: number | null,
+  now: Date,
+): Promise<void> {
+  const [waiting] = await db
+    .select({ id: brainTestRuns.id })
+    .from(brainTestRuns)
+    .where(and(eq(brainTestRuns.clubId, clubId), eq(brainTestRuns.status, 'pending'), ne(brainTestRuns.trigger, 'sample_review')))
+    .limit(1);
+  if (waiting) {
+    await db.update(brainTestRuns).set({ trigger, snapshotVersion }).where(eq(brainTestRuns.id, waiting.id));
+    return;
+  }
+  await db.insert(brainTestRuns).values({ id: newId(), clubId, trigger, snapshotVersion, createdAt: now });
 }

@@ -6,15 +6,15 @@ import { adminAudit, clubBySlug, jsonBody } from './admin/controls.js';
 import type { AppContext } from './context.js';
 
 const fastForwardBody = z.object({
-  /** Phase 1b: hold expiry only. B10 adds 'reminder' and 'release'. */
-  what: z.literal('hold_expiry'),
+  /** B7 hold expiry; B10 reminder and no-show release. */
+  what: z.enum(['hold_expiry', 'reminder', 'release']),
   bookingId: z.string().trim().min(1).max(100),
 });
 
 /**
  * Demo controls (plan B7, spec §12.4), mounted at /api/admin/demo; platform admin only.
- * `POST /:slug/reset` and `POST /:slug/fast-forward` `{ what: 'hold_expiry', bookingId }`.
- * Unknown club 404; a club that is not `demo` 409 `not_demo`; a booking that is not a hold 404.
+ * `POST /:slug/reset` and `POST /:slug/fast-forward` `{ what: 'hold_expiry' | 'reminder' | 'release', bookingId }`.
+ * Unknown club 404; a club that is not `demo` 409 `not_demo`; a booking with nothing to do 404 `not_held`.
  */
 export function demoRoutes(app: AppContext) {
   const r = new Hono<AuthEnv>();

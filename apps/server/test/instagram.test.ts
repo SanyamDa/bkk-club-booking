@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import type { Db } from '../src/db/client.js';
@@ -363,7 +363,16 @@ describe('A18 §14.8: Instagram data stays with its club', () => {
     expect(scoped.events.some((e: any) => e.dataOrigin === 'instagram')).toBe(true);
   });
 
-  it.todo('the Metabase analytics view leaves out instagram-origin rows (B14 owns that reader)');
+  it('the Metabase analytics view leaves out instagram-origin rows (B14)', async () => {
+    const s = await connected();
+    await deliver(s, s.clubB.id, webhookToken(s, ACCOUNT.b), messageCreated({ accountId: ACCOUNT.b, inboxId: IG_INBOX.b, id: 8101 }));
+    await emit(s.db, { clubId: s.clubB.id, type: 'availability.searched', occurredAt: FRIDAY_AFTERNOON, actorType: 'guest', channel: 'liff', dataOrigin: 'first_party', isTest: false });
+    const ig = await igEvents(s.db, s.clubB.id);
+    expect(ig.length).toBeGreaterThan(0);
+    const seen = (await s.db.execute(sql`select id, data_origin, channel from analytics.events where club_id = ${s.clubB.id}`)).rows as { id: string; data_origin: string; channel: string | null }[];
+    expect(seen.map((r) => r.data_origin)).toEqual(['first_party']);
+    expect(seen.some((r) => ig.some((e) => e.id === r.id))).toBe(false);
+  });
 
   it('the busyness feed leaves out instagram-origin rows', async () => {
     const { db, close, clubB } = await setupTwoClubs();

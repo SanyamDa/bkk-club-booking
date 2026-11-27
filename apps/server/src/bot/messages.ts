@@ -419,6 +419,44 @@ export function staffNewBooking(view: BookingView, kind: 'confirmed' | 'review')
   return text(lines.join('\n'));
 }
 
+// ---------- B10: reminder, running late, guest cancel, no-show ----------
+
+/** [Running late] [Cancel] [Talk to a host] under a confirmed booking (spec §5.3 My booking). */
+export function bookingActions(lang: Lang, bookingId: string): QuickReplyItem[] {
+  return [
+    qr(postback(t(lang, 'runningLate'), { a: 'late', b: bookingId })),
+    qr(postback(t(lang, 'cancelShort'), { a: 'cancel', b: bookingId })),
+    qr(postback(t(lang, 'talkToHost'), { a: 'host' })),
+  ];
+}
+
+/** Day-of reminder (spec §5.2 step 8). */
+export function reminder(club: Club, lang: Lang, view: BookingView): Message {
+  const b = view.booking;
+  return text(t(lang, 'reminder', { code: view.table.code, time: club.settings.arrivalBy }), [
+    qr(postback(t(lang, 'runningLate'), { a: 'late', b: b.id })),
+    qr(postback(t(lang, 'needToCancel'), { a: 'cancel', b: b.id })),
+    qr({ type: 'uri', label: t(lang, 'location'), uri: club.settings.mapUrl }),
+  ]);
+}
+
+export function askLate(lang: Lang, bookingId: string): Message {
+  return text(t(lang, 'askLate'), [
+    qr(postback(t(lang, 'late15'), { a: 'late', b: bookingId, m: '15' })),
+    qr(postback(t(lang, 'late30'), { a: 'late', b: bookingId, m: '30' })),
+    qr(postback(t(lang, 'late60'), { a: 'late', b: bookingId, m: '60' })),
+  ]);
+}
+
+/** Shows the club's cancellation rule (the deposit line, `rules[0]`) before the guest confirms. */
+export function cancelAsk(club: Club, lang: Lang, view: BookingView): Message {
+  const policy = club.settings.rules[lang][0] ?? '';
+  return text(t(lang, 'cancelAsk', { code: view.table.code, night: formatNight(view.booking.nightDate, lang), policy }), [
+    qr(postback(t(lang, 'cancelYes'), { a: 'cancel_yes', b: view.booking.id })),
+    qr(postback(t(lang, 'keepBooking'), { a: 'my' })),
+  ]);
+}
+
 export function staffHandoff(guestName: string, summary: string): Message {
   return text(`🙋 Guest wants a host / ลูกค้าต้องการคุยกับพนักงาน\n${guestName}\n${summary}\nReply in LINE OA Manager, then mark it resolved in the dashboard.`);
 }

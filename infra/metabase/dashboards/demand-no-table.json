@@ -1,0 +1,31 @@
+{
+  "name": "Demand that found no table",
+  "description": "Spec §14.3: zero-result searches and sold-out nights shown.",
+  "collection": "Data dashboard (internal)",
+  "parameters": [
+    {
+      "slug": "dataset",
+      "name": "Dataset",
+      "type": "text",
+      "default": "live",
+      "values": [
+        "live",
+        "demo"
+      ],
+      "description": "live = real clubs (analytics schema); demo = Velora only (analytics_demo schema)"
+    },
+    {
+      "slug": "club",
+      "name": "Club id",
+      "type": "text",
+      "required": false
+    }
+  ],
+  "cards": [
+    {
+      "name": "Zero-result searches and sold-out views",
+      "display": "bar",
+      "sql": "select * from (select club_id, night_date, pax_range, zero_result_searches, sold_out_shown from analytics.demand_no_table where {{dataset}} = 'live' union all select club_id, night_date, pax_range, zero_result_searches, sold_out_shown from analytics_demo.demand_no_table where {{dataset}} = 'demo') d where true [[and d.club_id = {{club}}]] order by club_id, night_date, pax_range"
+    }
+  ]
+}

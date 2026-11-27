@@ -11,6 +11,7 @@ import {
 } from '../../platform/support.js';
 import { clientIp, requirePlatformAdmin, type AuthEnv } from '../auth.js';
 import type { AppContext } from '../context.js';
+import { tryRevokeInboxUser } from '../../integrations/chatwoot/provision.js';
 
 const startBody = z.object({
   clubSlug: z.string().trim().min(1).max(100),
@@ -90,6 +91,7 @@ export function supportRoutes(app: AppContext) {
         { id: c.req.param('id'), userId: c.var.user.id, sessionId: c.var.session.idHash, reason: parsed.data.reason, ip: clientIp(c) },
         app.deps.now(),
       );
+      app.track(tryRevokeInboxUser(db, app.chatwoot, grant.clubId, grant.userId, app.deps.log)); // A13: the grant's inbox login ends with it
       return c.json(shape(grant, await slugOf(grant.clubId)));
     } catch (err) {
       return refused(c, err);
@@ -103,6 +105,7 @@ export function supportRoutes(app: AppContext) {
         { id: c.req.param('id'), userId: c.var.user.id, sessionId: c.var.session.idHash, ip: clientIp(c) },
         app.deps.now(),
       );
+      app.track(tryRevokeInboxUser(db, app.chatwoot, grant.clubId, grant.userId, app.deps.log)); // A13: the grant's inbox login ends with it
       return c.json(shape(grant, await slugOf(grant.clubId)));
     } catch (err) {
       return refused(c, err);

@@ -36,10 +36,13 @@ import { sampleMessages } from '../line/samples.js';
 import { describeLineError, runLineSetup } from '../line/setup.js';
 import { currentNightDate, formatNight } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
+import { openPosBillAtCheckIn } from '../integrations/pos/live.js';
 import { requireClubRole, type AuthEnv, type Role } from './auth.js';
 import type { AppContext } from './context.js';
 import { staffAlertRoutes } from './staff-alerts.js';
+import { staffInboxRoutes } from './staff-inbox.js';
 import { staffPosRoutes } from './staff-pos.js';
+import { staffReportRoutes } from './staff-report.js';
 import { staffSettingsRoutes } from './staff-settings.js';
 import { teamRoutes } from './team.js';
 
@@ -74,6 +77,8 @@ export function staffRoutes(app: AppContext) {
   r.route('/', staffPosRoutes(app)); // A11 POS report import
   r.route('/', teamRoutes(app)); // A8 staff accounts and invites
   r.route('/', staffSettingsRoutes(app)); // A9 settings, prices, nights calendar, profile, quota
+  r.route('/', staffReportRoutes(app)); // A16b weekly club report
+  r.route('/', staffInboxRoutes(app)); // A13 Chatwoot inbox SSO and booking panel
 
   /** A staff-surface event for the club in the URL, attributed to the signed-in person. */
   function staffEvent(c: StaffContext, e: Omit<EventInput, 'clubId' | 'occurredAt' | 'actorType' | 'actorId' | 'dataOrigin' | 'isTest'>) {
@@ -245,7 +250,11 @@ export function staffRoutes(app: AppContext) {
     await cancelBooking(db, club.id, id, actor, reasonOf(input, { code: 'club_cancelled', text: 'Cancelled by the club' }), app.deps.now());
     await app.notifier.cancelled(club.id, id, input.reason ?? '');
   });
-  act('arrived', staff, (club, id, actor) => markArrived(db, club.id, id, actor, app.deps.now()));
+  act('arrived', staff, async (club, id, actor) => {
+    await markArrived(db, club.id, id, actor, app.deps.now());
+    // A19 L2: open the POS bill with the deposit as a prepayment (no-op without a live POS).
+    app.track(openPosBillAtCheckIn(db, app.config.CREDENTIALS_KEY, club, id, { now: app.deps.now(), fetch: app.posFetch }));
+  });
   act('no-show', staff, (club, id, actor) => markNoShow(db, club.id, id, actor, app.deps.now()));
 
   // ----- Manual booking -----

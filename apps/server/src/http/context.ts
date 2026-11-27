@@ -6,6 +6,8 @@ import type { IdTokenVerifier } from '../line/idtoken.js';
 import type { CredentialStore, LoginChannel } from '../line/credentials.js';
 import type { LiffEndpointUpdater, SetupClients } from '../line/setup.js';
 import type { LineTokenIssuer } from '../line/tokens.js';
+import type { ChatwootClient } from '../integrations/chatwoot/provision.js';
+import type { FetchLike } from '../integrations/pos/papaya.js';
 
 export interface AppContext {
   config: Config;
@@ -23,4 +25,8 @@ export interface AppContext {
   verifyIdToken: IdTokenVerifier;
   /** Sets the shared LIFF app's endpoint when the platform login channel is saved (A4b). Fake with LINE_FAKE. */
   updateLiffEndpoint: LiffEndpointUpdater;
+  /** Chatwoot platform client (A13); null when CHATWOOT_URL / CHATWOOT_PLATFORM_TOKEN are unset. */
+  chatwoot: ChatwootClient | null;
+  /** fetch for live POS calls (A19); undefined means the global fetch. Test hook. */
+  posFetch?: FetchLike;
 }

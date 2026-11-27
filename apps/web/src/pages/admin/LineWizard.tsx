@@ -85,6 +85,7 @@ function Migration({ slug }: { slug: string }) {
   );
 }
 import { errText, fmtTime, Ok, TotpField } from './AdminLayout';
+import { OnboardingPanel } from './OnboardingPanel';
 
 /**
  * Deep link placeholders. The exact LINE URLs and the Thai/English screenshots are added after
@@ -222,6 +223,8 @@ export function LineWizard() {
         <h1>LINE wizard · <span className="mono">{slug}</span></h1>
         <Link className="btn small" to={`/admin/clubs/${slug}`}>Back to club</Link>
       </div>
+
+      <OnboardingPanel slug={slug} />
 
       <Step n={1} minute="0–1" title="Log in to LINE OA Manager" who="Both" done={loggedIn}>
         <p className="faint" style={{ margin: 0 }}>The club admin logs in to the club's LINE Official Account as admin, at a desktop browser.</p>

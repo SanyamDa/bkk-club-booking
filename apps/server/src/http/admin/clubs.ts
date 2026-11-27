@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { Db } from '../../db/client.js';
 import { channels, clubProfile, clubs, type ClubStatus } from '../../db/schema.js';
 import { emit } from '../../data/events.js';
+import { chatwootFlagKey, tryProvisionClubInbox } from '../../integrations/chatwoot/provision.js';
 import { newId } from '../../lib/util.js';
 import { newClubSettings, uniqueRefPrefix } from '../../platform/club-templates.js';
 import { credentialSummary } from '../../platform/credentials.js';
@@ -96,7 +97,21 @@ export function clubsRoutes(app: AppContext) {
       });
       await adminAudit(tx, c, { clubId: id, action: 'club.created', entity: 'clubs', entityId: id, after: { slug, name, template, refPrefix: settings.refPrefix } }, now);
     });
-    return c.json({ id, slug, name, status: 'onboarding', refPrefix: settings.refPrefix }, 201);
+    // A13: one Chatwoot account + API inbox + agent bot per club. Skipped when Chatwoot is not
+    // configured; a failure leaves the club created and is retried with POST .../inbox/provision.
+    const inbox = await tryProvisionClubInbox(db, app.chatwoot, app.config.CREDENTIALS_KEY, { id, name, slug }, { publicUrl: app.config.PUBLIC_URL, by: c.var.user.id, now, log: app.deps.log });
+    return c.json({ id, slug, name, status: 'onboarding', refPrefix: settings.refPrefix, inbox }, 201);
+  });
+
+  /** A13: (re)runs Chatwoot provisioning for a club; idempotent, completed steps are skipped. */
+  r.post('/clubs/:slug/inbox/provision', async (c) => {
+    if (!app.chatwoot) return c.json({ error: 'inbox_not_configured' }, 503);
+    const club = await clubBySlug(db, c.req.param('slug'));
+    if (!club) return c.json({ error: 'not_found' }, 404);
+    const now = app.deps.now();
+    const inbox = await tryProvisionClubInbox(db, app.chatwoot, app.config.CREDENTIALS_KEY, club, { publicUrl: app.config.PUBLIC_URL, by: c.var.user.id, now, log: app.deps.log });
+    await adminAudit(db, c, { clubId: club.id, action: 'club.inbox_provisioned', entity: 'platform_flags', entityId: chatwootFlagKey(club.id), after: inbox }, now);
+    return c.json({ inbox }, inbox.status === 'ready' ? 200 : 502);
   });
 
   r.get('/clubs/:slug', async (c) => {

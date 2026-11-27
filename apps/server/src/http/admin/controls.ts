@@ -5,6 +5,7 @@ import type { Db } from '../../db/client.js';
 import { auditLog, clubs, platformFlags, sessions, users, type Club } from '../../db/schema.js';
 import { newId } from '../../lib/util.js';
 import type { LineGateway, Message } from '../../line/gateway.js';
+import { featureSwitches, featuresFlagKey, isFeatureKey } from '../../platform/features.js';
 import { GLOBAL_STOP_FLAG } from '../../platform/support.js';
 import { base32Decode, verifyTotp } from '../../platform/totp.js';
 import { clientIp, MAX_AUTH_FAILURES, recordAuthFailure, type AuthEnv } from '../auth.js';
@@ -161,6 +162,41 @@ export function controlsRoutes(app: AppContext) {
       .onConflictDoUpdate({ target: platformFlags.key, set: { value, updatedBy: c.var.user.id, updatedAt: now } });
     await adminAudit(db, c, { clubId: null, action: parsed.data.stopped ? 'platform.global_stop' : 'platform.global_resume', entity: 'platform_flags', entityId: GLOBAL_STOP_FLAG, after: value }, now);
     return c.json(value);
+  });
+
+  /** A17b: the club's feature switches, defaults filled in. */
+  r.get('/clubs/:slug/features', async (c) => {
+    const club = await clubBySlug(db, c.req.param('slug'));
+    if (!club) return c.json({ error: 'not_found' }, 404);
+    return c.json({ features: await featureSwitches(db, club.id) });
+  });
+
+  /**
+   * A17b: sets one or more switches, body `{ [FeatureKey]: boolean }`. Stored in
+   * `platform_flags['features:<clubId>']`, read per request by `isFeatureOn`. Audited; no fresh
+   * TOTP (not a sensitive change in spec §12.3). An unknown key or a non-boolean value is 400.
+   */
+  r.patch('/clubs/:slug/features', async (c) => {
+    const club = await clubBySlug(db, c.req.param('slug'));
+    if (!club) return c.json({ error: 'not_found' }, 404);
+    const body = await jsonBody(c);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return c.json({ error: 'bad_request' }, 400);
+    const entries = Object.entries(body as Record<string, unknown>);
+    if (entries.length === 0) return c.json({ error: 'bad_request' }, 400);
+    for (const [k, v] of entries) {
+      if (!isFeatureKey(k)) return c.json({ error: 'unknown_feature', key: k }, 400);
+      if (typeof v !== 'boolean') return c.json({ error: 'bad_request', key: k }, 400);
+    }
+    const now = app.deps.now();
+    const before = await featureSwitches(db, club.id);
+    const after = { ...before, ...(Object.fromEntries(entries) as Partial<typeof before>) };
+    const key = featuresFlagKey(club.id);
+    await db
+      .insert(platformFlags)
+      .values({ key, value: after, updatedBy: c.var.user.id, updatedAt: now })
+      .onConflictDoUpdate({ target: platformFlags.key, set: { value: after, updatedBy: c.var.user.id, updatedAt: now } });
+    await adminAudit(db, c, { clubId: club.id, action: 'club.features_changed', entity: 'platform_flags', entityId: key, before, after }, now);
+    return c.json({ features: after });
   });
 
   r.put('/clubs/:slug/promptpay', async (c) => {

@@ -16,6 +16,7 @@ import { Calendar } from './pages/staff/Calendar';
 import { AcceptInvite } from './pages/staff/AcceptInvite';
 import { Team } from './pages/staff/Team';
 import { PosImport } from './pages/staff/PosImport';
+import { Report } from './pages/staff/Report';
 import { AdminLayout } from './pages/admin/AdminLayout';
 import { ClubDetail } from './pages/admin/ClubDetail';
 import { Clubs } from './pages/admin/Clubs';
@@ -26,6 +27,8 @@ import { LineWizard } from './pages/admin/LineWizard';
 import { MessageLog } from './pages/admin/MessageLog';
 import { Timeline } from './pages/admin/Timeline';
 import { WebhookLog } from './pages/admin/WebhookLog';
+import { OnboardForm } from './pages/onboard/OnboardForm';
+import { InboxPanel } from './pages/staff/InboxPanel';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -36,6 +39,8 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/dev/simulator" element={<Simulator />} />
         <Route path="/staff/login" element={<Login />} />
         <Route path="/invite" element={<AcceptInvite />} />
+        <Route path="/inbox-panel" element={<InboxPanel />} />
+        <Route path="/onboard/:token" element={<OnboardForm />} />
         <Route path="/staff" element={<StaffLayout />}>
           <Route index element={<Night />} />
           <Route path="bookings/:id" element={<BookingDetail />} />
@@ -46,6 +51,7 @@ createRoot(document.getElementById('root')!).render(
           <Route path="calendar" element={<Calendar />} />
           <Route path="team" element={<Team />} />
           <Route path="pos" element={<PosImport />} />
+          <Route path="report" element={<Report />} />
         </Route>
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<Clubs />} />

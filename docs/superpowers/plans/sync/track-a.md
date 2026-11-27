@@ -671,3 +671,219 @@ Timed checks: `runAlertChecks` probes LINE itself (bot info, webhook endpoint, q
 - A10: `/line/migrate` records the quota reading after a successful run (null only on a credential failure).
 - A11: the 5 MB POS upload limit is Hono's `bodyLimit` (counts chunked bodies).
 - A12: `test/webhook-alert.test.ts` runs the SQL of `infra/check-webhook-errors.sh` on PGlite and the script itself with a stand-in `psql`, and checks THRESHOLD, MAX_RATE_PCT, MIN_INBOUND and the ALERT_URL call.
+
+## 2026-11-27 — A17b (per-club feature switches)
+
+Published in `apps/server/src/platform/features.ts`:
+
+```ts
+export const FEATURE_KEYS = ['ai_answers', 'learning_loop', 'instagram', 'pos_sync', 'alerts_line'] as const;
+export type FeatureKey = (typeof FEATURE_KEYS)[number];
+export const FEATURE_DEFAULTS: Record<FeatureKey, boolean>; // ai_answers false, learning_loop true, instagram false, pos_sync false, alerts_line true
+export async function isFeatureOn(db: Db, clubId: string, key: FeatureKey): Promise<boolean> // reads DB every call, no cache
+export async function featureSwitches(db: Db, clubId: string): Promise<Record<FeatureKey, boolean>>
+```
+
+Stored in `platform_flags['features:<clubId>']` as `{ [FeatureKey]: boolean }`. Routes: `GET` and `PATCH /api/admin/clubs/:slug/features` (body `{ key: boolean }`, unknown key 400 `unknown_feature`, audited as `club.features_changed`, no fresh TOTP).
+
+**Request to B:** agree the key list (B consumes `ai_answers` and `learning_loop` in the brain, `alerts_line` in B19b). Ask in track-b.md for any new key; adding one is additive. A consumes `pos_sync` itself: A19's `loadPosAdapter` returns null while it is off, so a club's live POS sync starts only when the founder switches it on.
+
+## 2026-11-27 — A13 (Chatwoot install and per-club provisioning)
+
+Published in `apps/server/src/integrations/chatwoot/provision.ts`:
+
+```ts
+export function chatwootClient(config, fetchImpl?): ChatwootClient | null // null when CHATWOOT_URL or CHATWOOT_PLATFORM_TOKEN unset
+export async function provisionClubInbox(db, cw, key, club, opts): Promise<ChatwootClubState> // idempotent: account, API inbox, agent bot, dashboard app
+export async function tryProvisionClubInbox(db, cw, key, club, opts) // never throws; { status: 'ready' | 'partial' | 'failed' | 'not_configured', ... }
+export async function chatwootState(db, clubId): Promise<ChatwootClubState | null>
+export async function chatwootBotToken(db: Db, key: Buffer, clubId: string): Promise<string | null>
+export const chatwootConversationRef = (accountId, conversationId) => `cw:${accountId}:${conversationId}`
+export const chatwootCallbackUrl = (publicUrl, clubId) => `${publicUrl}/integrations/chatwoot/${clubId}/callback`
+export const chatwootBotUrl = (publicUrl, clubId) => `${publicUrl}/integrations/chatwoot/${clubId}/bot`
+```
+
+- State lives in `platform_flags['chatwoot:<clubId>']` (admin and bot tokens encrypted with `CREDENTIALS_KEY`); staff-user mapping in `platform_flags['chatwoot:<clubId>:user:<userId>']`. No migration.
+- Provisioning runs on `POST /api/admin/clubs` (a failure still answers 201 with `inbox.status: 'failed'`), on `POST /api/admin/clubs/:slug/inbox/provision` (retry, audited), and in the A17 wizard's apply step (step `inbox`).
+- Staff routes: `GET /api/staff/clubs/:slug/inbox-sso` (owner/manager administrator, host/support agent, door 403) and `GET /api/staff/clubs/:slug/inbox-panel?account=&conversation=` (finds the conversation by `conversations.external_ref = chatwootConversationRef(...)`). 503 `inbox_not_configured`, 409 `inbox_not_provisioned`, 502 on a Chatwoot error.
+- Callback mount: Chatwoot callbacks are `/integrations/chatwoot/<clubId>/{callback,bot}`, under the same `/integrations` mount as A19's POS webhooks (`http/integrations.ts`). **For A14:** add the Chatwoot handlers to `integrationRoutes`.
+- Chatwoot API shapes and the `chatwoot/chatwoot:v4.1.0` tag are unverified against a live install.
+
+## 2026-11-27 — A16b (weekly club report)
+
+Published in `apps/server/src/platform/club-report.ts`: `buildClubReport(db, clubId, weekStart)`, `sendWeeklyReports(ctx, now)`, `startClubReports(ctx, now)` (15-minute timer). Route `GET /api/staff/clubs/:slug/report?week=YYYY-MM-DD` (owner, manager).
+
+- Week: nights Monday to Sunday by `night_date`; chats, takeovers and staff messages from Monday `nightEndHour` Bangkok for 7 days. Test rows excluded except for `demo` clubs.
+- Sent Monday from 10:00 Bangkok to the staff group via `staffAlertSender(db)` (A15 sender); marker `platform_flags['club-report:<clubId>:<weekStart>']` claimed before the send; failed sends are not retried. Onboarding, paused and no-staff-group clubs skipped.
+- **Request to B:** when the scheduler lands, replace the `startClubReports` line in `jobs/index.ts` with `scheduler.register('club-report', (ctx, now) => sendWeeklyReports(ctx, now))` (any interval up to an hour).
+
+## 2026-11-27 — A17 (full onboarding wizard)
+
+Routes in `apps/server/src/http/admin/onboarding.ts`: `POST /api/admin/clubs/:slug/onboarding/link`, `GET /api/admin/clubs/:slug/onboarding`, `POST .../onboarding/apply`, `POST .../onboarding/timing {step, event}`; public `GET`/`PUT /api/onboard/:token`.
+
+- Storage in `platform_flags`: `onboarding_link:<clubId>` (token SHA-256 only), `onboarding_form:<clubId>`, `onboarding:<clubId>` (per-step timings, `appliedAt`).
+- Apply steps: `zones`, `tables`, `prices`, `rules`, `profile`, `faqs` (`not_ready` until B15), `promptpay` (`manual`), `inbox` (A13 provisioning).
+- **Request to B:** when B15 publishes `brain/notes.ts`, A will write the submission's `faqs` as draft notes from the apply step.
+
+## 2026-11-27 — A19 (POS live sync)
+
+Published in `apps/server/src/integrations/pos/live.ts`: `loadPosAdapter`, `openPosBillAtCheckIn`, `applyLiveBill`, `syncClosedBills`; adapters `papaya.ts` and `loyverse.ts`.
+
+- `pos` credential JSON: Papaya `{vendor:'papaya', outletId, reservationsKey, orderDataKey, webhookSecret, tableChannels}`; Loyverse `{vendor:'loyverse', token, storeId?}`. Live sync also needs the `pos_sync` switch on.
+- Webhook: `POST <PUBLIC_URL>/integrations/pos/papaya/<slug>`, HMAC `x-papaya-signature: sha256=<hex>`; deliveries written to `raw_webhooks` (channel `pos:papaya`) directly until B3's writer merges.
+- Events: `pos.bill_opened`, `pos.bill_updated` (dedupe `pos.bill_updated:<ref>:<eventId>`), plus A11's `pos.bill_closed` / `pos.bill_matched`.
+- **Requests to B:** (1) a booking-service transition so a closed POS bill can complete its booking and emit `booking.completed`; (2) after B3, A switches the direct `raw_webhooks` insert to B3's writer. `syncClosedBills` has no scheduled job yet.
+
+## 2026-11-27 — Review fixes for A13, A16b, A17, A19
+
+- **A17 plan change (two-step apply):** the plan's acceptance item "form submission creates tables, prices, rules, baseline FAQs and club profile" is met in two steps. `PUT /api/onboard/:token` (token only, no session) stores the answers; the founder reviews them and `POST /api/admin/clubs/:slug/onboarding/apply` writes zones, tables, price rules, rules and the profile. Reason: the public form is reachable by anyone holding the link, so nothing it sends reaches club data until a signed-in founder applies it. The test is named for this (`form submission, once the founder applies it, creates ...`). Baseline FAQs still wait on B15.
+- **A16b, Velora seed:** "report figures match hand-counted seeded Velora week" waits on B7's Velora history seed (not on this branch). `test/club-report.test.ts` has an `it.todo` for it; the hand-counted figures are checked on a fixture week for now. **Request to B:** when B7 merges, publish the seeded week's dates; A adds the Velora case.
+- **A16b, `jobs/index.ts` stand-in (same request as A15):** the scheduler does not exist yet, so A16b adds two lines, not one: `const stopClubReports = (await import('../platform/club-report.js')).startClubReports(ctx, now);` in `startBackground` and `stopClubReports();` in the stop function (the start line carries the `A16b:` comment). **Request to B:** accept this stand-in or land the scheduler (then A replaces both lines with the one `register` line). A16b does not merge until B answers here.
+- **A16b:** `sendWeeklyReports` now builds the report before it claims the week's marker, so a build failure (a DB error) leaves no marker and the next run retries. Only a failed send stays `failed`.
+- **A13 access:** a read-only support grant gets 403 `support_read_only` on `GET /inbox-sso` (a Chatwoot agent can message guests). Chatwoot access is revoked (account membership removed, Chatwoot user deleted, which ends its sessions, mapping dropped) when a member is disabled or changes role (`http/team.ts`), when a support grant is ended (`POST /api/admin/support/:id/end`), and when a grant expires (`sweepGrantInboxUsers`, run on A15's 60 s alert-check timer until the scheduler exists; then it needs its own `register` line). New exports in `integrations/chatwoot/provision.ts`: `revokeInboxUser`, `tryRevokeInboxUser`, `sweepGrantInboxUsers`, `CHATWOOT_TIMEOUT_MS` (10 s per Chatwoot call).
+- **A13 deploy rule:** `CHATWOOT_URL` must be on the same registrable domain as `PUBLIC_URL`; the booking panel iframe signs in with our `SameSite=Lax` session cookie (`infra/chatwoot/README.md`).
+- **A19:** the Papaya webhook stores only `{ rejected: 'bad_signature', bytes }` for an unsigned delivery, never its body, and answers 429 after 20 bad-signature deliveries per club and IP per minute, or 60 per club per minute (in memory, one process). A signed body that is not a JSON object (`null`) is stored as `{ unparsed }` and ignored. `createApp(..., { posFetch })` / `AppContext.posFetch` is the POS fetch test hook; the staff `arrived` route passes it to `openPosBillAtCheckIn`, and a test now drives that route.
+
+## 2026-11-27 — Status: A13, A16b, A17, A17b, A19 (end of session)
+
+Suite on track-a: 28 test files, 266 passed, 14 `it.todo`; `npm run typecheck` and `npm run build -w @club/web` green. Exact signatures below are as implemented.
+
+### A13 (Chatwoot inbox) — status
+
+Landed: shared Chatwoot CE compose (`infra/chatwoot/docker-compose.yml`, `README.md`), per-club provisioning on club create, retry route, staff SSO and booking-panel routes, revoke on role change, disable and grant end/expiry, Chatwoot dump in `infra/backup.sh`, `CHATWOOT_URL` / `CHATWOOT_PLATFORM_TOKEN` config. Web: `/inbox-panel` page (`InboxPanel`) and `OpenInboxButton` in the staff layout.
+
+```ts
+// apps/server/src/integrations/chatwoot/provision.ts
+export class ChatwootError extends Error
+export class InboxNotProvisioned extends Error
+export const CHATWOOT_TIMEOUT_MS = 10_000;
+export function chatwootClient(config: Pick<Config, 'CHATWOOT_URL' | 'CHATWOOT_PLATFORM_TOKEN'>, fetchImpl: typeof fetch = (...a) => fetch(...a)): ChatwootClient | null
+export type InboxStatus = 'ready' | 'partial' | 'failed' | 'not_configured';
+export const chatwootFlagKey = (clubId: string) => `chatwoot:${clubId}`;
+export const chatwootConversationRef = (accountId: number | string, conversationId: number | string) => `cw:${accountId}:${conversationId}`;
+export const chatwootCallbackUrl = (publicUrl: string, clubId: string) => string; // <publicUrl>/integrations/chatwoot/<clubId>/callback
+export const chatwootBotUrl = (publicUrl: string, clubId: string) => string;      // <publicUrl>/integrations/chatwoot/<clubId>/bot
+export const inboxPanelUrl = (publicUrl: string, slug: string) => string;         // <publicUrl>/inbox-panel?club=<slug>
+export async function chatwootState(db: Db, clubId: string): Promise<ChatwootClubState | null>
+export async function chatwootBotToken(db: Db, key: Buffer, clubId: string): Promise<string | null>
+export function inboxStatus(state: ChatwootClubState | null): InboxStatus
+export function inboxSummary(state: ChatwootClubState | null, status: InboxStatus = inboxStatus(state))
+export async function provisionClubInbox(db: Db, cw: ChatwootClient, key: Buffer, club: { id: string; name: string; slug: string }, opts: { publicUrl: string; by: string; now: Date }): Promise<ChatwootClubState>
+export async function tryProvisionClubInbox(db: Db, cw: ChatwootClient | null, key: Buffer, club: { id: string; name: string; slug: string }, opts: { publicUrl: string; by: string; now: Date; log?: (msg: string, err?: unknown) => void })
+export type ChatwootRole = 'administrator' | 'agent';
+export async function inboxSsoUrl(db: Db, cw: ChatwootClient, club: { id: string }, user: { id: string; name: string }, role: ChatwootRole, now: Date, grantId: string | null = null): Promise<string>
+export async function revokeInboxUser(db: Db, cw: ChatwootClient, clubId: string, userId: string): Promise<boolean>
+export async function tryRevokeInboxUser(db: Db, cw: ChatwootClient | null, clubId: string, userId: string, log?: (msg: string, err?: unknown) => void)
+export async function sweepGrantInboxUsers(db: Db, cw: ChatwootClient | null, now: Date, log?: (msg: string, err?: unknown) => void): Promise<number>
+// AppContext.chatwoot: ChatwootClient | null; createApp(..., { chatwootFetch?: typeof fetch })
+```
+
+Routes: `POST /api/admin/clubs/:slug/inbox/provision`; `GET /api/staff/clubs/:slug/inbox-sso`; `GET /api/staff/clubs/:slug/inbox-panel?account=&conversation=`.
+
+- **Requests to B:** when the scheduler lands, give `sweepGrantInboxUsers` its own `register` line (it rides A15's alert-check timer today). A14 (not B) adds the Chatwoot callback and bot handlers to `integrationRoutes`.
+- **Blockers:** Chatwoot API shapes and the `v4.1.0` image tag are not checked against a live install. No `it.todo` in `chatwoot-provision.test.ts`.
+- **Browser walk:** still to be done by a human (open inbox from the staff layout, booking panel iframe inside Chatwoot).
+
+### A16b (weekly club report) — status
+
+Landed: report builder, Monday 10:00 Bangkok send to the staff group, staff route and web page `/staff/report` (`Report`).
+
+```ts
+// apps/server/src/platform/club-report.ts
+export interface ClubReport { clubId; weekStart; weekEnd; bookings; cancelled; deposits: { count; satang }; noShowRate: number | null; noStaffHelpRate: number | null; busiestNights: { nightDate; bookings }[]; zones: { zoneId; name; nameTh; bookings }[]; averageSpendSatang: number | null; topPromoters: null; deflection: { conversations; deflected; rate: number | null }; takeoversByTopic: { topic; n }[]; door: { count; bookedPax; peakHour: number | null } }
+export function mondayOf(date: string): string
+export function lastCompleteWeek(club: Club, now: Date): string
+export async function buildClubReport(db: Db, clubId: string, weekStart: string): Promise<ClubReport>
+export function clubReportText(club: Club, r: ClubReport): string
+export const WEEKLY_REPORT_HOUR = 10;
+export const reportFlagKey = (clubId: string, weekStart: string) => `club-report:${clubId}:${weekStart}`;
+export async function sendWeeklyReports(ctx: AppContext, now: Date): Promise<void>
+export function startClubReports(ctx: AppContext, now: () => Date): () => void
+// apps/server/src/platform/alerts.ts
+export function staffAlertSender(db: Db): StaffAlertSender | undefined
+```
+
+Route: `GET /api/staff/clubs/:slug/report?week=YYYY-MM-DD` (owner, manager).
+
+- **Requests to B:** (1) accept the two-line `jobs/index.ts` stand-in or land the scheduler, then A switches to `scheduler.register('club-report', (ctx, now) => sendWeeklyReports(ctx, now))`; (2) after B7 merges, publish the seeded Velora week's dates.
+- **it.todo waiting on B:** `club-report.test.ts`: `report figures match the hand-counted B7-seeded Velora week (waits on B7 seed)`.
+- **Browser walk:** still to be done by a human (`/staff/report` as owner and as manager).
+
+### A17 (full onboarding wizard) — status
+
+Landed: founder link, public pre-call form, founder review and apply, per-step timings. Web: `/onboard/:token` (`OnboardForm`), `OnboardingPanel` inside the LINE wizard page.
+
+```ts
+// apps/server/src/http/admin/onboarding.ts
+export const LINK_TTL_MS = 14 * 86_400_000;
+export const ONBOARDING_STEPS = ['login', 'messaging_api', 'credentials', 'connect', 'response_settings', 'live_test', 'staff_login', 'plan_check', 'go_live'] as const;
+export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
+export const onboardingForm: z.ZodObject<...>; export type OnboardingForm = z.infer<typeof onboardingForm>;
+export function onboardingAdminRoutes(app: AppContext)   // mounted under /api/admin
+export function onboardPublicRoutes(app: AppContext)     // mounted at /api/onboard
+```
+
+Routes: `POST /api/admin/clubs/:slug/onboarding/link`, `GET /api/admin/clubs/:slug/onboarding`, `POST /api/admin/clubs/:slug/onboarding/apply`, `POST /api/admin/clubs/:slug/onboarding/timing`; `GET` / `PUT /api/onboard/:token`.
+
+- **Requests to B:** publish `brain/notes.ts` (B15) so apply can write the baseline FAQs as draft notes.
+- **it.todo waiting on B:** `onboarding.test.ts`: `apply writes the baseline FAQs into the brain (needs B15 brain/notes.ts)`.
+- **Browser walk:** still to be done by a human (send link, fill form on a phone, founder apply, step timings).
+
+### A17b (per-club feature switches) — status
+
+Landed: switches module, admin GET/PATCH, Controls panel in the founder console (`ClubFeatures` in `Controls.tsx`, `adminApi.features` / `adminApi.setFeatures`).
+
+```ts
+// apps/server/src/platform/features.ts
+export const FEATURE_KEYS = ['ai_answers', 'learning_loop', 'instagram', 'pos_sync', 'alerts_line'] as const;
+export type FeatureKey = (typeof FEATURE_KEYS)[number];
+export type FeatureSwitches = Record<FeatureKey, boolean>;
+export const FEATURE_DEFAULTS: FeatureSwitches;
+export const isFeatureKey = (k: string): k is FeatureKey => ...;
+export const featuresFlagKey = (clubId: string) => `features:${clubId}`;
+export async function featureSwitches(db: Db, clubId: string): Promise<FeatureSwitches>
+export async function isFeatureOn(db: Db, clubId: string, key: FeatureKey): Promise<boolean>
+```
+
+Routes: `GET` / `PATCH /api/admin/clubs/:slug/features`.
+
+- **Requests to B:** confirm the key list; B reads `ai_answers`, `learning_loop` (brain) and `alerts_line` (B19b) with `isFeatureOn`.
+- **Blockers:** none. No `it.todo`.
+- **Browser walk:** still to be done by a human (toggle each switch in the founder console).
+
+### A19 (POS live sync) — status
+
+Landed: Papaya and Loyverse adapters, live loader gated by `pos_sync`, bill opened at check-in from the staff `arrived` route, signed Papaya webhook with bad-signature rate limit, `applyLiveBill`, `syncClosedBills`. No web change.
+
+```ts
+// apps/server/src/integrations/pos/live.ts
+export type PosCredentials = PapayaCredentials | LoyverseCredentials;
+export interface LiveOpts { fetch?: FetchLike; baseUrl?: string }
+export async function loadPosAdapter(db: Db, key: Buffer, club: Club, opts: LiveOpts = {}): Promise<{ creds: PapayaCredentials; adapter: PapayaAdapter } | { creds: LoyverseCredentials; adapter: PosAdapter } | null>
+export async function openPosBillAtCheckIn(db: Db, key: Buffer, club: Club, bookingId: string, opts: LiveOpts & { now: Date }): Promise<{ status: 'opened'; ref: string } | { status: 'skipped'; reason: 'no_pos' | 'not_supported' | 'not_found' }>
+export async function applyLiveBill(db: Db, club: Club, bill: PosBill, opts: { now: Date; source: string; eventId?: string }): Promise<'created' | 'updated' | 'unchanged'>
+export async function syncClosedBills(db: Db, key: Buffer, club: Club, nightDate: string, opts: LiveOpts & { now: Date }): Promise<PosImportResult | null>
+// apps/server/src/integrations/pos/papaya.ts
+export const PAPAYA_API_BASE = 'https://api.papayapos.com';
+export const PAPAYA_SIGNATURE_HEADER = 'x-papaya-signature';
+export const PAPAYA_BILL_EVENTS = ['order.totalsUpdated', 'order.tableChanged', 'order.closed'] as const;
+export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+export function signPapaya(rawBody: string, secret: string): string
+export function verifyPapayaSignature(rawBody: string, header: string | null | undefined, secret: string): boolean
+export function papayaAdapter(creds: PapayaCredentials, opts: { fetch?: FetchLike; baseUrl?: string; tableCodeOf?: (booking: Booking) => string | null } = {}): PapayaAdapter
+// apps/server/src/integrations/pos/loyverse.ts
+export const LOYVERSE_API_BASE = 'https://api.loyverse.com/v1.0';
+export function loyverseReceiptToBill(r: LoyverseReceipt): PosBill
+export function loyverseAdapter(creds: LoyverseCredentials, opts: { fetch?: FetchLike; baseUrl?: string } = {}): PosAdapter
+// apps/server/src/http/integrations.ts
+export const BAD_SIGNATURE_LIMIT_PER_IP = 20;
+export const BAD_SIGNATURE_LIMIT_PER_CLUB = 60;
+export function integrationRoutes(app: AppContext)   // mounted at /integrations
+// AppContext.posFetch?: FetchLike; createApp(..., { posFetch })
+```
+
+Route: `POST /integrations/pos/papaya/:slug`.
+
+- **Requests to B:** (1) a booking-service transition so a closed POS bill completes its booking and emits `booking.completed`; (2) B3's raw-webhook writer, then A drops the direct `raw_webhooks` insert; (3) a scheduler slot for `syncClosedBills` (no job runs it yet).
+- **Blockers:** Papaya and Loyverse API shapes not checked against a sandbox. No `it.todo` in `pos-sync.test.ts`.
+- **Browser walk:** not applicable (no web change); the check-in bill needs a human run against a POS sandbox.

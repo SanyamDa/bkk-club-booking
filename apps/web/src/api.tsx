@@ -152,6 +152,9 @@ export const adminApi = {
   timeline: (slug: string, kind: 'conversations' | 'bookings', id: string) => api<{ items?: any[]; history?: any[] }>(adm(slug) + `/${kind}/${encodeURIComponent(id)}/timeline`),
   testMessage: (slug: string, to: 'self' | 'staff_group') => api(adm(slug) + '/test-message', { body: { to } }),
   pause: (slug: string, paused: boolean) => api(adm(slug) + '/pause', { body: { paused } }),
+  /** A17b per-club feature switches. */
+  features: (slug: string) => api<{ features: Record<string, boolean> }>(adm(slug) + '/features'),
+  setFeatures: (slug: string, b: Record<string, boolean>) => api<{ features: Record<string, boolean> }>(adm(slug) + '/features', { method: 'PATCH', body: b }),
   globalStop: (stopped: boolean) => api('/api/admin/global-stop', { body: { stopped } }),
   globalStopState: () => api<{ stopped: boolean; updatedBy: string | null; updatedAt: string | null }>('/api/admin/global-stop'),
   platformLogin: () => api<{ loginChannel: { liffId: string; last4: string; setBy: string; setAt: string } | null }>('/api/admin/platform/line-login'),

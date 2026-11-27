@@ -18,9 +18,11 @@ export async function startBackground(ctx: AppContext, now: () => Date): Promise
   }, 30_000);
 
   const stopAlertChecks = startAlertChecks(ctx, now); // A15: until B's scheduler: scheduler.register('alert-checks', ...)
+  const stopClubReports = (await import('../platform/club-report.js')).startClubReports(ctx, now); // A16b: until B's scheduler: scheduler.register('club-report', ...)
 
   return async () => {
     clearInterval(sweeper);
     stopAlertChecks();
+    stopClubReports();
   };
 }

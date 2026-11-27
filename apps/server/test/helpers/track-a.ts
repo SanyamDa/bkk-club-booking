@@ -30,6 +30,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     APP_SECRET: 'test-secret-test-secret-test-secret',
     CREDENTIALS_KEY: Buffer.alloc(32, 7),
     ANTHROPIC_API_KEY: undefined,
+    CHATWOOT_URL: undefined,
+    CHATWOOT_PLATFORM_TOKEN: undefined,
     DEV_SIMULATOR: true,
     LINE_FAKE: false,
     NODE_ENV: 'test',

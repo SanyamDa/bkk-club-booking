@@ -14,6 +14,7 @@ export default defineConfig({
       '/api': api,
       '/line': api,
       '/media': api,
+      '/integrations': api,
       '/health': api,
     },
   },

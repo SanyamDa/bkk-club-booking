@@ -11,7 +11,9 @@ import { isDevOrTest, type Config } from './config.js';
 import type { Db } from './db/client.js';
 import { jsonLog } from './lib/log.js';
 import { adminRoutes } from './http/admin/index.js';
+import { onboardPublicRoutes } from './http/admin/onboarding.js';
 import { authRoutes } from './http/auth.js';
+import { integrationRoutes } from './http/integrations.js';
 import { devRoutes } from './http/dev.js';
 import type { AppContext } from './http/context.js';
 import { liffRoutes } from './http/liff.js';
@@ -25,6 +27,7 @@ import { lineIdTokenVerifier } from './line/idtoken.js';
 import { registerStaffAlertSender } from './platform/alerts.js';
 import { fakeLiffEndpointUpdater, fakeSetupClients, realLiffEndpointUpdater, realSetupClients } from './line/setup.js';
 import { fakeLineTokenIssuer, realLineTokenIssuer } from './line/tokens.js';
+import { chatwootClient } from './integrations/chatwoot/provision.js';
 
 /** What `opts.onResponse` sees for every JSON response (test hook: secret-leak checks). */
 export interface ResponseRecord {
@@ -47,6 +50,10 @@ export function createApp(
     lineTokens?: AppContext['lineTokens'];
     /** Test hook: called with every JSON response body. */
     onResponse?: (r: ResponseRecord) => void;
+    /** fetch used for Chatwoot calls (A13); tests pass a fake Chatwoot. */
+    chatwootFetch?: typeof fetch;
+    /** fetch used for live POS calls (A19, check-in bill); tests pass a fake POS. */
+    posFetch?: AppContext['posFetch'];
   } = {},
 ) {
   // Structured JSON log lines on stdout (A7) unless the caller (tests) passes its own logger.
@@ -80,6 +87,8 @@ export function createApp(
     lineSetupClients: opts.lineSetupClients ?? (config.LINE_FAKE ? fakeSetupClients : realSetupClients),
     verifyIdToken: opts.verifyIdToken ?? lineIdTokenVerifier(),
     updateLiffEndpoint: opts.updateLiffEndpoint ?? (config.LINE_FAKE ? fakeLiffEndpointUpdater : realLiffEndpointUpdater),
+    chatwoot: chatwootClient(config, opts.chatwootFetch),
+    posFetch: opts.posFetch,
   };
 
   // A15: urgent alerts (and info ones the club switched on) reach the staff LINE group through the outbox.
@@ -119,6 +128,8 @@ export function createApp(
   app.route('/api/auth', authRoutes(ctx));
   app.route('/api/staff', staffRoutes(ctx));
   app.route('/api/admin', adminRoutes(ctx));
+  app.route('/api/onboard', onboardPublicRoutes(ctx)); // A17 pre-call form (token in the path, hashed at rest)
+  app.route('/integrations', integrationRoutes(ctx)); // A19
   if (config.DEV_SIMULATOR) app.route('/api/dev', devRoutes(ctx));
   app.onError((err, c) => {
     log(`Unhandled error on ${c.req.method} ${c.req.path}`, err);

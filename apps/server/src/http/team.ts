@@ -24,6 +24,7 @@ import { dummyHash, verifyPassword } from '../platform/passwords.js';
 import { createSession, SESSION_COOKIE } from '../platform/sessions.js';
 import { clientIp, recordAuthFailure, requireClubRole, type AuthEnv } from './auth.js';
 import type { AppContext } from './context.js';
+import { tryRevokeInboxUser } from '../integrations/chatwoot/provision.js';
 
 type TeamContext = Context<AuthEnv>;
 
@@ -140,6 +141,8 @@ export function teamRoutes(app: AppContext) {
     try {
       const change = await setMemberRole(db, c.var.club.id, g.target.userId, parsed.data.role);
       await audit(db, c, 'team.role_changed', 'user', g.target.userId, { before: { role: change.before }, after: { role: change.after } }, now);
+      // A13: the Chatwoot login keeps its old role until revoked; the next "Open inbox" makes a new one.
+      if (change.before !== change.after) app.track(tryRevokeInboxUser(db, app.chatwoot, c.var.club.id, g.target.userId, app.deps.log));
       return c.json({ ok: true, role: change.after });
     } catch (err) {
       return inviteError(c, err);
@@ -153,6 +156,7 @@ export function teamRoutes(app: AppContext) {
     try {
       const out = await disableMember(db, c.var.club.id, g.target.userId, now);
       await audit(db, c, 'team.member_disabled', 'user', g.target.userId, { before: { role: out.role }, data: out }, now);
+      app.track(tryRevokeInboxUser(db, app.chatwoot, c.var.club.id, g.target.userId, app.deps.log)); // A13
       return c.json({ ok: true, sessionsRevoked: out.sessionsRevoked, accountDisabled: out.accountDisabled });
     } catch (err) {
       return inviteError(c, err);

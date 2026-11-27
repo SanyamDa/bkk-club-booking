@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate, useOutletContext } from 'react-router-dom';
 import { api, ApiError, staffPath, storedSupport } from '../../api';
 import { SupportBanner } from '../admin/SupportBanner';
+import { OpenInboxButton } from './InboxPanel';
 
 interface StaffCtx {
   club: string;
@@ -78,8 +79,10 @@ export function StaffLayout() {
           <NavLink to="/staff/new">New booking</NavLink>
           <NavLink to="/staff/pos">POS import</NavLink>
           <NavLink to="/staff/calendar">Calendar</NavLink>
+          <NavLink to="/staff/report">Report</NavLink>
           <NavLink to="/staff/settings">Setup</NavLink>
           <NavLink to="/staff/team">Team</NavLink>
+          {club && <OpenInboxButton club={club} />}
           <button className="btn small" onClick={logout}>Log out</button>
         </nav>
       </header>

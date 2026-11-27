@@ -27,6 +27,10 @@ const schema = z.object({
   CREDENTIALS_KEY: optionalString,
   /** Optional until Phase 2. */
   ANTHROPIC_API_KEY: optionalString,
+  /** Shared Chatwoot CE install (infra/chatwoot, plan A13). Unset = no inbox provisioning. */
+  CHATWOOT_URL: optionalString,
+  /** Chatwoot Platform App token (Super Admin > Platform Apps). */
+  CHATWOOT_PLATFORM_TOKEN: optionalString,
   DEV_SIMULATOR: flag,
   /** Fake LINE token issuer and setup clients (development and test only). */
   LINE_FAKE: flag,

@@ -7,6 +7,7 @@ import { controlsRoutes } from './controls.js';
 import { dataRoutes } from './data.js';
 import { debugRoutes } from './debug.js';
 import { lineWizardRoutes } from './line-wizard.js';
+import { onboardingAdminRoutes } from './onboarding.js';
 import { platformRoutes } from './platform.js';
 import { supportRoutes } from './support.js';
 
@@ -19,6 +20,7 @@ export function adminRoutes(app: AppContext) {
   r.use('*', requirePlatformAdmin(app));
   r.route('/', clubsRoutes(app));
   r.route('/', lineWizardRoutes(app));
+  r.route('/', onboardingAdminRoutes(app)); // A17 onboarding wizard
   r.route('/', controlsRoutes(app));
   r.route('/', platformRoutes(app));
   r.route('/', supportRoutes(app));

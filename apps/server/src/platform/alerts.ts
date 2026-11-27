@@ -28,6 +28,11 @@ export function registerStaffAlertSender(db: Db, sender: StaffAlertSender): void
   senders.set(db, sender);
 }
 
+/** The sender `createApp` wired for this database, if any (A16b weekly club report reuses it). */
+export function staffAlertSender(db: Db): StaffAlertSender | undefined {
+  return senders.get(db);
+}
+
 const LEVEL_LABEL: Record<AlertLevel, { en: string; th: string }> = {
   urgent: { en: 'URGENT', th: 'ด่วน' },
   needs_input: { en: 'Needs input', th: 'รอข้อมูล' },

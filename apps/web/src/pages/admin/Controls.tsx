@@ -45,6 +45,55 @@ export function ClubControls({ club, onChange }: { club: AdminClub; onChange: ()
       </div>
       {error && <div className="error">{error}</div>}
       {msg && <div className="faint">{msg}</div>}
+      <ClubFeatures slug={club.slug} />
+    </div>
+  );
+}
+
+const FEATURE_LABELS: Record<string, string> = {
+  ai_answers: 'AI answers from the club brain',
+  learning_loop: 'Brain learns from host takeovers',
+  instagram: 'Instagram messages',
+  pos_sync: 'POS sync',
+  alerts_line: 'Alerts to the staff LINE group',
+};
+
+/** A17b: per-club feature switches. Each change applies on the next request, no deploy. */
+function ClubFeatures({ slug }: { slug: string }) {
+  const [features, setFeatures] = useState<Record<string, boolean> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    adminApi.features(slug).then((d) => setFeatures(d.features)).catch((e) => setError(errText(e)));
+  }, [slug]);
+
+  async function toggle(key: string, on: boolean) {
+    setBusy(true);
+    setError('');
+    try {
+      const d = await adminApi.setFeatures(slug, { [key]: on });
+      setFeatures(d.features);
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="stack">
+      <h3 style={{ margin: 0 }}>Feature switches</h3>
+      {!features ? (
+        !error && <div className="muted">Loading…</div>
+      ) : (
+        Object.entries(features).map(([key, on]) => (
+          <label key={key} className="row" style={{ gap: 8 }}>
+            <input type="checkbox" checked={on} disabled={busy} onChange={(e) => toggle(key, e.target.checked)} />
+            <span>{FEATURE_LABELS[key] ?? key}</span>
+          </label>
+        ))
+      )}
+      {error && <div className="error">{error}</div>}
     </div>
   );
 }

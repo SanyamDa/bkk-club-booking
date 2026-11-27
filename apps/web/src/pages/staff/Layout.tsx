@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { NavLink, Outlet, useNavigate, useOutletContext } from 'react-router-dom';
+import { NavLink, Outlet, useLocation, useNavigate, useOutletContext } from 'react-router-dom';
 import { api, ApiError, staffPath, storedSupport } from '../../api';
 import { SupportBanner } from '../admin/SupportBanner';
 import { OpenInboxButton } from './InboxPanel';
@@ -15,12 +15,13 @@ export const useStaff = () => useOutletContext<StaffCtx>();
 
 export function StaffLayout() {
   const navigate = useNavigate();
-  const [clubs, setClubs] = useState<{ slug: string; name: string }[] | null>(null);
+  const { pathname } = useLocation();
+  const [clubs, setClubs] = useState<{ slug: string; name: string; role?: string }[] | null>(null);
   const [club, setClub] = useState<string>(() => localStorage.getItem('club') ?? '');
   const [handoffCount, setHandoffCount] = useState(0);
 
   useEffect(() => {
-    api<{ clubs: { slug: string; name: string }[] }>('/api/auth/me')
+    api<{ clubs: { slug: string; name: string; role: string }[] }>('/api/auth/me')
       .then((d) => {
         // A founder under a support session sees that club too (A6); the server checks the grant.
         const support = storedSupport().filter((s) => !d.clubs.some((c) => c.slug === s.clubSlug)).map((s) => ({ slug: s.clubSlug, name: s.clubName }));
@@ -37,9 +38,15 @@ export function StaffLayout() {
     if (club) localStorage.setItem('club', club);
   }, [club]);
 
+  // A promoter login sees only its own promoter page (plan A20a); every other staff page is 403.
+  const isPromoter = clubs?.find((c) => c.slug === club)?.role === 'promoter';
+  useEffect(() => {
+    if (isPromoter && pathname !== '/staff/promoters') navigate('/staff/promoters', { replace: true });
+  }, [isPromoter, pathname]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Keep the handoff badge fresh on every page.
   useEffect(() => {
-    if (!club) return;
+    if (!club || isPromoter) return;
     const load = () =>
       api<{ handoffs: unknown[] }>(staffPath(club, '/handoffs'))
         .then((d) => setHandoffCount(d.handoffs.length))
@@ -47,7 +54,7 @@ export function StaffLayout() {
     load();
     const id = setInterval(load, 10_000);
     return () => clearInterval(id);
-  }, [club]);
+  }, [club, isPromoter]);
 
   if (!clubs || !club) return <div className="staff muted">Loading…</div>;
   const clubName = clubs.find((c) => c.slug === club)?.name ?? club;
@@ -70,6 +77,12 @@ export function StaffLayout() {
             <span className="muted">{clubName}</span>
           )}
         </div>
+        {isPromoter ? (
+        <nav className="nav" aria-label="Dashboard">
+          <NavLink to="/staff/promoters">My link</NavLink>
+          <button className="btn small" onClick={logout}>Log out</button>
+        </nav>
+        ) : (
         <nav className="nav" aria-label="Dashboard">
           <NavLink to="/staff" end>Tonight</NavLink>
           <NavLink to="/staff/handoffs">
@@ -80,11 +93,14 @@ export function StaffLayout() {
           <NavLink to="/staff/pos">POS import</NavLink>
           <NavLink to="/staff/calendar">Calendar</NavLink>
           <NavLink to="/staff/report">Report</NavLink>
+          <NavLink to="/staff/guests">Guests</NavLink>
+          <NavLink to="/staff/promoters">Promoters</NavLink>
           <NavLink to="/staff/settings">Setup</NavLink>
           <NavLink to="/staff/team">Team</NavLink>
           {club && <OpenInboxButton club={club} />}
           <button className="btn small" onClick={logout}>Log out</button>
         </nav>
+        )}
       </header>
       <SupportBanner club={club} />
       <Outlet context={{ club, clubName, handoffCount, setHandoffCount } satisfies StaffCtx} />

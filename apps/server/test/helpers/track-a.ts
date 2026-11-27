@@ -6,7 +6,7 @@ import type { ResponseRecord } from '../../src/app.js';
 import { holdTable } from '../../src/bookings/service.js';
 import type { Config } from '../../src/config.js';
 import type { Db } from '../../src/db/client.js';
-import { alerts, clubMemberships, conversations, deposits, guests, invites, rawWebhooks, tables, users, type Club, type MembershipRole } from '../../src/db/schema.js';
+import { alerts, clubMemberships, conversations, deposits, guests, guestTags, invites, promoters, rawWebhooks, tables, users, type Club, type MembershipRole } from '../../src/db/schema.js';
 import type { AppContext } from '../../src/http/context.js';
 import { newId } from '../../src/lib/util.js';
 import { hashPassword } from '../../src/platform/passwords.js';
@@ -229,5 +229,10 @@ export async function isolationFixtures(db: Db, club: Club): Promise<Record<stri
   await db.insert(clubMemberships).values({ userId: memberId, clubId: club.id, role: 'host' });
   // A9 settings routes (`/zones/:id`, `/tables/:id`): the club's own zone and table.
   const zonesAndTables = { 'zones/:id': table.zoneId, 'tables/:id': table.id };
-  return { 'bookings/:id': booking.id, 'conversations/:id': conversationId, 'deposits/:id': depositId, 'webhooks/:id': rawWebhookId, 'feed/:id': alertId, 'invites/:id': inviteId, 'members/:userId': memberId, ...zonesAndTables };
+  // A20a promoters (`/promoters/:promoterId`) and A20c CRM (`/guests/:guestId`, `/guests/:guestId/tags/:tag`).
+  const promoterId = newId();
+  await db.insert(promoters).values({ id: promoterId, clubId: club.id, code: `iso-${promoterId.slice(0, 8).toLowerCase()}`, name: 'Isolation Promoter' });
+  await db.insert(guestTags).values({ guestId: guest.id, clubId: club.id, tag: 'vip' });
+  const a20 = { 'promoters/:promoterId': promoterId, 'guests/:guestId': guest.id, 'tags/:tag': 'vip' };
+  return { 'bookings/:id': booking.id, 'conversations/:id': conversationId, 'deposits/:id': depositId, 'webhooks/:id': rawWebhookId, 'feed/:id': alertId, 'invites/:id': inviteId, 'members/:userId': memberId, ...zonesAndTables, ...a20 };
 }

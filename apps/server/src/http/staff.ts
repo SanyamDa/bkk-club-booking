@@ -41,6 +41,8 @@ import { requireClubRole, type AuthEnv, type Role } from './auth.js';
 import type { AppContext } from './context.js';
 import { staffAlertRoutes } from './staff-alerts.js';
 import { staffInboxRoutes } from './staff-inbox.js';
+import { staffCrmRoutes } from './staff-crm.js';
+import { staffPromoterRoutes } from './staff-promoters.js';
 import { staffPosRoutes } from './staff-pos.js';
 import { staffReportRoutes } from './staff-report.js';
 import { staffSettingsRoutes } from './staff-settings.js';
@@ -79,6 +81,8 @@ export function staffRoutes(app: AppContext) {
   r.route('/', staffSettingsRoutes(app)); // A9 settings, prices, nights calendar, profile, quota
   r.route('/', staffReportRoutes(app)); // A16b weekly club report
   r.route('/', staffInboxRoutes(app)); // A13 Chatwoot inbox SSO and booking panel
+  r.route('/', staffPromoterRoutes(app)); // A20a promoters, attribution, promoter report
+  r.route('/', staffCrmRoutes(app)); // A20c guest CRM and VIP tags
 
   /** A staff-surface event for the club in the URL, attributed to the signed-in person. */
   function staffEvent(c: StaffContext, e: Omit<EventInput, 'clubId' | 'occurredAt' | 'actorType' | 'actorId' | 'dataOrigin' | 'isTest'>) {

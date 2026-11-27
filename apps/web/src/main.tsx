@@ -17,6 +17,8 @@ import { AcceptInvite } from './pages/staff/AcceptInvite';
 import { Team } from './pages/staff/Team';
 import { PosImport } from './pages/staff/PosImport';
 import { Report } from './pages/staff/Report';
+import { Guests } from './pages/staff/Guests';
+import { Promoters } from './pages/staff/Promoters';
 import { AdminLayout } from './pages/admin/AdminLayout';
 import { ClubDetail } from './pages/admin/ClubDetail';
 import { Clubs } from './pages/admin/Clubs';
@@ -52,6 +54,8 @@ createRoot(document.getElementById('root')!).render(
           <Route path="team" element={<Team />} />
           <Route path="pos" element={<PosImport />} />
           <Route path="report" element={<Report />} />
+          <Route path="guests" element={<Guests />} />
+          <Route path="promoters" element={<Promoters />} />
         </Route>
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<Clubs />} />

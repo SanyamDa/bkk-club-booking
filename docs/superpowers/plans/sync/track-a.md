@@ -913,3 +913,43 @@ Route: `POST /integrations/pos/papaya/:slug`.
 - **Blockers:** Meta app approval for Instagram messaging in Chatwoot. Chatwoot payload shapes (`{ payload: [...] }` inbox list, `Channel::Instagram` or `Channel::FacebookPage` with `instagram_id`, `payload.webhook.id`) not checked against a live Chatwoot. Outgoing messages (including replies typed in the Instagram app) are ignored.
 - **it.todo (waiting on B):** three in `test/instagram.test.ts`: delivery through B3 `processDelivery` / raw-webhook writer; an Instagram message reaching the club's brain (B chat capture); Metabase view and busyness feed leaving out instagram rows (B14 / busyness feed).
 - **Browser walk:** not applicable (no web change in A18). A human still needs to connect a real Instagram account in Chatwoot and send a message end to end.
+
+## 2026-11-27 — A20 Phase 3: A20a promoters, A20c guest CRM and VIP tags, A20d report sections (A20b deferred)
+
+- **Landed:** promoters with codes, links and commission (bps), booking attribution (link or manual), a promoter report and a promoter's own view; guest search, profile, tags and append-only notes; the weekly report gains `topPromoters` and `vip`. Web: `/staff/promoters` and `/staff/guests` pages, VIP tile and top promoters on `/staff/report`; a `promoter` login is sent to `/staff/promoters` and sees only that nav item. Plan rows A20a to A20d replace the old A20 row.
+- **Migration:** `apps/server/drizzle/0004_a20.sql` (lock held): `promoters`, `promoter_attributions`, `guest_tags`, `guest_notes` in `db/schema/platform.ts`. Rebase before your next `db:generate`.
+- **Published (`apps/server/src/platform/promoters.ts`), exact signatures:**
+  - `export class PromoterError extends Error { constructor(readonly code: 'bad_code' | 'code_taken' | 'not_found' | 'bad_request') }`
+  - `export function normalizeCode(code: string): string` (lowercase letters, digits, dashes, 2 to 24 characters)
+  - `export function promoterLink(publicUrl: string, club: Pick<Club, 'slug'>, code: string): string` → `<PUBLIC_URL>/r/p/<slug>/<code>`
+  - `export async function createPromoter(db: Db, clubId: string, input: { name: string; code: string; commissionBps?: number; userId?: string | null }, now: Date): Promise<Promoter>`
+  - `export async function getPromoter(db: Db, clubId: string, id: string): Promise<Promoter | undefined>`
+  - `export async function updatePromoter(db: Db, clubId: string, id: string, patch: { name?: string; commissionBps?: number; userId?: string | null; disabled?: boolean }, now: Date = new Date()): Promise<Promoter>`
+  - `export async function listPromoters(db: Db, clubId: string): Promise<Promoter[]>`
+  - `export async function attributeBooking(db: Db, clubId: string, bookingId: string, who: { promoterId?: string; code?: string }, via: 'link' | 'manual', actorId: string | null, now: Date): Promise<PromoterAttribution>` (throws `PromoterError('not_found')` for another club's booking or promoter, or a disabled promoter; `'link'` never replaces an existing attribution, `'manual'` does)
+  - `export async function removeAttribution(db: Db, clubId: string, bookingId: string): Promise<void>`
+  - `export interface PromoterReportRow { promoterId: string; name: string; code: string; commissionBps: number; bookings: number; arrived: number; noShows: number; pax: number; spendSatang: number; commissionSatang: number }`
+  - `export async function promoterReport(db: Db, clubId: string, from: string, to: string): Promise<PromoterReportRow[]>`
+  - `export async function topPromoters(db: Db, clubId: string, weekStart: string): Promise<{ promoterId: string; name: string; code: string; bookings: number; pax: number }[] | null>` (null when the club has no promoters)
+  - `export async function promoterOwnBookings(db: Db, clubId: string, promoterId: string, from: string, to: string): Promise<{ id: string; ref: string; nightDate: string; status: string; pax: number; tableCode: string | null }[]>` (no guest name or phone)
+  - Types `Promoter`, `PromoterAttribution`, `GuestNote` exported from `db/schema/platform.ts`.
+- **Published (`apps/server/src/platform/crm.ts`), exact signatures:**
+  - `export class CrmError extends Error { constructor(readonly code: 'not_found' | 'bad_tag' | 'bad_request') }`
+  - `export const VIP_TAG = 'vip'`
+  - `export function normalizeTag(tag: string): string` (trimmed, lowercase, spaces to one dash, 1 to 32 characters)
+  - `export interface GuestSummary { id: string; name: string | null; displayName: string | null; phone: string | null; tags: string[]; bookings: number; visits: number; lastNight: string | null }`
+  - `export async function searchGuests(db: Db, club: Pick<Club, 'id' | 'status'>, opts: { q?: string; tag?: string; limit?: number }): Promise<GuestSummary[]>`
+  - `export interface GuestProfile { guest: { id; name; displayName; phone; lang; createdAt }; tags: string[]; notes: { id; text; author; createdAt }[]; stats: { bookings; visits; noShows; spendSatang; lastVisit }; bookings: { id; ref; nightDate; status; pax; tableCode; spendSatang }[] }`
+  - `export async function guestProfile(db: Db, club: Pick<Club, 'id' | 'status'>, guestId: string): Promise<GuestProfile | undefined>`
+  - `export async function addTag(db: Db, clubId: string, guestId: string, tag: string, actorId: string | null, now: Date): Promise<string[]>`
+  - `export async function removeTag(db: Db, clubId: string, guestId: string, tag: string): Promise<string[]>`
+  - `export async function addNote(db: Db, clubId: string, guestId: string, text: string, authorId: string | null, now: Date): Promise<GuestNote>`
+  - `export async function vipSummary(db: Db, clubId: string, weekStart: string): Promise<{ guests: number; bookings: number; arrived: number; spendSatang: number }>`
+  - `ClubReport` (`platform/club-report.ts`) gains `topPromoters: {...}[] | null` and `vip: { guests; bookings; arrived; spendSatang }`.
+  - `actorOf(c)` in `http/staff-settings.ts` is now exported (used by the new routes).
+- **Routes (under `/api/staff`, mounted in `http/staff.ts`):** owner/manager: `GET /clubs/:slug/promoters`, `POST /clubs/:slug/promoters`, `GET /clubs/:slug/promoters/report`, `PATCH /clubs/:slug/promoters/:promoterId`; desk roles: `PUT /clubs/:slug/bookings/:id/promoter`, `DELETE /clubs/:slug/bookings/:id/promoter`; role `promoter`: `GET /clubs/:slug/promoter/me`; owner, manager, host: `GET /clubs/:slug/guests`, `GET /clubs/:slug/guests/:guestId`, `POST /clubs/:slug/guests/:guestId/tags`, `DELETE /clubs/:slug/guests/:guestId/tags/:tag`, `POST /clubs/:slug/guests/:guestId/notes`. Isolation fixtures `promoters/:promoterId`, `guests/:guestId`, `tags/:tag` added to `test/helpers/track-a.ts`.
+- **Audit:** promoter create/change, booking attribution and removal, guest tag add/remove and note add write `audit_log` rows (`promoter.*`, `guest.*`; note text is not copied into the audit row). No events yet: `data/event-types.ts` is B's.
+- **Requests to B:** (1) serve `GET /r/p/:slug/:code` in `http/redirect.ts` (count the tap, carry the code into the booking flow) and call `attributeBooking(..., 'link', ...)` at the hold; (2) set `bookings.source = 'promoter'` for those holds; (3) optionally add `bookings.promoter_id` and backfill from `promoter_attributions`; (4) guest data removal must also delete `guest_tags` and `guest_notes` rows (FKs to `guests`); booking deletion must also delete its `promoter_attributions` row (FK to `bookings`); (5) add event names for promoter and guest-tag actions if the data model should carry them.
+- **Blockers:** A20b payment gateway not built; blocked on a written legal review of the money flow (§11.2). Link attribution waits on B's `/r/p/...` redirect and bot hold.
+- **it.todo:** none in `test/promoters.test.ts` or `test/crm.test.ts`.
+- **Browser walk:** still to be done by a human: Guests page (search, tag, note), Promoters page (create, link, report), a promoter login landing on `/staff/promoters`, and the report VIP tile and top promoters. Typecheck and `npm run build -w @club/web` green.

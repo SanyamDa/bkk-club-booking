@@ -16,6 +16,8 @@ interface ClubReport {
   deflection: { conversations: number; deflected: number; rate: number | null };
   takeoversByTopic: { topic: string; n: number }[];
   door: { count: number; bookedPax: number; peakHour: number | null };
+  topPromoters?: { promoterId: string; name: string; code: string; bookings: number; pax: number }[] | null;
+  vip?: { guests: number; bookings: number; arrived: number; spendSatang: number };
 }
 
 const pct = (r: number | null) => (r === null ? '–' : `${Math.round(r * 100)}%`);
@@ -75,7 +77,15 @@ export function Report() {
         {tile('Average spend', r.averageSpendSatang === null ? '–' : baht(r.averageSpendSatang), 'POS bills')}
         {tile('Deflection', pct(r.deflection.rate), `${r.deflection.deflected} of ${r.deflection.conversations} chats`)}
         {tile('Door count', r.door.count, `${r.door.bookedPax} booked · peak ${r.door.peakHour === null ? '–' : `${String(r.door.peakHour).padStart(2, '0')}:00`}`)}
+        {r.vip && tile('VIP bookings', r.vip.bookings, `${r.vip.arrived} arrived · ${r.vip.guests} guests · ${baht(r.vip.spendSatang)}`)}
       </div>
+      {r.topPromoters && (
+        <div className="card stack">
+          <b>Top promoters</b>
+          {r.topPromoters.length === 0 && <span className="muted">No promoter bookings</span>}
+          {r.topPromoters.map((p) => <div key={p.promoterId}>{p.name} <span className="faint">{p.code}</span> · {p.bookings} bookings · {p.pax} guests</div>)}
+        </div>
+      )}
       <div className="row wrap" style={{ gap: 12, alignItems: 'flex-start' }}>
         <div className="card stack">
           <b>Busiest nights</b>

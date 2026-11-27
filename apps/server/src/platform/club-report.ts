@@ -19,6 +19,8 @@ import type { AppContext } from '../http/context.js';
 import { addDays, bangkokParts, currentNightDate, toDateString, weekdayOf } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
 import { staffAlertSender } from './alerts.js';
+import { vipSummary } from './crm.js';
+import { topPromoters } from './promoters.js';
 
 /**
  * Weekly club report (spec §14.10, §6.5, plan A16b). Shown on the staff dashboard (`GET /report`)
@@ -47,8 +49,10 @@ export interface ClubReport {
   zones: { zoneId: string; name: string; nameTh: string; bookings: number }[];
   /** Average POS bill of the week's bookings; null without POS data. */
   averageSpendSatang: number | null;
-  /** Phase 3 (promoters); always null until then. */
-  topPromoters: null;
+  /** Top three promoters by held bookings (plan A20a); null when the club has no promoters. */
+  topPromoters: { promoterId: string; name: string; code: string; bookings: number; pax: number }[] | null;
+  /** Guests tagged `vip` (plan A20c): held bookings, arrivals and POS spend in the week. */
+  vip: { guests: number; bookings: number; arrived: number; spendSatang: number };
   /** §3.2 G9: free-text conversations (6 h gap) with no takeover. Fallback-menu endings are not yet counted. */
   deflection: { conversations: number; deflected: number; rate: number | null };
   takeoversByTopic: { topic: string; n: number }[];
@@ -231,7 +235,8 @@ export async function buildClubReport(db: Db, clubId: string, weekStart: string)
     busiestNights,
     zones: zoneList,
     averageSpendSatang,
-    topPromoters: null,
+    topPromoters: await topPromoters(db, clubId, start),
+    vip: await vipSummary(db, clubId, start),
     deflection: { conversations: runs.length, deflected, rate: rate(deflected, runs.length) },
     takeoversByTopic,
     door: { count: clicks.reduce((s, c) => s + c.delta, 0), bookedPax: held.reduce((s, b) => s + b.pax, 0), peakHour },
@@ -248,6 +253,11 @@ export function clubReportText(club: Club, r: ClubReport): string {
   const topics = r.takeoversByTopic.map((t) => `${t.topic} ${t.n}`).join(', ') || '–';
   const spend = r.averageSpendSatang === null ? '–' : formatBaht(r.averageSpendSatang);
   const peak = r.door.peakHour === null ? '–' : `${String(r.door.peakHour).padStart(2, '0')}:00`;
+  // A20 lines appear only when there is something to show, so a club without promoters or VIPs gets the A16b text.
+  const promo = r.topPromoters?.length ? r.topPromoters.map((p) => `${p.name} ${p.bookings}`).join(', ') : null;
+  const vip = r.vip.bookings ? `${r.vip.bookings} / ${r.vip.arrived} · ${formatBaht(r.vip.spendSatang)}` : null;
+  const extraTh = [promo && `โปรโมเตอร์ยอดนิยม ${promo}`, vip && `ลูกค้า VIP จอง/มา ${vip}`].filter((l): l is string => !!l);
+  const extraEn = [promo && `Top promoters ${promo}`, vip && `VIP bookings / arrived ${vip}`].filter((l): l is string => !!l);
   return [
     `[รายงานประจำสัปดาห์] ${club.name} ${r.weekStart} ถึง ${r.weekEnd}`,
     `การจอง ${r.bookings} (ยกเลิก ${r.cancelled}) · มัดจำ ${r.deposits.count} รายการ ${formatBaht(r.deposits.satang)}`,
@@ -255,6 +265,7 @@ export function clubReportText(club: Club, r: ClubReport): string {
     `คืนที่คึกคัก ${nights} · โซน ${zonesTh} · ยอดใช้จ่ายเฉลี่ย ${spend}`,
     `บอทตอบได้เอง ${pct(r.deflection.rate)} · ส่งต่อพนักงานตามหัวข้อ ${topics}`,
     `คนเข้าประตู ${r.door.count} / จองไว้ ${r.door.bookedPax} คน · ช่วงพีค ${peak}`,
+    ...extraTh,
     '',
     `[Weekly report] ${club.name} ${r.weekStart} to ${r.weekEnd}`,
     `Bookings ${r.bookings} (cancelled ${r.cancelled}) · Deposits ${r.deposits.count}, ${formatBaht(r.deposits.satang)}`,
@@ -262,6 +273,7 @@ export function clubReportText(club: Club, r: ClubReport): string {
     `Busiest nights ${nights} · Zones ${zonesEn} · Average spend ${spend}`,
     `Deflection ${pct(r.deflection.rate)} · Takeovers by topic ${topics}`,
     `Door count ${r.door.count} against ${r.door.bookedPax} booked · Peak hour ${peak}`,
+    ...extraEn,
   ].join('\n');
 }
 

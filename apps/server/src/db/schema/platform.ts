@@ -10,7 +10,7 @@ import {
   timestamp,
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
-import { clubs } from './core.js';
+import { bookings, clubs, guests } from './core.js';
 
 export type MembershipRole = 'owner' | 'manager' | 'host' | 'door' | 'promoter';
 
@@ -174,6 +174,71 @@ export const clubAlertSettings = pgTable('club_alert_settings', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/** Promoters of one club (spec §4, plan A20a). `code` is the club-unique, lowercase code in the promoter's link. */
+export const promoters = pgTable(
+  'promoters',
+  {
+    id: text('id').primaryKey(),
+    clubId: text('club_id').notNull().references(() => clubs.id),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    /** The promoter's own login (a `promoter` membership of the club), for their limited dashboard. */
+    userId: text('user_id').references(() => users.id),
+    /** Commission in basis points of the booking's spend (1000 = 10%). */
+    commissionBps: integer('commission_bps').notNull().default(0),
+    disabledAt: timestamp('disabled_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('promoters_club_code').on(t.clubId, t.code)],
+);
+
+/**
+ * Which promoter brought a booking (plan A20a). Kept here, keyed by booking id, because
+ * `bookings` is Track B's table. `via` is 'link' (the promoter's link) or 'manual' (set by staff).
+ */
+export const promoterAttributions = pgTable(
+  'promoter_attributions',
+  {
+    bookingId: text('booking_id').primaryKey().references(() => bookings.id),
+    clubId: text('club_id').notNull().references(() => clubs.id),
+    promoterId: text('promoter_id').notNull().references(() => promoters.id),
+    via: text('via').$type<'link' | 'manual'>().notNull(),
+    attributedBy: text('attributed_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('promoter_attributions_club_promoter').on(t.clubId, t.promoterId)],
+);
+
+/** Guest tags (spec §6.2 "VIP tags", plan A20c). Normalised lowercase; `vip` marks a VIP. */
+export const guestTags = pgTable(
+  'guest_tags',
+  {
+    guestId: text('guest_id').notNull().references(() => guests.id),
+    clubId: text('club_id').notNull().references(() => clubs.id),
+    tag: text('tag').notNull(),
+    createdBy: text('created_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.guestId, t.tag] }), index('guest_tags_club_tag').on(t.clubId, t.tag)],
+);
+
+/** Staff notes on a guest (plan A20c). Append-only. */
+export const guestNotes = pgTable(
+  'guest_notes',
+  {
+    id: text('id').primaryKey(),
+    clubId: text('club_id').notNull().references(() => clubs.id),
+    guestId: text('guest_id').notNull().references(() => guests.id),
+    text: text('text').notNull(),
+    authorId: text('author_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('guest_notes_guest').on(t.guestId)],
+);
+
+export type Promoter = typeof promoters.$inferSelect;
+export type PromoterAttribution = typeof promoterAttributions.$inferSelect;
+export type GuestNote = typeof guestNotes.$inferSelect;
 export type Alert = typeof alerts.$inferSelect;
 export type User = typeof users.$inferSelect;
 export type ClubMembership = typeof clubMemberships.$inferSelect;

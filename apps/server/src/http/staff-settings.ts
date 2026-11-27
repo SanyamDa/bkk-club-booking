@@ -30,7 +30,7 @@ const MANAGER_ROLES: Role[] = ['owner', 'manager'];
 type C = Context<AuthEnv>;
 
 /** The signed-in person, or a founder under a support grant (as in http/staff.ts). */
-function actorOf(c: C): SettingsActor {
+export function actorOf(c: C): SettingsActor {
   const grant = c.var.supportGrant;
   const base: Actor = grant
     ? { type: 'platform', id: c.var.user.id, sessionId: c.var.session.idHash, supportGrantId: grant.id }

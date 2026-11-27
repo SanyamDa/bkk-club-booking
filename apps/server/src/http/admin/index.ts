@@ -7,6 +7,7 @@ import { controlsRoutes } from './controls.js';
 import { dataRoutes } from './data.js';
 import { debugRoutes } from './debug.js';
 import { instagramAdminRoutes } from './instagram.js';
+import { busynessKeyAdminRoutes } from '../data.js';
 import { lineWizardRoutes } from './line-wizard.js';
 import { onboardingAdminRoutes } from './onboarding.js';
 import { platformRoutes } from './platform.js';
@@ -29,5 +30,6 @@ export function adminRoutes(app: AppContext) {
   r.route('/', dataRoutes(app));
   r.route('/', calendarRoutes(app)); // A9 event calendar and city calendar entry
   r.route('/', instagramAdminRoutes(app)); // A18 Instagram via Chatwoot
+  r.route('/', busynessKeyAdminRoutes(app)); // B21 busyness feed keys
   return r;
 }

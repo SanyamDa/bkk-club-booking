@@ -2,7 +2,8 @@ import { and, eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import type { Db } from '../src/db/client.js';
-import { channels, conversations, events, guests, messages, platformFlags, rawWebhooks, type Club } from '../src/db/schema.js';
+import { channels, conversations, events, guests, messages, occupancySnapshots, platformFlags, rawWebhooks, type Club } from '../src/db/schema.js';
+import { issueBusynessKey } from '../src/data/busyness.js';
 import { emit } from '../src/data/events.js';
 import { chatwootFlagKey, type ChatwootClubState } from '../src/integrations/chatwoot/provision.js';
 import { instagramFlagKey, instagramState, instagramWebhookPath } from '../src/integrations/chatwoot/instagram.js';
@@ -362,5 +363,52 @@ describe('A18 §14.8: Instagram data stays with its club', () => {
     expect(scoped.events.some((e: any) => e.dataOrigin === 'instagram')).toBe(true);
   });
 
-  it.todo('the Metabase analytics view and the busyness feed leave out instagram-origin rows (B14 / B busyness feed own those readers)');
+  it.todo('the Metabase analytics view leaves out instagram-origin rows (B14 owns that reader)');
+
+  it('the busyness feed leaves out instagram-origin rows', async () => {
+    const { db, close, clubB } = await setupTwoClubs();
+    try {
+      const night = '2026-12-11'; // a Friday, open
+      const now = new Date('2026-12-11T23:10:00+07:00');
+      const app = createApp(testConfig(), db, { bot: { now: () => now, log: () => {} } });
+      await db.insert(occupancySnapshots).values({
+        clubId: clubB.id,
+        nightDate: night,
+        takenAt: new Date('2026-12-11T23:00:00+07:00'),
+        leadBucket: 'live_2300',
+        tablesActive: 4,
+        tablesHeld: 0,
+        tablesConfirmed: 2,
+        tablesArrived: 0,
+        paxBooked: 20,
+        minSpendBookedSatang: 0,
+        depositsVerifiedSatang: 0,
+      });
+      const { token } = await issueBusynessKey(db, { label: 'app', kind: 'production' }, 'user_admin', now);
+      const read = async () => {
+        const res = await app.app.request('/data/v1/busyness', { headers: { authorization: `Bearer ${token}` } });
+        const body = (await res.json()) as any;
+        return { ...body, generatedAt: null };
+      };
+      const before = await read();
+      // Instagram demand for the same night (a table search made in an Instagram DM).
+      await emit(db, {
+        clubId: clubB.id,
+        type: 'availability.searched',
+        occurredAt: new Date('2026-12-11T20:00:00+07:00'),
+        actorType: 'guest',
+        channel: 'instagram',
+        dataOrigin: 'instagram',
+        nightDate: night,
+        props: { night_date: night, pax_range: '2-4', result_count: 0, tables_shown: 0 },
+        isTest: false,
+      });
+      const after = await read();
+      expect(after).toEqual(before);
+      const b = after.clubs.find((c: any) => c.slug === clubB.slug);
+      expect(b.buckets.some((x: any) => x.inputs.includes('searches'))).toBe(false);
+    } finally {
+      await close();
+    }
+  });
 });

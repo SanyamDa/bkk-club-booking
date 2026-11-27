@@ -33,6 +33,7 @@ import { fakeLineTokenIssuer, realLineTokenIssuer } from './line/tokens.js';
 import { chatwootClient } from './integrations/chatwoot/provision.js';
 import { configuredPaymentGateways } from './integrations/payments/opn.js';
 import { paymentWebhookRoutes } from './http/payments.js';
+import { busynessFeedRoutes } from './http/data.js';
 
 /** What `opts.onResponse` sees for every JSON response (test hook: secret-leak checks). */
 export interface ResponseRecord {
@@ -144,6 +145,7 @@ export function createApp(
   app.route('/api/onboard', onboardPublicRoutes(ctx)); // A17 pre-call form (token in the path, hashed at rest)
   app.route('/integrations', integrationRoutes(ctx)); // A19
   app.route('/webhooks/payments', paymentWebhookRoutes(ctx)); // A20b
+  app.route('/data/v1', busynessFeedRoutes(ctx)); // B21: busyness feed for the separate app (API key)
   app.route('/api/admin/sim', devRoutes(ctx)); // B8: simulator behind platform-admin login, every environment
   if (config.DEV_SIMULATOR) app.route('/api/dev', devRoutes(ctx)); // B8: same routes and login; loadConfig keeps it dev/test only
   app.onError((err, c) => {

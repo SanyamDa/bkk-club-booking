@@ -8,6 +8,7 @@ import type { LiffEndpointUpdater, SetupClients } from '../line/setup.js';
 import type { LineTokenIssuer } from '../line/tokens.js';
 import type { ChatwootClient } from '../integrations/chatwoot/provision.js';
 import type { FetchLike } from '../integrations/pos/papaya.js';
+import type { PaymentGateways } from '../integrations/payments/gateway.js';
 
 export interface AppContext {
   config: Config;
@@ -29,4 +30,6 @@ export interface AppContext {
   chatwoot: ChatwootClient | null;
   /** fetch for live POS calls (A19); undefined means the global fetch. Test hook. */
   posFetch?: FetchLike;
+  /** Payment gateways by provider (A20b): Opn from config when its keys are set; tests pass a fake. */
+  payments: PaymentGateways;
 }

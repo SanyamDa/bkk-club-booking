@@ -1,4 +1,4 @@
-import { listTableOptions, upcomingNights, type BookingView } from '../bookings/service.js';
+import { bookableNights, listTableOptions, type BookingView } from '../bookings/service.js';
 import type { Links } from '../bot/links.js';
 import * as M from '../bot/messages.js';
 import type { Db } from '../db/client.js';
@@ -10,8 +10,9 @@ import type { Message } from './gateway.js';
  * message builders. Used to have LINE validate them (line setup) before guests see them.
  */
 export async function sampleMessages(db: Db, club: Club, links: Links, now: Date): Promise<Message[]> {
-  const nights = upcomingNights(club, now, 4);
-  const night = nights[0] ?? '2026-12-04';
+  // The nights-aware list (B8b), as the guest sees it: closed rows left out, event names shown.
+  const nights = await bookableNights(db, club, now, 4);
+  const night = nights[0]?.date ?? '2026-12-04';
   const options = await listTableOptions(db, club.id, night);
   const option = options[0];
   if (!option) return [];

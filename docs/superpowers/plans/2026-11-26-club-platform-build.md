@@ -540,7 +540,8 @@ Gate (spec §10, §17.1): a second club is created from the console and takes a 
 - Order in the route: find club (unknown → `ops_events` `webhook_unknown_club`, 404) → read body → verify signature with `credentials.channelSecret(club)` (bad → `raw_webhooks` row with `signature_ok=false` and `ops_events` `webhook_bad_signature`, 401) → insert `raw_webhooks` → answer 200 → process in background → set `processed_at` or `error`.
 - Split `handleEvent` in `bot/flow.ts` into `processEvent` (throws) and `handleEvent` (a thin wrapper that catches and logs, kept for `http/dev.ts`). `processDelivery` calls `processEvent` per event. On a throw it sets `raw_webhooks.error`, leaves `processed_at` NULL and goes on to the next event.
 - Per-event dedupe on LINE `webhookEventId`. The inbound message insert stays idempotent on `(club_id, line_message_id)`, but it no longer decides "already handled". `messages.processed_at` (W0 column) is set as the last step of a completed turn. An event is skipped only when its inbound row exists and `processed_at` is set. "Inbound row exists, `processed_at` NULL" is a turn that crashed: reuse the row and run the turn. So redelivery of a finished event is a no-op, and a delivery that crashed mid-turn is still answered on replay.
-- `replayUnprocessed` at start-up processes rows with `processed_at IS NULL AND signature_ok` older than 10 s, oldest first.
+- `replayUnprocessed` at start-up processes rows with `processed_at IS NULL AND signature_ok` older than 10 s and younger than 6 h, oldest first. Older unprocessed rows are abandoned, not replayed (a turn days old must not push replies to old messages): `processed_at` is set and `error` is prefixed `abandoned:`, so retention purges them later.
+- The webhook route writes ops and `raw_webhooks` rows without authentication, so it uses the same in-memory per-minute limits as `http/integrations.ts`: an unknown slug writes at most `BAD_SIGNATURE_LIMIT_PER_IP` ops rows per IP per minute (still 404), and a bad signature over `BAD_SIGNATURE_LIMIT_PER_IP` per (club, IP) or `BAD_SIGNATURE_LIMIT_PER_CLUB` per club per minute gets 429 with no row written.
 - Dry run: `processDelivery(..., { dryRun: true })` opens `db.transaction(tx => ...)`, builds fresh deps with `buildBotDeps(ctx.config, tx, ...)` (so `BotDeps.db` and the `Outbox` are both on `tx`), uses `ctx.gateways.dev`, bypasses the dedupe check, returns the messages the dev gateway collected as `replies`, and always rolls back. No code on this path may use the root `db`: under PGlite a root query inside an open transaction hangs, and under node-postgres it commits for real.
 - Outbox writes `messages.delivery_status` (`sent|failed|skipped`) and `error`; a failed send also writes `ops_events` `send_failed`.
 - Bot pause: if `club.botPaused` or `isGloballyStopped(db)` (A5; until merged, read `platform_flags['global_stop']` directly), store the inbound message and events, send nothing to the guest, and alert the staff group once per conversation per pause. One pause is identified by `clubs.bot_paused_at` (W0 column, set by A5's pause route), or by the `updated_at` of `platform_flags['global_stop']` under the global stop. The last value alerted on is kept in the conversation's `state`, so a second message in the same pause raises no second alert.
@@ -712,7 +713,7 @@ Gate (spec §10, §17.1): a second club is created from the console and takes a 
 **Decisions:**
 - The `nights` job upserts one row per club per date, from today across the booking window, from `ClubSettings.openWeekdays` and `closedDates`: `open`, or `closed` with a `closed_reason` code (`weekday`, `closed_date`, `alcohol_ban`). A date that is an `alcohol_ban` day in `calendar_days` is closed by default (no such rows exist until B13 seeds them). It runs hourly and once in `startBackground`, so a new club has its rows within the hour.
 - A row a person edited is never overwritten: the job inserts missing rows and refreshes only rows where `edited_by` is null. A9's calendar sets `edited_by`.
-- `bookings/service.ts`: the open-night check and `upcomingNights` read `nights.status` when a row exists and fall back to the settings when none does. `upcomingNights` returns `event_name`, and the guest date list shows it.
+- `bookings/service.ts`: the open-night check and `upcomingNights` read `nights.status` when a row exists and fall back to the settings when none does. `upcomingNights` returns `event_name`, and the guest date list shows it. As built: the nights-aware list is `bookableNights(db, club, now, count): Promise<NightOption[]>`, because `upcomingNights(club, now, count): string[]` is a frozen synchronous booking-service signature. Every caller (bot date list, `line/samples.ts`) uses `bookableNights`; `upcomingNights` stays settings-only for compatibility and has no caller in `src` outside `bookings/service.ts`.
 - When a hold or booking takes the last free table of a night, set `status = 'sold_out'` and emit `night.sold_out`. When a table frees up, set it back to `open`.
 - A closed night keeps its row. B12 expects no snapshot for it, so a missing night never looks like a quiet night.
 
@@ -765,6 +766,30 @@ Expand with superpowers:writing-plans at the start of the phase.
 
 **Migration (Track B, Phase 1):** B14 yes (the custom migration in its row). B9, B9b, B10, B10b, B11, B12 and B13 no: W0 added `price_rules`, `deposits.slip_*`, `bookings.reminder_sent_at`, `removal_requests`, `notices`, `nights`, `door_counts`, `occupancy_snapshots`, `crowd_ratings` and `calendar_days`.
 
+#### Task B9: Automatic slip verification (expanded)
+
+**Spec:** §11.2 Deposits, §5.2 step 6.
+
+**Files:** Create `apps/server/src/bookings/slip-verify.ts`. Modify `bot/flow.ts` (`handleImage`), `bot/deps.ts` (`slipVerifier`), `config.ts` and `.env.example` (`SLIPOK_API_KEY`, `SLIPOK_BRANCH_ID`), `test/helpers/track-a.ts` (`testConfig` keys). Tests: `apps/server/test/slip-verify.test.ts`, `flow.test.ts`.
+
+**Decisions:**
+- Provider assumption until the human picks one: **SlipOK** (`SlipOkVerifier`). EasySlip would be a second adapter behind the same interface. With no key set, `buildBotDeps` gives `slipVerifier: null` and every slip goes to staff review (the Phase 0 fallback in §11.2).
+- `recordSlip` (B2) is unchanged and still moves the booking to `payment_review` first. Then `verifySlip` runs; a pass confirms through `approveDeposit` with actor `{ type: 'system', id: 'slip:<provider>' }`, so history, audit and the `deposit.verified` and `booking.confirmed` events come from the one status writer. A fail leaves `payment_review`. Nothing ever rejects.
+- Checks, in order, each with a `slip.review` code: reference already on another deposit of the club (`ref_reused`), amount below the deposit (`amount_low`), receiver not the club's `promptpay_id` (`receiver_mismatch`; masked values compared from the right, `x` is a wildcard, at least 4 visible digits), transfer earlier than the hold start (the first `held` history row) minus 5 minutes of clock skew (`time_before_hold`). Provider over 10 s: `provider_timeout`. Any provider error or unreadable slip: `provider_error`. A slip after the hold expired: `late_slip` (§5.2 step 6, even when every check passes).
+- The reading is stored on the deposit (`slip_amount_satang`, `slip_receiver`, `slip_time`, and `slip_trans_ref` unless reused); the unique index `(club_id, slip_trans_ref)` also catches a race, which counts as `ref_reused`.
+- Events: `slip.auto_verified` `{ depositId, provider, amount_satang }` on pass, `slip.review` `{ depositId, code }` on fail.
+
+**Interfaces (Produces):** `SlipVerifier { provider: string; read(image: Buffer, opts: { signal: AbortSignal }): Promise<SlipReading> }`, `SlipReading { transRef; amountSatang; receiver: { proxy?; account?; name? }; transferredAt: Date }`, `verifySlip(db, club, bookingId, image, verifier, now, opts?: { timeoutMs?; skewMs?; lateSlip? }): Promise<{ verified: true; deposit } | { verified: false; code: SlipReviewCode }>`, `FakeSlipVerifier(result: SlipReading | Error | 'timeout')`, `receiverMatches`, `SlipOkVerifier`, `parseSlipOk` in `bookings/slip-verify.ts`. `BotDepOptions.slipVerifier?: SlipVerifier | null` and `BotDeps.slipVerifier?`.
+
+**Tests (`slip-verify.test.ts`):**
+- `a slip that passes all four checks confirms the booking and emits slip.auto_verified`.
+- `amount below the deposit → payment_review`; `receiver not the club PromptPay → payment_review`; `transfer before the hold started → payment_review`; `reused ref → payment_review`.
+- `provider timeout → payment_review`; `provider error or unreadable slip → payment_review`.
+- `a slip after the hold expired goes to review even when every check passes`; `the same ref at another club is not a reuse`; `never rejects: a booking not in review is left alone`.
+- `flow.test.ts › automatic slip verification in the bot (B9)`: a pass sends the confirmation card; a fail keeps the "checking your payment" reply.
+
+**Migration:** no.
+
 #### Task B9b: Prices from `price_rules` (expanded)
 
 **Spec:** §9 (`price_rules`, `valid_from`, `valid_to`), §6.2.
@@ -813,6 +838,26 @@ Expand with superpowers:writing-plans at the start of the phase.
 
 **Migration:** no (`calendar_days` comes from W0).
 
+#### Task B10b: Guest removal, marketing opt-out, retention (expanded)
+
+**Spec:** §14.9, §5.5 (stop marketing), §17.1 Data.
+
+**Files:** Create `apps/server/src/data/removal.ts`, `apps/server/src/jobs/retention.ts`. Modify `jobs/index.ts` (register `removal` and `retention`), `bot/intents.ts` (`remove_data`, `stop_marketing`), `bot/flow.ts`, `bot/i18n.ts`, `bot/messages.ts` (menu item and confirm prompt). `data/event-types.ts` already declares `guest.removal_requested`, `guest.removed` and `marketing.opted_out`. Tests: `apps/server/test/removal.test.ts`, `apps/server/test/retention.test.ts`, `flow.test.ts` (two cases).
+
+**Decisions:**
+- `removeGuest` runs in one transaction, scoped by `clubId` (throws `RemovalError('not_found')` for a guest of another club). Checklist: `guests` row anonymised in place (`line_user_id`, `display_name`, `name`, `phone`, `nationality`, `birth_date`, `external_user_id` set null; `id`, `club_id`, `lang`, `is_test` kept); every `messages.payload` of the guest set to `{"removed":true}`; the guest's `events` (by `guest_id` or the guest's conversation) get `raw`, `guest_id`, `person_id`, `conversation_id` set null, `actor_id` null when `actor_type = 'guest'`, and a `dedupe_key` naming the guest id set null; `identity_map`, `guest_tags`, `guest_notes` rows deleted; staff `alerts` on the guest's conversation or bookings deleted; free text on the guest's bookings (`special_request`, `notes`), conversation (`handoff_reason`, `state`) and handoff episodes (`reason`) cleared; `raw_webhooks` of that club whose body holds the guest's LINE user id deleted; deposit `slip_path` cleared and the files unlinked after commit (a missing file is not an error). Rows other rows point at are never deleted, so counts stay.
+- `removeGuest` emits no event, so "events per type" is unchanged; the `removal` job emits `guest.removed` (no guest id) after each request it completes.
+- Slip files live under the uploads dir (`bot/deps.ts`: `DATA_DIR/uploads`). `removeGuest` and `purgeSlips` take it as an optional last argument (`uploadsDir`, default `join(process.env.DATA_DIR ?? '.data', 'uploads')`); the jobs pass `ctx.deps.uploadsDir`.
+- Bot: the keyword (EN `delete my data`, `remove my data`, `forget me`; TH `ลบข้อมูล`) and the menu item (`a=remove`, inside a "My data" quick reply `a=privacy` on the main menu) both answer a confirm prompt with one button (`a=remove_confirm`). The tap writes one `removal_requests` row (`channel = 'line'`; none if one is already pending) and emits `guest.removal_requested`. The `stop` keyword (EN whole message `stop`, `unsubscribe`, `stop promotions`; TH `ยกเลิกรับข่าวสาร`, `ไม่รับข่าวสาร`, `หยุดส่ง`) and the menu item (`a=stop`, inside the "My data" prompt) write a `notices` row (`purpose = 'marketing'`, `text_version = 'marketing-v1'`, `channel = 'line'`, `withdrawn_at = now`) once and emit `marketing.opted_out`.
+- `hasMarketingOptOut` is true when the guest has any `marketing` notice with `withdrawn_at` set. No marketing send exists yet; every later one (Phase 2+) calls it. Reminders about the guest's own booking are not marketing.
+- Retention: `purgeRawWebhooks` deletes `raw_webhooks` with `processed_at` set and `received_at` older than 30 days; unprocessed rows stay for replay. `purgeSlips` takes deposits whose `slip_received_at` (else `created_at`) is older than 365 days, unlinks the file and clears `slip_path`. Both jobs are registered daily (24 h); both are idempotent.
+
+**Interfaces (Produces):** `removeGuest(db, clubId: string, guestId: string, now: Date, uploadsDir?: string): Promise<{ messagesCleared: number; slipsDeleted: number; eventsCleared: number }>`, `requestRemoval(db, club, guest, now): Promise<boolean>` (true when a new row was written), `recordMarketingOptOut(db, club, guest, now): Promise<boolean>`, `hasMarketingOptOut(db, clubId: string, guestId: string): Promise<boolean>`, `runRemovalRequests(db, now, uploadsDir?): Promise<number>` in `data/removal.ts`; `purgeRawWebhooks(db, now): Promise<number>`, `purgeSlips(db, now, uploadsDir?): Promise<number>`, `runRetention(db, now, uploadsDir?)` in `jobs/retention.ts`.
+
+**Tests:** `removal.test.ts › removal anonymises guest in place, deletes message text, events.raw, slip files and identity links, and clears guest ids on events`; `› aggregate counts (bookings, events per type, snapshots, door counts) equal before and after`; `› removal in club A leaves club B untouched`; `retention.test.ts › raw webhooks older than 30 days are purged, unprocessed ones kept`; `› slips older than 1 year purged`; `flow.test.ts › removal keyword and menu item create removal request`; `› stop keyword records opt-out and emits marketing.opted_out`.
+
+**Migration:** no.
+
 ---
 
 ## Phase 2: Brain and inbox
@@ -855,6 +900,20 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 | B18 Learning loop | §8.3, §8.4: resolved episode → redact → `claude-opus-5-5` batch draft → auto-discard price/personal data/one-off → approval queue → live; a takeover within 10 minutes of a bot answer flags the notes that answer used for review (read from `ai.answered`); a draft nobody reviews expires after 4 weeks; an approved note's question joins the club's test set (B17); weekly lint; gaps list | `brain/learn.ts`, `jobs/brain-draft.ts`, `jobs/brain-lint.ts`, `jobs/index.ts` (register both jobs). Blocked by B14b | draft with a phone number discarded; approved note answers the same question next time (§17.1); a takeover within 10 minutes of a bot answer flags the notes that answer used, and one after 11 minutes does not; an approved note adds its question to the club test set; a draft unreviewed for 4 weeks expires |
 | B19 Brain manager UI | §6.6 | `pages/staff/brain/*`, `http/brain.ts` (under `/api/staff/clubs/:slug/brain` with A's `requireClubRole('owner','manager')`), one nav item in `pages/staff/Layout.tsx` (listed shared edit) | approve in one tap; edit creates a version; gaps list shows unanswered questions; mount line only in `app.ts`, and `isolation.test.ts` passes with the brain routes (fixtures for new params in `test/helpers/track-b.ts` via `isolationFixtures`) |
 | B19b Alert call sites (after A15 merges) | §6.4: every trigger the A15 row lists for B. Complaint or safety word detection uses a Thai and English word list kept in the club's settings (editable per club, §8.1) | `bot/flow.ts`, the pause alert from B3 and B16's cost-cap warning: replace the direct `outbox.toStaff` staff-alert sends with `raiseAlert(...)`. `Notifier.confirmed`'s new-booking staff message in `bot/notify.ts` stays as is unless §6.4 classes it as an alert. Add the calls for payment needs review and complaint or safety word (`bot/flow.ts`), table not arrived at release time (`jobs/no-show.ts`) and brain draft or gap waiting (`jobs/brain-draft.ts`) | urgent alert reaches inbox and staff group within 5 s; a paused club raises one alert per conversation per pause through `raiseAlert`; a complaint word raises urgent; a release time passed with no arrival raises urgent; a waiting draft raises needs-input |
+
+#### Task B14b expanded (Handoff episodes)
+
+**Files:** `chat/episodes.ts`, `jobs/handoff-timeout.ts`, `jobs/index.ts` (one `register` line), `bot/flow.ts` (lazy timeout removed, `requestHandoff` calls `startEpisode`), `line/outbox.ts` (`deliver`), `http/staff.ts` (the resolve and reply routes, which waited on B14b), `test/episodes.test.ts`. Migration: no.
+
+**Decisions:**
+- One open episode per conversation (`ended_at IS NULL`). `startEpisode` locks the conversation row (`FOR UPDATE`), returns the open episode when there is one (no second row, no second event), else inserts the row, sets `conversations.mode='human'`, `handoff_requested_at`, `handoff_reason`, and emits `handoff.requested {trigger}`. `topic` defaults to `trigger` until B16 passes one. Trigger codes from the flow: `guest_request` (keyword or button), `large_group`, `paid_after_expiry`; `staff_reply` when a host replies to a bot-mode chat (§6.3 "a host opens the chat and replies").
+- `endEpisode` is idempotent: an already ended episode returns `undefined` and changes nothing. It sets `ended_at`, `ended_by`, `resolver_user_id`, returns the conversation to `mode='bot'` with the handoff fields cleared, and emits `handoff.resolved` (staff) or `handoff.timed_out` (timeout) with `durationSec`. An optional `actor` (W0 `Actor`) sets the event actor, so a support session stays `platform`.
+- `endOpenEpisode(tx, { clubId, conversationId, resolverUserId, actor, now })` is what the dashboard resolve route calls: it ends the open episode, or for a legacy human-mode conversation with no episode row it returns the conversation to the bot and emits `handoff.resolved` from `handoff_requested_at`.
+- `recordStaffReply(db, input, send: { outbox, gateways })`: the third argument is added to the published interface because sending needs a gateway. In one transaction: insert the `messages` row (`author_type='staff'`, `author_id`, `external_id`, `occurred_at`) with `ON CONFLICT DO NOTHING` on `(club_id, external_id)`; a repeated `externalId` returns the first row's id and sends nothing. A fresh reply starts an episode if none is open, sets `last_message_id`, and emits `host.replied {latency_ms}` (from the guest's last inbound message; null when none), `source` = `input.channel`. After commit `outbox.deliver` pushes the stored row and records `sent_via`, `delivery_status`, `error`. Delivery is at most once: a crash between commit and push is not retried.
+- Timeout job `handoff-timeout` (every minute, B2 Scheduler): last staff activity = the later of `started_at` and the newest staff-authored message of that guest since then. Assumption (spec says only "re-alerts first"): at half the club's `handoffTimeoutMinutes` with no staff activity it raises one urgent `raiseAlert` of kind `handoff_realert` for the conversation (not repeated while no new staff activity); at the full timeout it ends the episode with `endedBy='timeout'`. A run that finds an episode past the full timeout with no re-alert since the last activity re-alerts and ends it in the same run.
+- Only `chat/episodes.ts` writes `conversations.mode`; the conversation insert relies on the column default. One exception: the Velora demo seed (`demo/seed-history.ts`) bulk-inserts history, its episode rows and their events directly, so tonight's waiting guest is inserted with `mode: 'human'` together with its open `handoff_episodes` row (calling `startEpisode` would emit a second `handoff.requested` with the wrong time). Every other seeded conversation uses the default.
+
+**Tests (`test/episodes.test.ts`):** `handoff creates one handoff_episodes row`; `recordStaffReply with a repeated externalId sends once`; `the timeout job ends the episode with endedBy='timeout' and returns the conversation to bot mode`; `the timeout job re-alerts at half the timeout and counts from the last staff reply`; `no mode change happens outside chat/episodes.ts`; `dashboard resolve closes the open episode`.
 
 **Migration (Track B, Phase 2):** B17 yes (the per-club test-set table; columns decided in the phase-start writing-plans pass). Others none planned (`handoff_episodes` with `topic`, and the `brain_*` tables with `valid_until` and `review_by`, come from W0).
 
@@ -901,6 +960,39 @@ Gate (spec §10): 3 paying clubs; one club live on Instagram; the feed publishes
 | A20d Reports | §14.10, §6.5 | A16 and A16b cover the weekly report and stats. A20d adds only `topPromoters` (A20a) and `vip` (A20c) to `buildClubReport` and the `/report` page | covered by the A20a and A20c report tests |
 
 **Migration (A20):** yes, one migration `a20` with `promoters`, `promoter_attributions`, `guest_tags`, `guest_notes` (all in `db/schema/platform.ts`). Request to B: `bookings.promoter_id` and `source='promoter'` on link bookings, set by the bot when it calls `attributeBooking`.
+
+#### Task A20b expanded: Payment gateway option
+
+**Spec:** §11.2 Phase 3 option, §17 risks. **Migration:** no (`deposits.method` is a text column; `'gateway'` is a type-level addition). Owner override 2026-11-27: the legal-review gate is waived.
+
+**Decisions**
+- Provider: Opn Payments (Omise API) is the first adapter; others implement the same `PaymentGateway`. One platform Opn account, configured by `OPN_SECRET_KEY` and `OPN_WEBHOOK_SECRET` (platform keys, not per-club; a club needs none to switch the option on). Payouts in the club's name (Opn sub-merchants) are an account setup matter, not code. Unset keys mean no `opn` gateway is registered (the webhook answers 404).
+- The charge is a PromptPay source charge (`source[type]=promptpay`, currency `thb`, amount in satang). `payUrl` is the charge's `authorize_uri`, else the QR image URI. Charge `metadata` carries `club_id`, `booking_id` and `deposit_id`. `createCharge` is idempotent per deposit (`Idempotency-Key: <depositId>`), so a guest who taps again gets the same charge.
+- The gateway deposit row: `method = 'gateway'`, `slip_trans_ref = '<provider>:<chargeId>'` (unique per club, so a charge id maps to one deposit). No slip, so `slip_path` stays null. A slip the guest still sends for a gateway deposit (the slip flow is the fallback when `createCharge` throws) is stored by `recordSlip`, but `verifySlip` never writes the bank's reference over `slip_trans_ref` (only `slip_amount_satang`, `slip_receiver`, `slip_time`) and sends it to review with code `gateway_deposit`, so the payment webhook still finds the charge.
+- Confirmation goes through B's service: `approveDeposit(db, clubId, bookingId, { type: 'system', id: 'payments:<provider>' }, now)`, which writes history, audit and `deposit.verified` in one transaction. The guest and staff are told through `notifier.confirmed` (tracked background work).
+- Webhook `POST /webhooks/payments/:provider`: unknown provider 404; bad or missing signature 401 and nothing written; a verified delivery is stored in `raw_webhooks` (channel `payments:<provider>`) before it is applied. Non-successful charge events are acknowledged and ignored. A deposit already `verified` is a no-op (replay). Charge metadata whose club or booking differs from the deposit is 409 `charge_mismatch`, an urgent alert, no confirmation. Amount or currency different from the deposit: urgent alert `payment_amount_mismatch`, no confirmation, 200 (the provider must not retry). A successful charge we cannot match: urgent alert on the metadata club if it exists. Table taken meanwhile (hold expired, table resold): urgent alert `payment_table_lost`, 200.
+- Opn signature: header `Omise-Signature` (comma-separated hex HMAC-SHA256 values during key rotation) over `<Omise-Signature-Timestamp>.<raw body>`, key = base64-decoded webhook secret, compared in constant time. The route asks the gateway for its signature (`signatureOf(header)`), so `verifyWebhook(rawBody, signature)` stays two-argument.
+- Switch: feature key `payment_gateway`, default off. Off: `startGatewayDeposit` returns null and the caller keeps the PromptPay slip flow; the webhook still verifies but `startGatewayDeposit` never creates gateway deposits, so nothing changes.
+- Bot wiring (done by the integrator): `BotDeps.payments` (from `createApp`'s map). `confirm` (deposit > 0) and `continueBooking` (an `awaiting_payment` booking whose deposit is `method='gateway'`) call `startGatewayDeposit` with the first configured gateway and send `M.paymentLink` (a flex card whose button opens `payUrl`). Null, or a provider throw, keeps `M.payment` (slip flow). Return URL assumption: `https://line.me/R/` (back to LINE, where the confirmation arrives). Gateway alerts are raised once while the same one is open, so provider retries of a 409 do not repeat it.
+
+**Interfaces** (`integrations/payments/gateway.ts`)
+```ts
+export interface PaymentCharge { chargeId: string; payUrl: string }
+export interface PaymentEvent { eventId: string; chargeId: string; status: 'successful' | 'failed' | 'pending'; amountSatang: number; currency: string; clubId?: string; bookingId?: string }
+export interface PaymentGateway {
+  readonly provider: string;
+  createCharge(club: Club, req: { bookingId: string; depositId: string; amountSatang: number; returnUrl: string }): Promise<PaymentCharge>;
+  signatureOf(header: (name: string) => string | undefined): string | undefined;
+  verifyWebhook(rawBody: string, signature: string | undefined): PaymentEvent | null;
+}
+export type PaymentGateways = Record<string, PaymentGateway>;
+export async function startGatewayDeposit(db: Db, club: Club, gateway: PaymentGateway, bookingId: string, returnUrl: string, now: Date): Promise<PaymentCharge | null>
+export async function applyPaymentEvent(db: Db, provider: string, event: PaymentEvent, now: Date): Promise<PaymentOutcome>
+export function fakePaymentGateway(secret?: string): PaymentGateway & { sign(body: string): string; charges: ... }
+```
+`integrations/payments/opn.ts`: `opnGateway({ secretKey, webhookSecret, fetch? })`. `http/payments.ts`: `paymentWebhookRoutes(ctx)` mounted at `/webhooks/payments`; `createApp` takes `opts.payments` (default: Opn from config when both keys are set).
+
+**Tests** (`test/payment-gateway.test.ts`): `bad signature is 401 and changes nothing`; `paid webhook confirms the deposit once (replay is a no-op)`; `amount mismatch raises an alert and does not confirm`; `charge for another club's booking is rejected`; `switch off means slip flow only`; plus `opn adapter signs and parses like Omise` (fake fetch, no network). Added by the integrator: `bot sends the gateway payment link when the switch is on, the slip flow when off`.
 
 ### Track B, Phase 3
 

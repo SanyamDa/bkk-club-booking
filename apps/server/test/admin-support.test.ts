@@ -8,6 +8,9 @@ import { emit } from '../src/data/events.js';
 import { dataRoutes } from '../src/http/admin/data.js';
 import { debugRoutes } from '../src/http/admin/debug.js';
 import { supportRoutes } from '../src/http/admin/support.js';
+import { recordRawWebhook } from '../src/data/raw-webhooks.js';
+import { processDelivery } from '../src/http/webhook.js';
+import type { LineGateway } from '../src/line/gateway.js';
 import { newId } from '../src/lib/util.js';
 import { FRIDAY_AFTERNOON, makeGuest, setupTwoClubs } from './helpers.js';
 import { adminCookie, staffCookie, testConfig } from './helpers/track-a.js';
@@ -172,15 +175,23 @@ describe('admin debug', () => {
     expect(cross.status).toBe(404);
   });
 
-  it('webhook replay answers not_ready until B3 merges', async () => {
-    const rawId = newId();
-    await db.insert(rawWebhooks).values({ id: rawId, clubId: clubA.id, channel: 'line', body: { events: [] }, signatureOk: true });
+  it('webhook replay is a dry run: it shows the replies and writes nothing', async () => {
+    const rawId = await recordRawWebhook(db, { clubId: clubA.id, channel: 'line', body: lineText('Ureplayguest', 'book a table'), signatureOk: true, receivedAt: clock });
     const cookie = await adminCookie(app);
+    const before = (await db.select().from(messages)).length;
     const res = await app.app.request(`/api/admin/clubs/${clubA.slug}/webhooks/${rawId}/replay`, post(cookie, {}));
-    expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ error: 'not_ready' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { dryRun: boolean; events: number; replies: unknown[] };
+    expect(body).toMatchObject({ dryRun: true, events: 1 });
+    expect(JSON.stringify(body.replies)).toContain('Which night');
+    expect((await db.select().from(messages)).length).toBe(before);
+    const [raw] = await db.select().from(rawWebhooks).where(eq(rawWebhooks.id, rawId));
+    expect(raw!.processedAt).toBeNull();
     const cross = await app.app.request(`/api/admin/clubs/${clubB.slug}/webhooks/${rawId}/replay`, post(cookie, {}));
     expect(cross.status).toBe(404);
+    // An unsigned delivery is never replayed.
+    const forged = await recordRawWebhook(db, { clubId: clubA.id, channel: 'line', body: { rejected: 'bad_signature' }, signatureOk: false, receivedAt: clock });
+    expect((await app.app.request(`/api/admin/clubs/${clubA.slug}/webhooks/${forged}/replay`, post(cookie, {}))).status).toBe(409);
   });
 
   it('opening the webhook and message lists writes an audit row each', async () => {
@@ -198,7 +209,68 @@ describe('admin debug', () => {
   // Deferred (sync/track-a.md, A5): no founder LINE user id is stored, so `to: 'self'` answers 501.
   it.todo("test-message {to: 'self'} pushes to the founder's own LINE account (needs a stored founder LINE user id)");
 
-  // Need B3 (raw_webhooks writer, delivery status on sends). Enable when B3 merges.
-  it.todo('one guest message is traceable end to end');
-  it.todo('failed send shows in the message log with LINE\'s error');
+  it('one guest message is traceable end to end', async () => {
+    useLine();
+    const rawId = await recordRawWebhook(db, { clubId: clubA.id, channel: 'line', body: lineText('Utraceguest', 'hello'), signatureOk: true, receivedAt: clock });
+    await processDelivery(app.ctx, rawId);
+    const [conv] = await db.select().from(conversations).where(eq(conversations.clubId, clubA.id));
+    const cookie = await adminCookie(app);
+    const res = await app.app.request(`/api/admin/clubs/${clubA.slug}/conversations/${conv!.id}/timeline`, { headers: { cookie } });
+    expect(res.status).toBe(200);
+    const { items } = (await res.json()) as { items: { kind: string; id: string; result?: string; direction?: string; deliveryStatus?: string }[] };
+    expect(items.find((i) => i.kind === 'raw_webhook')).toMatchObject({ id: rawId, result: 'processed' });
+    const msgs = items.filter((i) => i.kind === 'message');
+    expect(msgs.map((m) => m.direction)).toEqual(['in', 'out']);
+    expect(msgs[1]).toMatchObject({ deliveryStatus: 'sent' });
+  });
+
+  it("failed send shows in the message log with LINE's error", async () => {
+    useLine(new Error('LINE API 429: You have reached your monthly limit.'));
+    const rawId = await recordRawWebhook(db, { clubId: clubA.id, channel: 'line', body: lineText('Ufailguest', 'hello'), signatureOk: true, receivedAt: clock });
+    await processDelivery(app.ctx, rawId);
+    const cookie = await adminCookie(app);
+    const res = await app.app.request(`/api/admin/clubs/${clubA.slug}/messages`, { headers: { cookie } });
+    const { messages: log } = (await res.json()) as { messages: { direction: string; target: string | null; deliveryStatus: string; error: string }[] };
+    expect(log.find((m) => m.direction === 'out' && m.target === null)).toMatchObject({
+      deliveryStatus: 'failed',
+      error: 'LINE API 429: You have reached your monthly limit.',
+    });
+  });
 });
+
+/** A signed-looking LINE text delivery body (signatures are checked by the route, not here). */
+function lineText(userId: string, text: string) {
+  const id = newId();
+  return {
+    destination: 'Ubot',
+    events: [
+      {
+        type: 'message',
+        mode: 'active',
+        timestamp: clock.getTime(),
+        webhookEventId: id,
+        deliveryContext: { isRedelivery: false },
+        source: { type: 'user', userId },
+        replyToken: `rt-${id}`,
+        message: { id: `m-${id}`, type: 'text', text, quoteToken: 'q' },
+      },
+    ],
+  };
+}
+
+/** Gives clubA a fake LINE connection: every send succeeds, or fails with `sendError`. */
+function useLine(sendError?: Error) {
+  const send = async () => {
+    if (sendError) throw sendError;
+  };
+  app.ctx.credentials.line = async () => ({ channelSecret: 's', accessToken: 't' });
+  const gateway: LineGateway = {
+    live: true,
+    reply: send,
+    push: send,
+    getContent: async () => Buffer.alloc(0),
+    getProfile: async () => ({ displayName: 'Guest', language: 'en' }),
+    loading: async () => {},
+  };
+  app.ctx.gateways.forClub = async () => gateway;
+}

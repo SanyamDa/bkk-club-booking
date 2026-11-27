@@ -31,6 +31,13 @@ const schema = z.object({
   CHATWOOT_URL: optionalString,
   /** Chatwoot Platform App token (Super Admin > Platform Apps). */
   CHATWOOT_PLATFORM_TOKEN: optionalString,
+  /** Opn Payments (Omise) secret key for the payment gateway option (A20b). Unset = no `opn` gateway. */
+  OPN_SECRET_KEY: optionalString,
+  /** Opn webhook signing secret (base64, from the Opn dashboard). Needed with OPN_SECRET_KEY. */
+  OPN_WEBHOOK_SECRET: optionalString,
+  /** Slip verification provider (B9, spec §11.2). Unset = every slip goes to staff review (Phase 0 behaviour). */
+  SLIPOK_API_KEY: optionalString,
+  SLIPOK_BRANCH_ID: optionalString,
   DEV_SIMULATOR: flag,
   /** Fake LINE token issuer and setup clients (development and test only). */
   LINE_FAKE: flag,

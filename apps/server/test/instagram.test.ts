@@ -6,6 +6,7 @@ import { channels, conversations, events, guests, messages, platformFlags, rawWe
 import { emit } from '../src/data/events.js';
 import { chatwootFlagKey, type ChatwootClubState } from '../src/integrations/chatwoot/provision.js';
 import { instagramFlagKey, instagramState, instagramWebhookPath } from '../src/integrations/chatwoot/instagram.js';
+import { replayUnprocessed } from '../src/http/webhook.js';
 import { encryptSecret } from '../src/platform/crypto.js';
 import { FRIDAY_AFTERNOON, setupTwoClubs } from './helpers.js';
 import { adminCookie, testConfig } from './helpers/track-a.js';
@@ -252,7 +253,7 @@ describe('A18 Instagram webhook (message_created)', () => {
     expect(await s.db.select().from(messages).where(eq(messages.clubId, s.clubB.id))).toHaveLength(0);
     expect(await igEvents(s.db, s.clubB.id)).toHaveLength(0);
 
-    // Raw delivery kept (direct insert until B3's raw_webhooks writer merges).
+    // Raw delivery kept (B3's raw_webhooks writer).
     const raws = await s.db.select().from(rawWebhooks).where(eq(rawWebhooks.clubId, s.clubA.id));
     expect(raws).toHaveLength(1);
     expect(raws[0]).toMatchObject({ channel: 'chatwoot:instagram', signatureOk: true });
@@ -314,7 +315,17 @@ describe('A18 Instagram webhook (message_created)', () => {
     expect(await s.db.select().from(messages)).toHaveLength(0);
   });
 
-  it.todo('the delivery goes through B3 processDelivery / the raw_webhooks writer once B3 merges (direct insert until then)');
+  it('the delivery goes through the B3 raw_webhooks writer and is marked processed', async () => {
+    const s = await connected();
+    const token = webhookToken(s, ACCOUNT.a);
+    await deliver(s, s.clubA.id, token, messageCreated({ accountId: ACCOUNT.a, inboxId: IG_INBOX.a }));
+    await deliver(s, s.clubA.id, token, messageCreated({ accountId: ACCOUNT.a, inboxId: LINE_INBOX.a })); // ignored, still processed
+    const raws = await s.db.select().from(rawWebhooks).where(eq(rawWebhooks.clubId, s.clubA.id));
+    expect(raws).toHaveLength(2);
+    expect(raws.every((r) => r.channel === 'chatwoot:instagram' && r.signatureOk && r.processedAt !== null && r.error === null)).toBe(true);
+    // Not a LINE delivery: start-up replay never picks it up.
+    expect(await replayUnprocessed(s.app.ctx, new Date(Date.now() + 3_600_000))).toBe(0);
+  });
   it.todo("an Instagram message from a guest reaches the club's brain (B, chat capture) once B owns the messages writer");
 });
 

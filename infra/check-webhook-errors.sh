@@ -2,8 +2,8 @@
 # Webhook error-rate alert from ops_events (spec §13 Observability, plan A12).
 #
 # Counts webhook and send errors per club in the last WINDOW_MIN minutes and alerts when any
-# club reaches THRESHOLD, or when errors are more than MAX_RATE_PCT of that club's inbound
-# messages in the window (only when the club had at least MIN_INBOUND inbound messages).
+# club reaches THRESHOLD, or when errors are more than MAX_RATE_PCT of that club's LINE webhook
+# deliveries (raw_webhooks) in the window (only when the club had at least MIN_INBOUND deliveries).
 #
 # Usage:
 #   infra/check-webhook-errors.sh                 # compose db (docker compose exec -T db psql)
@@ -46,8 +46,8 @@ WITH err AS (
   GROUP BY 1
 ), inb AS (
   SELECT club_id, count(*) AS n
-  FROM messages
-  WHERE direction = 'in' AND created_at > now() - interval '${WINDOW_MIN} minutes'
+  FROM raw_webhooks
+  WHERE channel = 'line' AND received_at > now() - interval '${WINDOW_MIN} minutes'
   GROUP BY 1
 )
 SELECT err.club_id, err.n, coalesce(inb.n, 0),

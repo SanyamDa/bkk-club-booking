@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, lt, or, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, lt, lte, or, type SQL } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { isUniqueViolation } from '../db/client.js';
 import {
@@ -6,8 +6,10 @@ import {
   auditLog,
   bookings,
   bookingStatusHistory,
+  clubs,
   deposits,
   guests,
+  nights,
   tables,
   zones,
   type Booking,
@@ -47,18 +49,76 @@ export const SELF_BOOK_MAX_PAX = 12;
 /** Same-night bookings close at 01:00 Bangkok time (spec §7.2). */
 const SAME_NIGHT_CUTOFF_HOUR = 1;
 
-export function isNightBookable(club: Club, date: string, now: Date): boolean {
+/** The date is inside the booking window and, for tonight, before the same-night cutoff. */
+function inBookingWindow(club: Club, date: string, now: Date): boolean {
   const s = club.settings;
   const tonight = currentNightDate(now, s.nightEndHour);
   if (date < tonight) return false;
   if (date > addDays(tonight, s.bookingWindowDays)) return false;
-  if (!s.openWeekdays.includes(weekdayOf(date))) return false;
-  if (s.closedDates.includes(date)) return false;
   if (date === tonight) {
     const hour = bangkokParts(now).hour;
     if (hour >= SAME_NIGHT_CUTOFF_HOUR && hour < s.nightEndHour) return false;
   }
   return true;
+}
+
+/** The settings-only open check (`openWeekdays`, `closedDates`), used when a date has no `nights` row. */
+function openBySettings(club: Club, date: string): boolean {
+  return club.settings.openWeekdays.includes(weekdayOf(date)) && !club.settings.closedDates.includes(date);
+}
+
+/** Settings-only check. The booking flow uses `isNightOpen`, which reads the `nights` row first (B8b). */
+export function isNightBookable(club: Club, date: string, now: Date): boolean {
+  return inBookingWindow(club, date, now) && openBySettings(club, date);
+}
+
+/**
+ * A night's status (B8b): the `nights` row when one exists, else the club settings. `sold_out`
+ * comes only from a row.
+ */
+export async function nightStatus(db: Db, clubId: string, date: string): Promise<'open' | 'closed' | 'sold_out'> {
+  const row = await db.query.nights.findFirst({ where: and(eq(nights.clubId, clubId), eq(nights.date, date)) });
+  if (row) return row.status;
+  const club = await db.query.clubs.findFirst({ where: eq(clubs.id, clubId) });
+  return club && openBySettings(club, date) ? 'open' : 'closed';
+}
+
+/** Bookable now: inside the window and not closed (`nights` row first, settings otherwise). */
+export async function isNightOpen(db: Db, club: Club, date: string, now: Date): Promise<boolean> {
+  if (!inBookingWindow(club, date, now)) return false;
+  return (await nightStatus(db, club.id, date)) !== 'closed';
+}
+
+export interface NightOption {
+  date: string;
+  status: 'open' | 'sold_out';
+  eventName: string | null;
+}
+
+/**
+ * The next `count` nights a guest can pick (B8b): `nights` rows where they exist (an event night
+ * carries its `event_name`; a sold-out night is listed), the settings for dates without a row.
+ */
+export async function bookableNights(db: Db, club: Club, now: Date, count: number): Promise<NightOption[]> {
+  const tonight = currentNightDate(now, club.settings.nightEndHour);
+  const last = addDays(tonight, club.settings.bookingWindowDays);
+  const rows = await db
+    .select()
+    .from(nights)
+    .where(and(eq(nights.clubId, club.id), gte(nights.date, tonight), lte(nights.date, last)));
+  const byDate = new Map(rows.map((r) => [r.date, r]));
+  const out: NightOption[] = [];
+  for (let i = 0; i <= club.settings.bookingWindowDays && out.length < count; i++) {
+    const date = addDays(tonight, i);
+    if (!inBookingWindow(club, date, now)) continue;
+    const row = byDate.get(date);
+    if (row) {
+      if (row.status !== 'closed') out.push({ date, status: row.status, eventName: row.eventName });
+    } else if (openBySettings(club, date)) {
+      out.push({ date, status: 'open', eventName: null });
+    }
+  }
+  return out;
 }
 
 export function upcomingNights(club: Club, now: Date, count: number): string[] {
@@ -345,7 +405,64 @@ async function changeStatus(
     if (type.startsWith('deposit.') && !extra.deposit) continue;
     await emit(tx, { ...base, type, props: statusEventProps(type, from, reason, extra) });
   }
+  await syncSoldOut(tx, after, actor, now);
   return after;
+}
+
+/**
+ * B8b: after a booking change, marks the night `sold_out` (and emits `night.sold_out`) when every
+ * active table is taken, and sets it back to `open` when a table frees up. Only the club's own
+ * side counts: real bookings at a real club, test bookings at a demo club, so a simulator hold
+ * never sells out a real night. A `closed` night is never touched.
+ */
+async function syncSoldOut(tx: Db, b: Booking, actor: Actor, now: Date): Promise<void> {
+  const club = await tx.query.clubs.findFirst({ where: eq(clubs.id, b.clubId) });
+  if (!club || b.isTest !== (club.status === 'demo')) return;
+  const active = await tx
+    .select({ id: tables.id })
+    .from(tables)
+    .where(and(eq(tables.clubId, b.clubId), eq(tables.active, true)));
+  if (active.length === 0) return;
+  const night = await tx
+    .select({ tableId: bookings.tableId, status: bookings.status, holdExpiresAt: bookings.holdExpiresAt, isTest: bookings.isTest })
+    .from(bookings)
+    .where(and(eq(bookings.clubId, b.clubId), eq(bookings.nightDate, b.nightDate), inArray(bookings.status, ACTIVE)));
+  const taken = new Set(night.filter((x) => x.isTest === b.isTest && occupies(x, now)).map((x) => x.tableId));
+  const full = active.every((t) => taken.has(t.id));
+  const row = await tx.query.nights.findFirst({ where: and(eq(nights.clubId, b.clubId), eq(nights.date, b.nightDate)) });
+  if (full) {
+    if (row && row.status !== 'open') return;
+    const changed = row
+      ? await tx
+          .update(nights)
+          .set({ status: 'sold_out' })
+          .where(and(eq(nights.id, row.id), eq(nights.status, 'open')))
+          .returning({ id: nights.id })
+      : await tx
+          .insert(nights)
+          .values({ id: newId(), clubId: b.clubId, date: b.nightDate, status: 'sold_out' })
+          .onConflictDoNothing()
+          .returning({ id: nights.id });
+    if (changed.length === 0) return;
+    await emit(tx, {
+      clubId: b.clubId,
+      type: 'night.sold_out',
+      occurredAt: now,
+      actorType: actor.type,
+      actorId: actor.id,
+      dataOrigin: 'first_party',
+      bookingId: b.id,
+      tableId: b.tableId,
+      nightDate: b.nightDate,
+      isTest: b.isTest,
+      props: {},
+    });
+  } else if (row?.status === 'sold_out') {
+    await tx
+      .update(nights)
+      .set({ status: 'open' })
+      .where(and(eq(nights.id, row.id), eq(nights.status, 'sold_out')));
+  }
 }
 
 /**
@@ -371,7 +488,7 @@ export async function holdTable(
   input: { guestId: string; tableId: string; nightDate: string; pax: number },
   now: Date,
 ): Promise<Booking> {
-  if (!isNightBookable(club, input.nightDate, now)) throw new BookingError('night_not_bookable');
+  if (!(await isNightOpen(db, club, input.nightDate, now))) throw new BookingError('night_not_bookable');
   const option = (await listTableOptions(db, club.id, input.nightDate)).find((o) => o.table.id === input.tableId);
   if (!option) throw new BookingError('not_found', 'Table not found');
   // B6: the booking copies is_test from its context (demo club or test guest).
@@ -527,8 +644,8 @@ export async function bookingAwaitingSlip(db: Db, clubId: string, guestId: strin
 }
 
 /**
- * Stores a received slip and moves the booking to payment review. Phase 0 has no automatic
- * verification, so every slip is reviewed by staff.
+ * Stores a received slip and moves the booking to payment review. Automatic verification (B9,
+ * `bookings/slip-verify.ts` `verifySlip`) runs after this and confirms the booking on a pass.
  * Returns `tableLost: true` when the hold had expired and someone else has the table now.
  */
 const TABLE_LOST_TEXT = 'Slip arrived after hold expired; table was taken. Staff to reassign.';
@@ -685,6 +802,23 @@ export async function expireStaleHolds(db: Db, now: Date): Promise<Booking[]> {
     const out: Booking[] = [];
     for (const b of stale) out.push(await changeStatus(tx, b, 'expired', SYSTEM, HOLD_EXPIRED, now));
     return out;
+  });
+}
+
+/**
+ * Expires one hold of one club now, through `changeStatus` (B7: the demo fast-forward). The hold
+ * time is not checked: the caller decides the hold is over. `undefined` when the booking is not a
+ * `held` or `awaiting_payment` booking of `clubId`. Other bookings and clubs are never touched.
+ */
+export async function expireHold(db: Db, clubId: string, bookingId: string, now: Date): Promise<Booking | undefined> {
+  return db.transaction(async (tx) => {
+    const [b] = await tx
+      .select()
+      .from(bookings)
+      .where(and(eq(bookings.id, bookingId), eq(bookings.clubId, clubId), inArray(bookings.status, ['held', 'awaiting_payment'])))
+      .for('update');
+    if (!b) return undefined;
+    return changeStatus(tx, b, 'expired', SYSTEM, HOLD_EXPIRED, now);
   });
 }
 

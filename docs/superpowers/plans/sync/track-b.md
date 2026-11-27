@@ -82,7 +82,7 @@ export const CALENDAR_SEED: readonly CalendarSeedRow[];
 
 **A9 fallback removed:** `POST /api/admin/calendar-days` now calls `upsertCalendarDay`, audits `platform.calendar_day_set` (club_id null, entity `calendar_days`, entityId `date:kind:name`) and answers 200 `{ ok: true }`. The 503 test in `settings.test.ts` is replaced by the former todo "an election day entered from the console appears in calendar_days". The console Club page has a City calendar day form (`adminApi.saveCalendarDay`).
 
-**For B8b:** the `nights` job closes a date in `alcoholBanDates(db, from, to)` with `closed_reason = 'alcohol_ban'` on rows with `edited_by` null. `calendar.test.ts` › `the next nights job run closes a new alcohol-ban day on rows nobody edited` stays `it.todo` until B8b lands; B8b turns it real.
+**For B8b:** the `nights` job closes a date in `alcoholBanDates(db, from, to)` with `closed_reason = 'alcohol_ban'` on rows with `edited_by` null. `calendar.test.ts` › `the next nights job run closes a new alcohol-ban day on rows nobody edited` is a real test since B8b.
 
 **Tests:** `calendar.test.ts` (4 pass, 1 todo); `settings.test.ts` (16 pass).
 
@@ -245,3 +245,114 @@ export async function listTableOptions(db: Db, clubId: string, nightDate?: strin
 - **B1 / B6 `isTestContext`:** `integrations/chatwoot/instagram.ts` (the one Track A emit with a guest in context) now passes `isTest: isTestContext({ club, guest })` on its events. Other Track A emits have no guest and keep `club.status === 'demo'`.
 - **B2 `arrivedPax`:** the staff route `POST /api/staff/clubs/:slug/bookings/:id/arrived` takes an optional body `arrivedPax` (integer 0–200) and passes it to `markArrived`. Test: `staff-events.test.ts › the arrived route stores the party size at the door`.
 - **Still open:** no scheduled job for `syncClosedBills` (A19 request 3); it is an A19 follow-up, one `s.register(...)` line in `buildScheduler` once its per-club night loop is decided.
+
+## 2026-11-27 · B8b: A row for every night, built by Session A on track-a
+
+- **Published (`jobs/nights.ts`):** `ensureNights(tx: Db, club: Club, from: string, days: number, now: Date): Promise<number>` (rows inserted or changed); `runNightsJob(db, now): Promise<number>` (every club, from `currentNightDate` across `bookingWindowDays + 1` dates); `defaultNight(club, date, banDates)`; `type NightClosedReason = 'weekday' | 'closed_date' | 'alcohol_ban'` (checked in that order). Rows with `edited_by` set are never touched; others are refreshed only when status or reason differ. A `sold_out` row the settings call open stays `sold_out`.
+- **Published (`jobs/index.ts`):** job `nights`, every 60 min, and one `runOnce('nights')` right after `scheduler.start()` in `startBackground`.
+- **Published (`bookings/service.ts`):** `nightStatus(db, clubId, date): Promise<'open' | 'closed' | 'sold_out'>` (row first, else settings); `isNightOpen(db, club, date, now): Promise<boolean>` (window + same-night cutoff + status not `closed`; a `sold_out` night is still open to try); `bookableNights(db, club, now, count): Promise<NightOption[]>` with `NightOption = { date; status: 'open' | 'sold_out'; eventName: string | null }` (closed rows left out, sold-out nights listed). `holdTable` checks `isNightOpen`; `bot/flow.ts` uses `bookableNights` / `isNightOpen`. `line/samples.ts` uses `bookableNights` too. The frozen sync `isNightBookable` and `upcomingNights` are unchanged (settings only) and have no caller left in `src` outside `bookings/service.ts`; `bookableNights` is the plan's nights-aware `upcomingNights`.
+- **Sold out:** every `changeStatus` call runs `syncSoldOut`: when every active table of the club has an occupying booking that night, the row goes `open → sold_out` (or a `sold_out` row is inserted when none exists) and `night.sold_out` is emitted once (actor of the change, `bookingId`, `tableId`, `nightDate`, `props: {}`); when a table frees up, `sold_out → open`. A `closed` row is never changed. Only the club's own side counts: real bookings at a real club, test bookings at a demo club, so a simulator hold never sells out a real night.
+- **Guest date list:** `M.askNight` accepts `string | { date; eventName? }` entries; an event night's chip label is `<day> · <event name>` (cut to 20 characters) and the message text lists each event night in full.
+- **Tests:** `nights.test.ts` 6 pass (plan names); `calendar.test.ts` todo converted (5 pass).
+- **Done (integrator):** `seedHistory` calls `ensureNights(tx, club, tonight − 42, 42, now)`. **Not done:** `releaseTable` does not reopen a sold-out night, because `availableTables` does not treat `released_at` as free either.
+
+
+## 2026-11-27 · B9: Automatic slip verification, built by Session A on track-a
+
+- **Published (`bookings/slip-verify.ts`):** `SlipVerifier`, `SlipReading`, `SlipReviewCode`, `verifySlip(db, club, bookingId, image: Buffer, verifier, now, opts?: { timeoutMs?; skewMs?; lateSlip? }): Promise<SlipOutcome>`, `FakeSlipVerifier` (test fake: a reading, an `Error`, or `'timeout'`), `SlipOkVerifier({ apiKey, branchId, fetch? })`, `parseSlipOk`, `receiverMatches(promptpayId, receiver)`.
+- **Published (`bot/deps.ts`):** `BotDepOptions.slipVerifier?: SlipVerifier | null`; `BotDeps.slipVerifier?` (optional, so other `BotDeps` builders compile). Default: SlipOK when `SLIPOK_API_KEY` and `SLIPOK_BRANCH_ID` are set, else `null` (all slips to staff review). `Config` gains both keys; `testConfig` sets them `undefined`.
+- **Flow:** `handleImage` runs `recordSlip` (unchanged), then `verifySlip` unless the table was lost. Pass: the guest gets the confirmation card and staff get the "confirmed" alert (no "checking your payment" reply). Fail or error: today's reply and review alert.
+- **Assumptions others must match:** auto approval is `approveDeposit` with actor `{ type: 'system', id: 'slip:<provider>' }`, so `deposits.verified_by = 'slip:slipok'`. Receiver is checked against `clubs.promptpay_id` only (a bank-account receiver is not configured anywhere yet). Hold start = first `booking_status_history` row with `to_status = 'held'`. A late slip (booking `expired` when it arrived) always goes to review.
+- **Unverified against a real service:** SlipOK request and response shape are from its public docs; no real call was made.
+
+## 2026-11-27 · B10b: Guest removal, marketing opt-out, retention, built by Session A on track-a
+
+- **Published (`data/removal.ts`):** `removeGuest(db, clubId, guestId, now, uploadsDir?): Promise<{ messagesCleared; slipsDeleted; eventsCleared }>` (throws `RemovalError('not_found')` for another club's guest; idempotent; emits no event), `requestRemoval(db, club, guest, now, channel = 'line'): Promise<boolean>`, `recordMarketingOptOut(db, club, guest, now, channel = 'line'): Promise<boolean>`, `hasMarketingOptOut(db, clubId, guestId): Promise<boolean>`, `runRemovalRequests(db, now, uploadsDir?, log?): Promise<number>`, `unlinkUnder(root, relPaths)`, `defaultUploadsDir()`, `MARKETING_NOTICE_VERSION = 'marketing-v1'`.
+- **Published (`jobs/retention.ts`):** `purgeRawWebhooks(db, now): Promise<number>` (processed and older than 30 days; unprocessed kept), `purgeSlips(db, now, uploadsDir?): Promise<number>` (by `slip_received_at`, else `created_at`, older than 365 days), `runRetention(db, now, uploadsDir?)`.
+- **Published (`jobs/index.ts`):** jobs `removal` and `retention`, every 24 h, and each run once right after `scheduler.start()`.
+- **What removal clears:** guest row anonymised in place (LINE id, names, phone, nationality, birth date, external id); `messages.payload` → `{"removed":true}`; on the guest's events (by `guest_id` or the guest's conversation) `raw`, `guest_id`, `person_id`, `conversation_id`, guest `actor_id` and a guest-id `dedupe_key`; `identity_map`, `guest_tags`, `guest_notes` deleted (A20c request 4 closed); `alerts` on the guest's conversation or bookings deleted; bookings `special_request`/`notes`, conversation `handoff_reason`/`state`, handoff episode `reason` cleared; that club's `raw_webhooks` holding the guest's LINE user id deleted; slip files unlinked after commit, `slip_path` cleared. Counts stay.
+- **Bot:** keyword (`delete/remove my data`, `forget me`, `ลบข้อมูล`) or menu `a=privacy` → `a=remove` answers a confirm prompt; `a=remove_confirm` writes the request. `stop` / `unsubscribe` (whole message), `ยกเลิกรับข่าวสาร`, `ไม่รับข่าวสาร`, `หยุดส่ง`, or menu `a=stop` records the opt-out. Main menu quick replies gain a last "My data" item.
+- **Assumptions others must match:** every later marketing send calls `hasMarketingOptOut` (no marketing send exists yet); booking reminders do not. `guest.removed` carries no guest id. B20 deletes nothing extra: removal already deletes `identity_map` rows. A5's Data health count of pending `removal_requests` is fed by this flow.
+- **Tests:** `removal.test.ts` 4 pass (3 plan names + job), `retention.test.ts` 2 pass, `flow.test.ts` +2 plan names and 5 intent cases, `booking-history.test.ts` scheduler list updated.
+- **Done (integrator):** in human handoff a typed `stop` is recorded at once with no bot reply, and taps on `a=stop` / `a=remove_confirm` still run (a typed removal keyword still waits for the handoff to end, since it needs the confirm tap). **Not done:** Chatwoot copies of the guest's conversation (A13) are not deleted. `audit_log` rows are not scrubbed.
+
+## 2026-11-27 · B14b: Handoff episodes, built by Session A on track-a
+
+- **Exact signatures (`chat/episodes.ts`):** `openEpisode(db: Db, clubId: string, conversationId: string): Promise<HandoffEpisode | undefined>`; `startEpisode(tx: Db, input: StartEpisodeInput): Promise<HandoffEpisode>`; `endEpisode(tx: Db, input: EndEpisodeInput): Promise<HandoffEpisode | undefined>`; `endOpenEpisode(tx: Db, input: { clubId; conversationId; resolverUserId; actor?: Actor; now }): Promise<void>`; `recordStaffReply(db: Db, input: StaffReplyInput, send: StaffReplySend): Promise<{ messageId: string }>`; `type HandoffTrigger = 'guest_request' | 'large_group' | 'paid_after_expiry' | 'staff_reply' | (string & {})`; `HANDOFF_REALERT_KIND = 'handoff_realert'`; `class EpisodeError { code: 'not_found' }`. `jobs/handoff-timeout.ts`: `runHandoffTimeouts(db: Db, now: Date): Promise<{ realerted: string[]; ended: string[] }>`.
+- **Unverified against a real service:** staff replies go out through the LINE push path of the outbox; no real LINE push was made (tests use the dev gateway). No web page changed; a browser walk of take over, reply, resolve and timeout from the dashboard is still to be done by a human.
+
+- **`chat/episodes.ts`:** `startEpisode(tx, { clubId, conversationId, trigger, reason, topic?, firstMessageId, now })` returns the open episode if one exists, else inserts it, sets `mode='human'`, emits `handoff.requested {trigger}`; `topic` defaults to `trigger`. `endEpisode(tx, { episodeId, endedBy: 'staff'|'timeout', resolverUserId?, now, actor? })` returns `undefined` when already ended; emits `handoff.resolved` / `handoff.timed_out {durationSec}`. `endOpenEpisode(tx, { clubId, conversationId, resolverUserId, actor?, now })` for [Mark resolved] (also handles a legacy human-mode conversation with no episode). `recordStaffReply(db, { clubId, conversationId, userId, text, channel, occurredAt, externalId }, { outbox, gateways })` returns `{ messageId }`; **third argument added** (sending needs a gateway): A14 passes `{ outbox: ctx.deps.outbox, gateways: ctx.gateways }`. Throws `EpisodeError('not_found')` for another club's conversation. `openEpisode(db, clubId, conversationId)` reads the open one.
+- **Outbox:** `outbox.deliver(gateway, club, guest, messageId, msgs)` pushes an already stored row and sets `sent_via` / `delivery_status`.
+- **Job:** `handoff-timeout` every minute (`jobs/handoff-timeout.ts`, `runHandoffTimeouts(db, now)`). Counts from the last staff activity (start or newest staff-authored message). Assumption: one urgent `raiseAlert` kind `handoff_realert` at half of `handoffTimeoutMinutes`, end with `endedBy='timeout'` at the full timeout. The lazy timeout in `bot/flow.ts` is gone.
+- **Routes:** `POST /conversations/:id/resolve` now calls `endOpenEpisode`; `POST /conversations/:id/reply` now calls `recordStaffReply` (`channel: 'dashboard'`, `externalId: null`). A14 only adds the Chatwoot callback path.
+- **Flow triggers:** `guest_request`, `large_group`, `paid_after_expiry`; `staff_reply` when a host replies to a bot-mode chat.
+- **Assumptions others must match:** only `chat/episodes.ts` writes `conversations.mode` (`test/episodes.test.ts` scans `src`). Seeds that insert a human-mode conversation should also insert its open `handoff_episodes` row, or the timeout job never closes it (`demo/seed-history.ts` inserts one without an episode today).
+- **Re-alerts:** ending an episode (staff or timeout) resolves that conversation's open `handoff_realert` alerts in the same transaction (integrator). `HANDOFF_REALERT_KIND` now lives in `chat/episodes.ts`, re-exported from `jobs/handoff-timeout.ts`.
+- **Tests:** `test/episodes.test.ts` 6 pass.
+
+## 2026-11-27 · B7: Velora seeded club, reset and fast-forward, built by Session A on track-a
+
+**Migration:** none.
+
+**Interfaces published:**
+```ts
+// apps/server/src/db/seed.ts
+export async function seedDemoClub(db: Db, env?: NodeJS.ProcessEnv, now?: Date): Promise<void>; // third arg new (default new Date())
+// apps/server/src/demo/seed-history.ts
+export const SEED_HIST = 'seed_hist_'; export const SEED_TONIGHT = 'seed_tonight_'; export const HISTORY_WEEKS = 6;
+export async function seedHistory(tx: Db, club: Club, now: Date): Promise<void>;
+export async function seedTonight(tx: Db, club: Club, now: Date): Promise<string>; // the night date seeded
+export function historyNights(club: Club, tonight: string): string[];
+// apps/server/src/demo/reset.ts
+export class DemoError extends Error { code: 'not_found' | 'not_demo' }
+export async function resetDemoClub(db: Db, clubId: string, now: Date): Promise<{ nightDate: string }>;
+export async function fastForward(ctx: AppContext, clubId: string, what: 'hold_expiry', bookingId: string, now: Date): Promise<Booking | undefined>;
+// apps/server/src/bookings/service.ts
+export async function expireHold(db: Db, clubId: string, bookingId: string, now: Date): Promise<Booking | undefined>;
+```
+Routes (`http/demo.ts`, mounted at `/api/admin/demo`, `requirePlatformAdmin`): `POST /:slug/reset` → 200 `{ nightDate }`; `POST /:slug/fast-forward` `{ what: 'hold_expiry', bookingId }` → 200 `{ booking: { id, status, refCode } }`. 404 unknown club, 409 `not_demo`, 400 bad body, 404 `not_held`. Each success writes an `audit_log` row (`demo.reset`, `demo.fast_forward`).
+
+**What a new Velora database holds** (`seedDemoClub`, one transaction, only when `club_demo` does not exist yet):
+- Content through `applyClubContent` (zones, 22 tables, price rules, policies as `settings.rules`). The old inline zones/tables (`zone_demo_*`, `table_demo_*`) are gone; Velora table ids are random, look tables up by code.
+- `club_profile` from `VELORA.profile` (`usual_peak_hour` 1; `opening_hours` jsonb also carries `openWeekdays`, `arrivalCutoff`, `eventNight`).
+- 25 FAQ `brain_notes` (`id = note_velora_<slug>`, `slug` = FAQ slug, `type='faq'`, `status='live'`, `source='onboarding'`, body EN + TH, linted with `assertLint`), one version row each, one compiled snapshot. The three gaps are not inserted.
+- History: the open nights (Wed–Sat) of the 6 weeks before tonight, from a fixed PRNG seed: bookings (completed with POS bill, no-show, cancelled, expired; ~10% `manual_phone`), deposits, status-history rows and the events `changeStatus` writes at each step (`booking.status_changed` + `STATUS_EVENTS`), `booking.completed`, chats (`message.received`), 1–2 takeovers a night (`handoff.requested`, `host.replied`, `handoff.resolved`; topics include the three gaps), door counts (`door.count`) and crowd ratings (`crowd.rated`). 80 seeded guests.
+- Tonight: 6 confirmed (V1, V3, B2, B5, H1, H4), one `held` on B1 (expires `holdMinutes` after seeding), one `payment_review` on V2 (deposit `review`, `slip_path` null), one guest waiting for a host (`seed_tonight_conv_waiting`, `mode='human'`, open `handoff_episodes` row, topic `private_room`).
+
+**Assumptions others must match:**
+- Every seeded guest, booking and event is `is_test = true`. Seeded guests' `line_user_id` is `SIM-<row id>`, so a push to them (e.g. the fast-forward expiry message) goes to the simulator gateway, never to a real LINE user.
+- Events are written with `emit` (strict) and then renamed to `seed_hist_ev_<seq>` / `seed_tonight_ev_<seq>` in the same transaction, so reset can tell them apart. Event ids are not stable across databases; row counts and sums are.
+- Reset deletes, for the club, every guest, conversation, message, booking, deposit, status-history, event, handoff, door-count and crowd-rating row whose id does not start with `seed_hist_`, plus the rows that hang off a deleted guest or booking (POS bills, promoter attributions, guest tags/notes, notices, identity links, removal requests). It keeps content, brain notes, profile, `audit_log` and `occupancy_snapshots`. A change a user made to a `seed_hist_*` row is not undone.
+- `expireHold` does not check the hold time; `fastForward` moves `hold_expires_at` to `now − 1 s` first. Only `demo` clubs (fast-forward also refuses a non-demo club).
+- Tonight is `currentNightDate(now, nightEndHour)` even on a closed weekday.
+- Nights rows: `seedHistory` writes the 42 past `nights` rows through B8b's `ensureNights`.
+- Brain notes are inserted directly (not through `createNote`) to compile once instead of 25 times.
+
+**Answer to Track A's request (A16b):** the hand-counted Velora week is the week of **Mon 16 Nov 2026** (nights Wed 18–Sat 21) for a seed at `2026-11-25T13:00:00Z`. `club-report.test.ts › report figures match the hand-counted B7-seeded Velora week` replaces the `it.todo` (44 bookings, 2 cancelled, 42 deposits ฿220,000, door 897 against 237 booked pax, peak hour 00).
+
+**Tests:** `velora.test.ts` 7 pass (the 5 plan names, plus a seed-content test with the nightly completeness check, and a route test: admin 200, live club 409, unknown 404, bad `what` 400, manager 403). `club-report.test.ts` 6 pass. `admin.test.ts`, `isolation.test.ts`, `episodes.test.ts` pass with the new routes. `isolationFixtures` needs no new fixture (the routes take only `:slug`; the booking id is in the body).
+
+**Not done:** no console button for reset / fast-forward (no web page in B7's Files); the browser walk of demo steps 1, 2 and 7 is still to be done by a human. Thai text still needs a native-speaker read.
+
+## 2026-11-27 · B3: Durable webhook pipeline, ops events, bot pause, built by Session A on track-a
+
+- **Published (`http/webhook.ts`):** `processDelivery(ctx: AppContext, rawId: string, opts?: { dryRun?: boolean }): Promise<{ events: number; replies: unknown[] }>`; `replayUnprocessed(ctx: AppContext, now: Date): Promise<number>` (signed `channel = 'line'` rows with `processed_at IS NULL` older than 10 s, oldest first). Route order: unknown slug → ops `webhook_unknown_club` (club null, `detail.slug`), 404 → bad signature → `raw_webhooks` row `signature_ok=false` with body `{ rejected: 'bad_signature', bytes }` (an unsigned body is never stored) and ops `webhook_bad_signature`, 401 → bad JSON → row with `error='bad_json'`, 400 → raw row → 200 → `processDelivery` in the background. A per-event throw writes ops `bot_error` `{ rawWebhookId, webhookEventId, error }`, sets `raw_webhooks.error`, leaves `processed_at` NULL and runs the next event. Missing access token: `error` set, nothing processed (the dev gateway is never used).
+- **Published (`bot/flow.ts`):** `processEvent(deps, club, gateway, event, opts?: { ignoreDedupe?: boolean })` (throws); `handleEvent` is a catching wrapper (kept for `http/dev.ts`). `logInbound` uses `ON CONFLICT DO NOTHING` and returns the row; a turn is skipped only when that row's `processed_at` is set; `processed_at` is set as the last step of every completed guest turn (follow, unfollow, paused and human-mode turns too). Group events are not deduped.
+- **Published (`data/raw-webhooks.ts`):** `recordRawWebhook(db, { clubId, channel, body, signatureOk, receivedAt, processedAt?, error? }): Promise<string>`, `markRawProcessed(db, id, at)`, `markRawError(db, id, error)`, `rawBody(text): { body; parsed }`, `errorText(err)`. Chatwoot Instagram and Papaya POS routes use it (direct inserts removed).
+- **Published (`data/ops.ts`):** `recordOps(db, clubId: string | null, kind: OpsKind, detail, now)`, the one `ops_events` writer (`line-probe.ts` `recordLineSetup` and `jobs/nightly-check.ts` switched).
+- **Outbox:** every outbound row ends with `delivery_status` `sent` (`sent_via` `reply`/`push`), `skipped` (`sent_via='none'`: no LINE id, unfollowed with no reply token, no staff group, staff messages past the first 5) or `failed` (`sent_via='push'`, `error` = `describeLineError`, plus one ops `send_failed` `{ target: 'guest' | 'staff', messageIds, error }`). `Outbox` takes an optional third constructor arg `now`.
+- **Bot pause:** `clubs.bot_paused` or `isGloballyStopped(db)`: inbound stored, nothing to the guest, one staff-group message per conversation per pause, through `outbox.toStaff` (B19b swaps it for `raiseAlert`). Pause identity `club:<bot_paused_at ISO>` or `global:<platform_flags.global_stop.updated_at ISO>`, kept in `conversations.state.pauseAlertedFor` (new optional `ConversationState` field, no migration).
+- **Dry run:** one `db.transaction`, fresh `buildBotDeps(config, tx, { now, log, slipVerifier: null, payments: {} }) (no slip provider and no payment gateway is called)`, the dev gateway wrapped to collect `{ via, to|replyToken, messages }` into `replies`, no dedupe, always rolled back. `POST /api/admin/clubs/:slug/webhooks/:id/replay` returns `{ dryRun: true, events, replies }`, 409 `not_replayable` for an unsigned or non-LINE row, 500 `replay_failed` on a throw, and writes a `debug.view` audit row.
+- **Start-up:** `startBackground` awaits `replayUnprocessed(ctx, now())` before the scheduler starts. Tested by `webhook-durability.test.ts › startBackground replays unprocessed deliveries before it returns` (integrator).
+- **Alert script:** `infra/check-webhook-errors.sh` denominator is now LINE rows in `raw_webhooks`.
+- **Tests:** `webhook-durability.test.ts` 10 pass (plan names); `admin.test.ts` gate `raw_webhooks` assertion, `pause stops replies within one message`, `one guest message is traceable end to end`, `failed send shows in the message log with LINE's error` are real tests; `admin-support.test.ts` replay dry run, end-to-end trace, failed send are real tests; `instagram.test.ts` raw-writer test is real.
+- **Not done:** no event for webhook rejection (`line.webhook.rejected` is B4b's).
+- **Assumptions in place of a human decision:** start-up replay waits 10 s past receipt so a delivery still in flight is not processed twice; the pause notice goes to the staff group once per conversation per pause.
+- **Unverified against a real service:** signatures and redeliveries are tested with locally signed bodies; no delivery from the real LINE platform was received. No web page changed.
+
+## 2026-11-27 · B8b, B9, B10b, B7: what is unverified, built by Session A on track-a
+
+- **B8b:** no external service. No web page changed.
+- **B9:** SlipOK sits behind `SlipVerifier`; tests use `FakeSlipVerifier` only. Assumption (plan default): with no `SLIPOK_*` keys every slip goes to host review. No web page changed.
+- **B10b:** no external service; the confirm prompt and opt-out replies are tested against the dev gateway, not real LINE. Thai keywords and replies still need a native-speaker read. No web page changed.
+- **B7:** no external service; seeded guests have `SIM-` LINE ids, so no real push happens. The browser walk of demo steps 1, 2 and 7 is still to be done by a human.

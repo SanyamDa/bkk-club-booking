@@ -1,7 +1,8 @@
 import { eq, like } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
-import type { Db } from '../src/db/client.js';
+import { openDb, type Db } from '../src/db/client.js';
+import { DEMO_CLUB_ID, seedDemoClub } from '../src/db/seed.js';
 import {
   bookings,
   clubs,
@@ -161,10 +162,48 @@ afterEach(async () => {
 });
 
 describe('A16b weekly club report', () => {
-  // Plan A16b: "report figures match hand-counted seeded Velora week". B7's Velora history seed
-  // is not on this branch yet; until it is, the figures are checked against the hand-seeded
-  // fixture week above (club B), and the Velora case waits on B7.
-  it.todo('report figures match the hand-counted B7-seeded Velora week (waits on B7 seed)');
+  // Plan A16b: "report figures match hand-counted seeded Velora week". B7 seeds Velora's history
+  // deterministically: seeded on Wednesday 25 Nov 2026, the week of 16 Nov is four seeded nights
+  // (Wed 18 to Sat 21). The figures are pinned, and each is also counted from the raw rows.
+  it('report figures match the hand-counted B7-seeded Velora week', async () => {
+    const velora = await openDb({ dataDir: 'memory' });
+    try {
+      await seedDemoClub(velora.db, {}, new Date('2026-11-25T13:00:00Z'));
+      const r = await buildClubReport(velora.db, DEMO_CLUB_ID, WEEK);
+      expect(r.weekStart).toBe(WEEK);
+      expect(r.bookings).toBe(44);
+      expect(r.cancelled).toBe(2);
+      expect(r.deposits).toEqual({ count: 42, satang: 22_000_000 });
+      expect(r.busiestNights).toEqual([
+        { nightDate: '2026-11-20', bookings: 16 },
+        { nightDate: '2026-11-21', bookings: 14 },
+        { nightDate: '2026-11-19', bookings: 11 },
+      ]);
+      expect(r.zones.map((z) => [z.name, z.bookings])).toEqual([
+        ['High tables', 17],
+        ['DJ side booth', 12],
+        ['VIP riser', 10],
+        ['Bar and standing', 5],
+      ]);
+      expect(r.averageSpendSatang).toBe(1_921_000);
+      expect(r.deflection).toMatchObject({ conversations: 33, deflected: 27 });
+      expect(r.takeoversByTopic.reduce((s, t) => s + t.n, 0)).toBe(6);
+      expect(r.door).toEqual({ count: 897, bookedPax: 237, peakHour: 0 });
+
+      // The same figures counted straight from the seeded rows.
+      const week = (await velora.db.select().from(bookings).where(eq(bookings.clubId, DEMO_CLUB_ID))).filter((b) => b.nightDate >= WEEK && b.nightDate <= '2026-11-22');
+      const held = week.filter((b) => ['confirmed', 'arrived', 'completed', 'no_show'].includes(b.status));
+      expect(held).toHaveLength(r.bookings);
+      expect(week.filter((b) => b.status === 'cancelled')).toHaveLength(r.cancelled);
+      expect(held.reduce((s, b) => s + b.pax, 0)).toBe(r.door.bookedPax);
+      const paid = (await velora.db.select().from(deposits).where(eq(deposits.clubId, DEMO_CLUB_ID))).filter((d) => d.status === 'verified' && held.some((b) => b.id === d.bookingId));
+      expect(paid.reduce((s, d) => s + d.amountSatang, 0)).toBe(r.deposits.satang);
+      const door = (await velora.db.select().from(doorCounts).where(eq(doorCounts.clubId, DEMO_CLUB_ID))).filter((d) => d.nightDate >= WEEK && d.nightDate <= '2026-11-22');
+      expect(door.reduce((s, d) => s + d.delta, 0)).toBe(r.door.count);
+    } finally {
+      await velora.close();
+    }
+  });
 
   it('report figures match the hand-counted fixture week (club B, stand-in for the Velora seed)', async () => {
     const r = await buildClubReport(db, clubB.id, WEEK);

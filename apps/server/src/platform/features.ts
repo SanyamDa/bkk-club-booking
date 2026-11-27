@@ -6,7 +6,7 @@ import { platformFlags } from '../db/schema.js';
  * Per-club feature switches (plan A17b, spec §12.3 Controls, Phase 2). The list is agreed with
  * Track B in the sync files; adding a key is additive, renaming one is a contract change.
  */
-export const FEATURE_KEYS = ['ai_answers', 'learning_loop', 'instagram', 'pos_sync', 'alerts_line'] as const;
+export const FEATURE_KEYS = ['ai_answers', 'learning_loop', 'instagram', 'pos_sync', 'alerts_line', 'payment_gateway'] as const;
 export type FeatureKey = (typeof FEATURE_KEYS)[number];
 export type FeatureSwitches = Record<FeatureKey, boolean>;
 
@@ -21,6 +21,8 @@ export const FEATURE_DEFAULTS: FeatureSwitches = {
   pos_sync: false,
   // Staff LINE group alerts are on from day one (spec §17).
   alerts_line: true,
+  // A20b: deposits through the payment gateway instead of the PromptPay slip. Off until switched on.
+  payment_gateway: false,
 };
 
 export const isFeatureKey = (k: string): k is FeatureKey => (FEATURE_KEYS as readonly string[]).includes(k);

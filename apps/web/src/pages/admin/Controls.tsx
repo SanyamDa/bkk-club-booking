@@ -56,6 +56,7 @@ const FEATURE_LABELS: Record<string, string> = {
   instagram: 'Instagram messages',
   pos_sync: 'POS sync',
   alerts_line: 'Alerts to the staff LINE group',
+  payment_gateway: 'Deposits through the payment gateway (instead of slips)',
 };
 
 /** A17b: per-club feature switches. Each change applies on the next request, no deploy. */

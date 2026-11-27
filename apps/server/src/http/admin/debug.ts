@@ -18,6 +18,7 @@ import {
 import { newId } from '../../lib/util.js';
 import { clientIp, requirePlatformAdmin, type AuthEnv } from '../auth.js';
 import type { AppContext } from '../context.js';
+import { processDelivery } from '../webhook.js';
 
 const pageQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -51,8 +52,8 @@ async function auditView(db: Db, c: Context<ClubEnv>, entity: string, entityId: 
 /**
  * Founder debug views (spec §12.3 Debug, plan A5). Read-only over Track B tables. Every path is
  * under `/api/admin/clubs/:slug`: `GET webhooks`, `GET messages`, `GET conversations/:id/timeline`,
- * `GET bookings/:id/timeline`, `POST webhooks/:id/replay` (503 `not_ready` until B3's
- * `processDelivery`), `POST test-message {to}`.
+ * `GET bookings/:id/timeline`, `POST webhooks/:id/replay` (B3 `processDelivery` dry run),
+ * `POST test-message {to}`.
  */
 export function debugRoutes(app: AppContext) {
   const r = new Hono<ClubEnv>();
@@ -191,15 +192,23 @@ export function debugRoutes(app: AppContext) {
     });
   });
 
-  // Needs B3's processDelivery(ctx, rawId, { dryRun: true }); enable when B3 merges.
+  // B3: a dry run (one transaction, always rolled back, nothing sent); shows the replies even
+  // when the delivery was already processed.
   r.post('/clubs/:slug/webhooks/:id/replay', async (c) => {
     const [raw] = await db
-      .select({ id: rawWebhooks.id })
+      .select({ id: rawWebhooks.id, signatureOk: rawWebhooks.signatureOk, channel: rawWebhooks.channel })
       .from(rawWebhooks)
       .where(and(eq(rawWebhooks.clubId, c.var.debugClub.id), eq(rawWebhooks.id, c.req.param('id'))))
       .limit(1);
     if (!raw) return c.json({ error: 'not_found' }, 404);
-    return c.json({ error: 'not_ready' }, 503);
+    if (!raw.signatureOk || raw.channel !== 'line') return c.json({ error: 'not_replayable' }, 409);
+    await auditView(db, c, 'raw_webhooks', raw.id);
+    try {
+      const result = await processDelivery(app, raw.id, { dryRun: true });
+      return c.json({ dryRun: true, ...result });
+    } catch (err) {
+      return c.json({ error: 'replay_failed', message: err instanceof Error ? err.message : String(err) }, 500);
+    }
   });
 
   r.post('/clubs/:slug/test-message', async (c) => {

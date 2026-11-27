@@ -79,10 +79,22 @@ export function menuQuickReplies(club: Club, lang: Lang): QuickReplyItem[] {
     ...(club.settings.drinksMenuUrl ? [qr({ type: 'uri', label: t(lang, 'drinksMenu'), uri: club.settings.drinksMenuUrl })] : []),
     qr({ type: 'uri', label: t(lang, 'location'), uri: club.settings.mapUrl }),
     qr(postback(t(lang, 'talkToHost'), { a: 'host' })),
+    qr(postback(t(lang, 'myData'), { a: 'privacy' })), // B10b
   ];
 }
 
 export const menu = (club: Club, lang: Lang): Message => text(t(lang, 'menuPrompt'), menuQuickReplies(club, lang));
+
+/** B10b: the "My data" menu item: stop promotions or ask for removal (spec §5.5, §14.9). */
+export const myData = (lang: Lang): Message =>
+  text(t(lang, 'myDataPrompt'), [
+    qr(postback(t(lang, 'stopPromotions'), { a: 'stop' })),
+    qr(postback(t(lang, 'removeMyData'), { a: 'remove' })),
+  ]);
+
+/** B10b: the one confirm tap before a removal request is written. */
+export const removeConfirm = (lang: Lang): Message =>
+  text(t(lang, 'removeConfirmPrompt'), [qr(postback(t(lang, 'removeConfirm'), { a: 'remove_confirm' }))]);
 
 export function greeting(club: Club, lang: Lang): Message[] {
   const rules = club.settings.rules[lang].map((r) => `• ${r}`).join('\n');
@@ -91,12 +103,22 @@ export function greeting(club: Club, lang: Lang): Message[] {
 
 // ---------- Booking steps ----------
 
-export function askNight(club: Club, lang: Lang, nights: string[], now: Date): Message {
+/** A night in the guest date list: a plain date, or B8b's `bookableNights` entry with its event name. */
+export type AskNightOption = string | { date: string; eventName?: string | null };
+
+export function askNight(club: Club, lang: Lang, options: AskNightOption[], now: Date): Message {
+  const list = options.map((o) => (typeof o === 'string' ? { date: o, eventName: null } : { date: o.date, eventName: o.eventName ?? null }));
+  const nights = list.map((n) => n.date);
   if (nights.length === 0) return text(t(lang, 'noNights'), [qr(postback(t(lang, 'talkToHost'), { a: 'host' }))]);
   const tonight = currentNightDate(now, club.settings.nightEndHour);
-  const items = nights.slice(0, 4).map((d) =>
-    qr(postback(d === tonight ? t(lang, 'tonight') : formatNight(d, lang), { a: 'night', d }, formatNight(d, lang))),
-  );
+  const shown = list.slice(0, 4);
+  const items = shown.map(({ date: d, eventName }) => {
+    const day = d === tonight ? t(lang, 'tonight') : formatNight(d, lang);
+    const shownText = eventName ? `${formatNight(d, lang)} · ${eventName}` : formatNight(d, lang);
+    return qr(postback(eventName ? `${day} · ${eventName}` : day, { a: 'night', d }, shownText));
+  });
+  // Event names are cut short on the 20-character chip, so the message lists them in full.
+  const events = shown.filter((n) => n.eventName).map((n) => `• ${formatNight(n.date, lang)}: ${n.eventName}`);
   items.push(
     qr({
       type: 'datetimepicker',
@@ -108,7 +130,7 @@ export function askNight(club: Club, lang: Lang, nights: string[], now: Date): M
       max: addDays(tonight, club.settings.bookingWindowDays),
     }),
   );
-  return text(t(lang, 'askNight'), items);
+  return text(events.length ? `${t(lang, 'askNight')}\n\n${events.join('\n')}` : t(lang, 'askNight'), items);
 }
 
 export function askPax(lang: Lang, nightDate: string): Message {
@@ -215,6 +237,25 @@ export function payment(club: Club, lang: Lang, view: BookingView, qrImageUrl: s
     { type: 'image', originalContentUrl: qrImageUrl, previewImageUrl: qrImageUrl },
     text(t(lang, 'payInstructions', vars), [qr(postback(t(lang, 'talkToHost'), { a: 'host' }))]),
   ];
+}
+
+/** A20b: the gateway payment link (hosted page), instead of the PromptPay QR and slip. */
+export function paymentLink(club: Club, lang: Lang, view: BookingView, payUrl: string): Message {
+  const vars = {
+    amount: formatBaht(view.booking.depositSatang),
+    ref: view.booking.refCode,
+    time: view.booking.holdExpiresAt ? formatClock(view.booking.holdExpiresAt) : club.settings.arrivalBy,
+  };
+  const accent = club.settings.accentColor;
+  return {
+    type: 'flex',
+    altText: `${t(lang, 'payTitle')} · ${vars.amount}`,
+    contents: bubble(
+      [{ type: 'text', text: t(lang, 'payLinkInstructions', vars), size: 'sm', color: C.text, wrap: true }],
+      [primaryButton({ type: 'uri', label: t(lang, 'payNow'), uri: payUrl }, accent), secondaryButton(postback(t(lang, 'talkToHost'), { a: 'host' }))],
+      { title: t(lang, 'payTitle'), accent },
+    ),
+  };
 }
 
 export function confirmation(club: Club, lang: Lang, view: BookingView, passImageUrl: string): Message {

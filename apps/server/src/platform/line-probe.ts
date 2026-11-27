@@ -1,9 +1,9 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { emit } from '../data/events.js';
+import { recordOps } from '../data/ops.js';
 import type { Db } from '../db/client.js';
 import { opsEvents, type Club } from '../db/schema.js';
 import type { AppContext } from '../http/context.js';
-import { newId } from '../lib/util.js';
 import { describeLineError, type SetupClients, type SetupReport } from '../line/setup.js';
 import type { LineSetupDetail } from './health.js';
 
@@ -25,8 +25,8 @@ export const credentialFailure = (err: unknown): SetupReport => ({ ok: false, st
 export const clubWebhookUrl = (publicUrl: string, club: Club) => `${publicUrl.replace(/\/$/, '')}/line/webhook/${club.slug}`;
 
 /**
- * One `ops_events` row (kind 'line_setup') plus the `line.setup_run` event, in one transaction.
- * Direct insert until B3's `recordOps` merges.
+ * One `ops_events` row (kind 'line_setup', through B3's `recordOps`) plus the `line.setup_run`
+ * event, in one transaction.
  */
 export async function recordLineSetup(
   db: Db,
@@ -38,7 +38,7 @@ export async function recordLineSetup(
 ) {
   await db.transaction(async (txRaw) => {
     const tx = txRaw as unknown as Db;
-    await tx.insert(opsEvents).values({ id: newId(), clubId: club.id, kind: 'line_setup', detail, at: now });
+    await recordOps(tx, club.id, 'line_setup', detail, now);
     await emit(tx, {
       clubId: club.id,
       type: 'line.setup_run',

@@ -160,4 +160,7 @@ export const adminApi = {
   dataHealth: () => api<{ clubs: any[] }>('/api/admin/data/health'),
   events: (p: { club?: string; conversation?: string; booking?: string; guest?: string; before?: string; limit?: number }) =>
     api<{ events: any[] }>('/api/admin/events' + qs(p)),
+  /** A9 event calendar (nights rows) for one club. */
+  nights: (slug: string, from: string, days: number) => api<{ nights: any[] }>(adm(slug) + '/nights' + qs({ from, days })),
+  saveNight: (slug: string, b: Record<string, unknown>) => api(adm(slug) + '/nights', { method: 'PUT', body: b }),
 };

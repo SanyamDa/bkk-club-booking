@@ -552,3 +552,122 @@ Components (`apps/web/src/pages/admin/`): `AdminLayout`, `Clubs` (+ `HealthTile`
 Requests for Track B: none beyond A5's list; the web placeholders switch on when those routes stop answering `not_ready`. Blockers and `it.todo`: none in web.
 
 Still to do by a human: the browser walk from the plan's A6 Check line (admin login with TOTP, create club, `LINE_FAKE=1` made-up credentials and setup report, club profile, support session banner with end time, end it, event stream filtered by one conversation, Data health). It was not done in this session.
+
+## 2026-11-27 — A8 (staff accounts and invites)
+
+Landed on `track-a` (not merged yet). Tests: `test/invites.test.ts` (15). Blockers and `it.todo`: none. Still to do by a human: the browser walk of `/staff/team` and `/invite` (web pages `Team.tsx`, `AcceptInvite.tsx`).
+
+Published interfaces (`apps/server/src/platform/invites.ts`, `src/http/team.ts`):
+
+```ts
+export const INVITE_DAYS = 7;
+export const MIN_PASSWORD_LENGTH = 10;
+export function inviteTokenHash(secret: string, token: string): string // HMAC-SHA256 keyed 'invite:' + APP_SECRET
+export async function createInvite(db: Db, secret: string, input: { clubId: string; email: string; role: MembershipRole; createdBy: string | null }, now: Date): Promise<{ invite: Invite; token: string }>
+export async function acceptInvite(db: Db, secret: string, token: string, account: { userId: string } | { name: string; password: string }, now: Date): Promise<{ userId: string; clubId: string; role: MembershipRole; invite: Invite }>
+export async function revokeInvite(db: Db, clubId: string, id: string, now: Date): Promise<Invite>
+export async function setMemberRole(db: Db, clubId: string, userId: string, role: MembershipRole)
+export async function revokeUserSessions(db: Db, userId: string, now: Date): Promise<number>
+export async function disableMember(db: Db, clubId: string, userId: string, now: Date): Promise<{ role: MembershipRole; sessionsRevoked: number; accountDisabled: boolean }>
+export const inviteLink = (publicUrl: string, token: string) => `${publicUrl}/invite#${token}`
+```
+
+Routes (owner, manager): `GET /api/staff/clubs/:slug/team`, `POST .../team/invites {email, role, via?: 'email' | 'line'}` (201, returns `link`, `mailtoUrl`, `lineShareUrl` for LINE), `DELETE .../team/invites/:id`, `PATCH .../team/members/:userId {role}`, `POST .../team/members/:userId/disable`. Public: `POST /api/auth/invites/preview {token}`, `POST /api/auth/invites/accept {token, name?, password}` (sets `sid`; a platform admin gets `loginRequired: true` and no cookie). Errors: `403 forbidden_role`, `400 self`, `400 last_owner`, `400 weak_password`, `400 invalid_invite`, `401 invalid_login`.
+
+Disable removes only this club's membership, revokes all the person's sessions, and sets `users.disabled_at` only when no other membership remains and the person is not a platform admin. Revoked invites have `expires_at` set to now. Audit actions: `team.invite_created`, `team.invite_revoked`, `team.invite_accepted`, `team.role_changed`, `team.member_disabled`.
+
+Requests for Track B: add `staff.invited`, `staff.invite_accepted`, `staff.role_changed`, `staff.disabled` to `data/event-types.ts` if the funnel needs them; A8 writes `audit_log` only until then. No mailer exists, so the manager sends the link (mailto or LINE share).
+
+## 2026-11-27 — A9 (settings UI and nights calendar)
+
+Landed on `track-a` (not merged yet). Tests: `test/settings.test.ts` (15, plus 1 `it.todo` waiting on B13: "an election day entered from the console appears in calendar_days (needs B13 upsertCalendarDay)"). Still to do by a human: the browser walk of the staff Settings page and the nights Calendar page.
+
+Published interfaces (`apps/server/src/platform/club-settings.ts`):
+
+```ts
+export function rulePriority(r: { scope: 'club' | 'zone' | 'table'; weekday?: number | null; nightId?: string | null }): number // club 0, zone 1, table 2; +10 weekday; +20 night_id
+export async function setPriceRule(db: Db, club: Club, input: PriceInput, actor: SettingsActor, now: Date, opts?: { nightDate?: string }): Promise<PriceRule>
+export async function currentPriceRules(db: Db, club: Club, now: Date): Promise<PriceRule[]>
+export async function upsertNight(db: Db, club: Club, input: NightInput, actor: SettingsActor, now: Date): Promise<{ night: Night; created: boolean }>
+export async function listNights(db: Db, club: Club, from: string, days: number): Promise<Night[]>
+```
+
+Staff routes (owner, manager) under `/api/staff/clubs/:slug`: `PATCH /settings`, `PUT /promptpay` and `PUT /greeting` (fresh TOTP, audited, staff-group notice), `GET /tables`, `POST|PATCH /zones[/:id]`, `POST|PATCH /tables[/:id]`, `GET|PUT /prices`, `GET|PUT /nights` (night date in the body), `GET|PUT /profile`, `GET /quota` (`warn` at 80%). Console: `GET|PUT /api/admin/clubs/:slug/nights`, `POST /api/admin/calendar-days` (validates, then 503 `not_ready` until B13).
+
+For B9b: `price_rules.valid_to` is inclusive. A change closes the open rule at yesterday and opens one from today; a second change the same day edits today's rule. An event-night price is a `scope: 'club'` rule with `night_id`. Zone price columns stay the fallback.
+For B8b: a hand-edited night has `edited_by` = user id; closing needs `closed_reason`, opening clears it.
+For B13: publish `upsertCalendarDay`; A9 then wires `POST /api/admin/calendar-days` and enables "an election day entered from the console appears in calendar_days".
+Events: `club.settings_changed`, `club.price_changed`, `club.event_night_created` (once per night, the first time it gets an event name). Tables: new `valid_from` = today; removal sets `valid_to` = today; restore clears it.
+
+## 2026-11-27 — A10 (greeting and rich menu migration)
+
+Landed on `track-a` (not merged yet). Tests: `test/line-migration.test.ts` (8, plus 1 `it.todo` waiting on B4: "the replaced rich menu carries B4 s=rm_* tags"). Still to do by a human: the browser walk of the console LINE wizard migration step and rich menu rollback on the club page.
+
+Changed interfaces (`apps/server/src/line/setup.ts`):
+
+```ts
+export interface RichMenuChange { richMenuId: string; previousRichMenuId: string | null }
+export type GreetingText = { en?: string; th?: string };
+// SetupClients gains: readGreeting?: () => Promise<GreetingText | null>; api.getDefaultRichMenuId
+// SetupReport gains: richMenu?: RichMenuChange
+// runLineSetup opts gain: keepOldRichMenu?: boolean (with refreshRichMenu: keep old menus)
+export function fakeSetupClients(accessToken: string, login: LoginChannel | null, line?: FakeLineState): SetupClients
+export async function rollbackRichMenu(clients: SetupClients, change: RichMenuChange): Promise<void>
+```
+
+Routes: `POST /api/admin/clubs/:slug/line/migrate {totp, greeting?: {en?, th?}}` (422 `greeting_unreadable` when nothing is pasted and LINE cannot give it; LINE's API has no greeting read, so `realSetupClients` leaves `readGreeting` unset) and `POST /api/admin/clubs/:slug/line/rich-menu/rollback` (409 `nothing_to_roll_back`). The old menu id lives in the `line.rich_menu_replaced` audit row.
+
+For Track B: any hand-written `SetupClients` fake must provide `api.getDefaultRichMenuId`. B4 adds `s=` tags only in `menuCells`; migration rebuilds from it. B3: switch the direct `ops_events` insert in `/line/migrate` to `recordOps`.
+
+## 2026-11-27 — A11 (POS level L0: report import)
+
+Landed on `track-a` (not merged yet). Tests: `test/pos-import.test.ts` (10). Blockers and `it.todo`: none (the real report sample is an open question, below). Still to do by a human: the browser walk of the staff POS import page (`PosImport.tsx`). The column map and the fixture are synthetic: replace `WONGNAI_FOODSTORY_COLUMN_MAP` and `test/fixtures/pos-report-synthetic.csv` when the real report sample arrives (spec §16.1 q13).
+
+Published interfaces (`apps/server/src/integrations/pos/`):
+
+```ts
+export interface PosBill { ref: string; tableCode: string | null; covers: number | null; openedAt: Date | null; closedAt: Date | null; totalSatang: number | null }
+export interface PosAdapter { readonly vendor: string; importReport(file: string): { bills: PosBill[]; errors: string[] }; fetchClosedBills?(nightDate: string): Promise<PosBill[]>; openBillAtCheckIn?(booking, deposit): Promise<{ ref: string }>; onBillUpdated?(...) }
+export function csvReportAdapter(map?: PosColumnMap, vendor?: string): PosAdapter
+export async function importPosReport(db: Db, club: Club, file: string, opts: { now: Date; adapter?: PosAdapter; isTest?: boolean }): Promise<PosImportResult> // { imported, created, updated, matched, walkIns, errors }
+export const posBillId = (clubId: string, ref: string) => 'pos_' + sha256(clubId + '\0' + ref)
+```
+
+Route: `POST /api/staff/clubs/:slug/pos/import` (owner, manager; multipart `file` or raw `text/csv`; 413 over 5 MB; 400 `bad_report`). Events for B1 props validation: `pos.bill_closed` (dedupe `pos.bill_closed:<ref>`, props `{billRef, covers, totalSatang}`) and `pos.bill_matched` (dedupe `pos.bill_matched:<ref>:<bookingId>`, props `{billRef, method: 'table_night'}`), both `dataOrigin: 'pos'`, `actorType: 'system'`. No unique index on `(club_id, provider_bill_id)`: idempotency comes from the deterministic id.
+
+## 2026-11-27 — A12 (observability and load)
+
+Landed on `track-a` (not merged yet). Tests: `test/load.test.ts` (11), `test/webhook-alert.test.ts` (5). Blockers and `it.todo`: none. No web change. `npm run load -w @club/server -- --mode sim|webhook --base --clubs --duration --scale --bookings --inbound --target-ms` (env `LOAD_CHANNEL_SECRET`, `LOAD_COOKIE`). Alert check: `infra/check-webhook-errors.sh` (cron recipe in `infra/README.md` §5). Local smoke: full rate 30 s sim, p95 11 ms, 0 errors (laptop, PGlite; not a production result).
+
+For Track B: the script relies on postbacks `a=book` and `a=night&d=YYYY-MM-DD` and the simulator `userId` format; B8 putting `/api/dev` behind admin login means sim mode needs `LOAD_COOKIE`. Once B3's `raw_webhooks` writer merges, switch the error-rate denominator in the alert script from inbound `messages` to `raw_webhooks`.
+
+## 2026-11-27 — A15 (alerts)
+
+Landed on `track-a` (not merged yet). Tests: `test/alerts.test.ts` (7). Migration `drizzle/0003_alerts.sql` adds `alerts` and `club_alert_settings`. `it.todo`: none; blocker: the scheduler request below. Still to do by a human: the browser walk of the staff Feed page (`Feed.tsx`).
+
+Alerts interface for B19b (`apps/server/src/platform/alerts.ts`, `platform/alert-checks.ts`):
+
+```ts
+export interface AlertInput { clubId: string; level: 'urgent' | 'needs_input' | 'info'; kind: string; conversationId?: string; bookingId?: string; text: { en: string; th: string } }
+export async function raiseAlert(db: Db, input: AlertInput, now: Date): Promise<void>
+export async function runAlertChecks(ctx: AppContext, now: Date): Promise<void>
+export function registerStaffAlertSender(db: Db, sender: (club: Club, text: string) => Promise<void>): void // wired once in createApp to outbox.toStaff
+```
+
+Urgent always goes to the staff group; info only when the club's switch is on; needs-input never. A `raiseAlert` on a db that never went through `createApp` records the alert and sends nothing. Suggested `kind`s for B19b: `guest_wants_human`, `bot_unanswered`, `complaint`, `payment_review`, `no_arrival`, `bot_error`, `brain_draft_waiting`, `gap_waiting`, `booking_confirmed`, `running_late`, `cancellation`.
+
+Routes: `GET /api/staff/clubs/:slug/feed` (`{alerts, counts}`), `GET .../feed/counts`, `POST .../feed/:id/resolve`, `GET|PUT .../alert-settings {infoToLine}` (owner, manager).
+
+**Request for Track B (before A15 merges):** `jobs/index.ts` is B's file and the plan allows A one `scheduler.register('alert-checks', ...)` line, but no scheduler exists yet. Please either add the scheduler (then A replaces its lines with the one `register` line), or accept this stand-in: A15 adds one start line in `startBackground`, `const stopAlertChecks = startAlertChecks(ctx, now);`, and one `stopAlertChecks();` in the stop function. The 60 s timer itself lives in `platform/alert-checks.ts` (`export function startAlertChecks(ctx: AppContext, now: () => Date): () => void`). The stand-in lines are in `jobs/index.ts` on `track-a` now, marked with an `A15:` comment. A15 does not merge until B answers here.
+
+Migration lock: `drizzle/0003_alerts.sql`, `meta/0003_snapshot.json`, `_journal.json` and the `db/schema/platform.ts` change go in their own commit and their own pull request under the lock (rebase, commit schema + migration alone, merge, note it here), before the rest of A15 is committed.
+
+Timed checks: `runAlertChecks` probes LINE itself (bot info, webhook endpoint, quota; `platform/line-probe.ts` `probeLine`) when the club's newest `line_setup` row is older than 10 minutes, and records the probe as a `line_setup` row (`line.setup_run` with `check: 'probe'`, actor `system`). A row with no quota reading never clears `quota_exhausted`: the last known reading is used. The daily summary is sent at 17:00 Bangkok for tonight's night date (spec §6.1): bookings by zone, deposits collected (verified), expected minimum spend. A staff alert whose club LINE channel is unavailable is still recorded (feed and `messages` row) with `sent_line_at` null; `raiseAlert` never throws for a failed send.
+
+## 2026-11-27 — Review fixes (A8, A9, A10, A11, A12)
+
+- A8: `POST /api/auth/invites/preview` no longer returns `hasAccount`; `/accept` answers `weak_password` for a password under 10 characters before looking up the account, so invite routes do not reveal whether an email has an account.
+- A9: `freshTotpRefusal` answers 403 `second_factor_not_enrolled` (no failure counted) for a user with no TOTP secret; `GET /settings` returns `secondFactorEnrolled`, and the Settings page hides the PromptPay/greeting editor without it. The owner notice for PromptPay is the staff-group message plus the before/after audit row (plan A5 Controls: "This build has no separate in-account notice").
+- A10: `/line/migrate` records the quota reading after a successful run (null only on a credential failure).
+- A11: the 5 MB POS upload limit is Hono's `bodyLimit` (counts chunked bodies).
+- A12: `test/webhook-alert.test.ts` runs the SQL of `infra/check-webhook-errors.sh` on PGlite and the script itself with a stand-in `psql`, and checks THRESHOLD, MAX_RATE_PCT, MIN_INBOUND and the ALERT_URL call.

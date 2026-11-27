@@ -1,5 +1,6 @@
 import { expireStaleHolds } from '../bookings/service.js';
 import type { AppContext } from '../http/context.js';
+import { startAlertChecks } from '../platform/alert-checks.js';
 
 /**
  * Starts all background work for a running server. Returns a function that stops it.
@@ -16,7 +17,10 @@ export async function startBackground(ctx: AppContext, now: () => Date): Promise
     }
   }, 30_000);
 
+  const stopAlertChecks = startAlertChecks(ctx, now); // A15: until B's scheduler: scheduler.register('alert-checks', ...)
+
   return async () => {
     clearInterval(sweeper);
+    stopAlertChecks();
   };
 }

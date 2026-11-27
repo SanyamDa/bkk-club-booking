@@ -23,8 +23,8 @@ const createBody = z.object({
 
 const statusBody = z.object({ status: z.enum(STATUSES) });
 
-/** `club_profile` columns (§9) the console writes; the only writer before A9 and A17. */
-const profileBody = z
+/** `club_profile` columns (§9) the console writes; A9's staff profile route reuses it. */
+export const profileBody = z
   .object({
     capacityStanding: z.number().int().min(0).nullable(),
     capacitySeated: z.number().int().min(0).nullable(),

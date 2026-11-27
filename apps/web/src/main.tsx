@@ -6,11 +6,16 @@ import { Details } from './pages/Details';
 import { Simulator } from './pages/Simulator';
 import { BookingDetail } from './pages/staff/BookingDetail';
 import { Handoffs } from './pages/staff/Handoffs';
+import { Feed } from './pages/staff/Feed';
 import { StaffLayout } from './pages/staff/Layout';
 import { Login } from './pages/staff/Login';
 import { NewBooking } from './pages/staff/NewBooking';
 import { Night } from './pages/staff/Night';
 import { Settings } from './pages/staff/Settings';
+import { Calendar } from './pages/staff/Calendar';
+import { AcceptInvite } from './pages/staff/AcceptInvite';
+import { Team } from './pages/staff/Team';
+import { PosImport } from './pages/staff/PosImport';
 import { AdminLayout } from './pages/admin/AdminLayout';
 import { ClubDetail } from './pages/admin/ClubDetail';
 import { Clubs } from './pages/admin/Clubs';
@@ -30,12 +35,17 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/liff/details" element={<Details />} />
         <Route path="/dev/simulator" element={<Simulator />} />
         <Route path="/staff/login" element={<Login />} />
+        <Route path="/invite" element={<AcceptInvite />} />
         <Route path="/staff" element={<StaffLayout />}>
           <Route index element={<Night />} />
           <Route path="bookings/:id" element={<BookingDetail />} />
           <Route path="handoffs" element={<Handoffs />} />
+          <Route path="feed" element={<Feed />} />
           <Route path="new" element={<NewBooking />} />
           <Route path="settings" element={<Settings />} />
+          <Route path="calendar" element={<Calendar />} />
+          <Route path="team" element={<Team />} />
+          <Route path="pos" element={<PosImport />} />
         </Route>
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<Clubs />} />

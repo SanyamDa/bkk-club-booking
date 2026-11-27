@@ -1,17 +1,22 @@
-import { and, asc, eq, gte, isNull, lt } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNull, lt } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import type { Db } from '../../db/client.js';
-import { channels, messages, opsEvents, type Club } from '../../db/schema.js';
-import { emit } from '../../data/events.js';
-import { newId } from '../../lib/util.js';
+import { auditLog, channels, clubs, messages, type Club } from '../../db/schema.js';
 import { sampleMessages } from '../../line/samples.js';
-import { describeLineError, runLineSetup, type SetupClients, type SetupReport } from '../../line/setup.js';
+import { describeLineError, rollbackRichMenu, runLineSetup, type RichMenuChange, type SetupReport } from '../../line/setup.js';
 import { credentialSummary, setClubCredential } from '../../platform/credentials.js';
-import { quotaView, type LineSetupDetail } from '../../platform/health.js';
+import { credentialFailure, probeLine, readQuota, recordLineSetup } from '../../platform/line-probe.js';
+import { quotaView } from '../../platform/health.js';
 import type { AuthEnv } from '../auth.js';
 import type { AppContext } from '../context.js';
-import { clubBySlug, freshTotpRefusal, jsonBody, notifyStaffGroup } from './controls.js';
+import { adminAudit, clubBySlug, freshTotpRefusal, jsonBody, notifyStaffGroup } from './controls.js';
+
+const migrateBody = z.object({
+  greeting: z.object({ en: z.string().trim().min(1).max(2000).optional(), th: z.string().trim().min(1).max(2000).optional() }).optional(),
+});
+
+const RICH_MENU_REPLACED = 'line.rich_menu_replaced';
+const RICH_MENU_ROLLED_BACK = 'line.rich_menu_rolled_back';
 
 /** The live test window (spec §12.2 step 4). */
 export const LIVE_TEST_WINDOW_MS = 60_000;
@@ -33,37 +38,6 @@ const num = (v: string | undefined) => {
   return Number.isFinite(n) && n > 0 ? n : 0;
 };
 
-async function readQuota(clients: SetupClients): Promise<{ used: number; limit: number } | null> {
-  try {
-    const [quota, used] = await Promise.all([clients.api.getMessageQuota(), clients.api.getMessageQuotaConsumption()]);
-    return { used: used.totalUsage, limit: quota.type === 'limited' ? (quota.value ?? 0) : 0 };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * One `ops_events` row (kind 'line_setup') plus the `line.setup_run` event, in one transaction.
- * Direct insert until B3's `recordOps` merges.
- */
-async function recordLineSetup(db: Db, club: Club, detail: LineSetupDetail, actorId: string, check: 'setup' | 'status', now: Date) {
-  await db.transaction(async (txRaw) => {
-    const tx = txRaw as unknown as Db;
-    await tx.insert(opsEvents).values({ id: newId(), clubId: club.id, kind: 'line_setup', detail, at: now });
-    await emit(tx, {
-      clubId: club.id,
-      type: 'line.setup_run',
-      occurredAt: now,
-      actorType: 'platform',
-      actorId,
-      channel: 'line',
-      dataOrigin: 'first_party',
-      props: { ok: detail.report.ok, check },
-      isTest: club.status === 'demo',
-    });
-  });
-}
-
 /**
  * LINE wizard backend (plan A5, spec §12.2 "On the call" steps 4–6, §11.1.2). Mounted under /api/admin.
  */
@@ -72,7 +46,6 @@ export function lineWizardRoutes(app: AppContext) {
   const { db } = app.deps;
   /** Live-test windows by club id (in memory: a wizard step, not durable state). */
   const liveTests = new Map<string, Date>();
-  const webhookUrl = (club: Club) => `${app.config.PUBLIC_URL.replace(/\/$/, '')}/line/webhook/${club.slug}`;
 
   async function clientsFor(club: Club) {
     const creds = await app.credentials.line(club);
@@ -80,9 +53,6 @@ export function lineWizardRoutes(app: AppContext) {
     const login = await app.credentials.login(club);
     return { clients: app.lineSetupClients(creds.accessToken, login), login };
   }
-
-  /** A failed 'LINE credentials' step, for a token or API error. */
-  const credentialFailure = (err: unknown): SetupReport => ({ ok: false, steps: [{ name: 'LINE credentials', ok: false, detail: describeLineError(err) }] });
 
   /** Stores the club's LINE credentials (fresh TOTP), notifies the staff group, then runs the LINE setup. */
   r.post('/clubs/:slug/line', async (c) => {
@@ -130,11 +100,11 @@ export function lineWizardRoutes(app: AppContext) {
       });
     } catch (err) {
       report = credentialFailure(err);
-      await recordLineSetup(db, fresh, { report, quota: null }, setBy, 'setup', now);
+      await recordLineSetup(db, fresh, { report, quota: null }, { type: 'platform', id: setBy }, 'setup', now);
       return c.json(report);
     }
     const quota = await readQuota(found.clients);
-    await recordLineSetup(db, fresh, { report, quota }, setBy, 'setup', now);
+    await recordLineSetup(db, fresh, { report, quota }, { type: 'platform', id: setBy }, 'setup', now);
     if (report.bot) {
       await db
         .update(channels)
@@ -152,31 +122,14 @@ export function lineWizardRoutes(app: AppContext) {
     const club = await clubBySlug(db, c.req.param('slug'));
     if (!club) return c.json({ error: 'not_found' }, 404);
     const now = app.deps.now();
-    const expected = webhookUrl(club);
-    let found: NonNullable<Awaited<ReturnType<typeof clientsFor>>>;
-    let bot, hook;
-    try {
-      const f = await clientsFor(club);
-      if (!f) return c.json({ error: 'line_not_configured' }, 409);
-      found = f;
-      [bot, hook] = await Promise.all([found.clients.api.getBotInfo(), found.clients.api.getWebhookEndpoint()]);
-    } catch (err) {
-      const report = credentialFailure(err);
-      await recordLineSetup(db, club, { report, quota: null }, c.var.user.id, 'status', now);
-      return c.json({ error: 'line_error', message: describeLineError(err) }, 502);
+    const probe = await probeLine(app, club);
+    if (!probe.configured) return c.json({ error: 'line_not_configured' }, 409);
+    if (!probe.ok) {
+      await recordLineSetup(db, club, { report: probe.report, quota: null }, { type: 'platform', id: c.var.user.id }, 'status', now);
+      return c.json({ error: 'line_error', message: describeLineError(probe.error) }, 502);
     }
-    const webhookActive = Boolean(hook.active) && hook.endpoint === expected;
-    const rawQuota = await readQuota(found.clients);
-    const report: SetupReport = {
-      ok: webhookActive,
-      steps: [
-        { name: 'LINE credentials', ok: true, detail: `Connected to "${bot.displayName}" (${bot.basicId})` },
-        { name: 'Chat mode', ok: true, detail: bot.chatMode },
-        { name: 'Webhook', ok: webhookActive, detail: webhookActive ? `Active at ${expected}` : `Endpoint ${hook.endpoint || '(none)'}, active ${hook.active}; expected ${expected}` },
-      ],
-      bot: { displayName: bot.displayName, basicId: bot.basicId, chatMode: bot.chatMode, addFriendUrl: `https://line.me/R/ti/p/${encodeURIComponent(bot.basicId)}` },
-    };
-    await recordLineSetup(db, club, { report, quota: rawQuota }, c.var.user.id, 'status', now);
+    const { webhookActive, chatMode, quota: rawQuota, report } = probe;
+    await recordLineSetup(db, club, { report, quota: rawQuota }, { type: 'platform', id: c.var.user.id }, 'status', now);
 
     const quota = quotaView(rawQuota) ?? { limit: 0, used: 0, pct: 0, warn: false };
     const q = c.req.query();
@@ -184,7 +137,7 @@ export function lineWizardRoutes(app: AppContext) {
     const expectedMonthlyPushes = num(q.expectedBookings) * 2 + num(q.hostReplies) + num(q.staffAlerts) * num(q.groupSize);
     return c.json({
       webhookActive,
-      chatMode: bot.chatMode,
+      chatMode,
       quota,
       planCheck: { expectedMonthlyPushes, recommendUpgrade: quota.limit > 0 && expectedMonthlyPushes > quota.limit },
       liveTest: await liveTestState(club.id, now),
@@ -223,6 +176,93 @@ export function lineWizardRoutes(app: AppContext) {
     }
     return failed ? 'fail' : 'pending';
   }
+
+  /**
+   * Greeting and rich menu migration (plan A10, spec §10 Phase 1, §11.1.2 step 4). Imports the
+   * club's existing greeting into settings (pasted text wins; otherwise the setup clients' reader,
+   * which LINE's real API does not offer), then rebuilds the rich menu with `refreshRichMenu`,
+   * keeping the old default menu for rollback. The greeting is a sensitive change (§12.3): fresh
+   * TOTP, before/after in the audit log, and the staff group is told.
+   */
+  r.post('/clubs/:slug/line/migrate', async (c) => {
+    const club = await clubBySlug(db, c.req.param('slug'));
+    if (!club) return c.json({ error: 'not_found' }, 404);
+    const body = await jsonBody(c);
+    const refused = await freshTotpRefusal(app, c, body);
+    if (refused) return refused;
+    const parsed = migrateBody.safeParse(body);
+    if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
+    const now = app.deps.now();
+    const actorId = c.var.user.id;
+
+    let found: Awaited<ReturnType<typeof clientsFor>>;
+    let imported;
+    try {
+      found = await clientsFor(club);
+      if (!found) return c.json({ error: 'line_not_configured' }, 409);
+      imported = parsed.data.greeting ?? (found.clients.readGreeting ? await found.clients.readGreeting() : null);
+    } catch (err) {
+      return c.json({ error: 'line_error', message: describeLineError(err) }, 502);
+    }
+    if (!imported || (!imported.en && !imported.th)) return c.json({ error: 'greeting_unreadable' }, 422);
+
+    const greeting = { en: imported.en ?? club.settings.greeting.en, th: imported.th ?? club.settings.greeting.th };
+    const settings = { ...club.settings, greeting };
+    await db.update(clubs).set({ settings }).where(eq(clubs.id, club.id));
+    await adminAudit(db, c, { clubId: club.id, action: 'club.greeting_imported', entity: 'clubs', entityId: club.id, before: { greeting: club.settings.greeting }, after: { greeting } }, now);
+    const fresh = { ...club, settings };
+
+    let report: SetupReport;
+    // A run that reached LINE reads the quota as the setup route does; a credential failure records
+    // no reading (readers fall back to the last known quota).
+    let quota: Awaited<ReturnType<typeof readQuota>> = null;
+    try {
+      report = await runLineSetup({
+        club: fresh,
+        clients: found.clients,
+        login: found.login,
+        publicUrl: app.config.PUBLIC_URL,
+        sampleMessages: await sampleMessages(db, fresh, app.deps.links, now),
+        refreshRichMenu: true,
+        keepOldRichMenu: true,
+      });
+      quota = await readQuota(found.clients);
+    } catch (err) {
+      report = credentialFailure(err);
+    }
+    await recordLineSetup(db, fresh, { report, quota }, { type: 'platform', id: actorId }, 'setup', now);
+    if (report.richMenu) {
+      await adminAudit(db, c, { clubId: club.id, action: RICH_MENU_REPLACED, entity: 'rich_menu', entityId: report.richMenu.richMenuId, after: report.richMenu }, now);
+    }
+    await notifyStaffGroup(app, fresh, 'The greeting message was imported and the LINE menu was replaced by the platform team.');
+    return c.json({ greeting, report, richMenu: report.richMenu ?? null });
+  });
+
+  /** Puts back the rich menu the last migration replaced, and deletes the new one (plan A10). */
+  r.post('/clubs/:slug/line/rich-menu/rollback', async (c) => {
+    const club = await clubBySlug(db, c.req.param('slug'));
+    if (!club) return c.json({ error: 'not_found' }, 404);
+    const last = await db.query.auditLog.findFirst({
+      where: and(eq(auditLog.clubId, club.id), eq(auditLog.action, RICH_MENU_REPLACED)),
+      orderBy: [desc(auditLog.at)],
+    });
+    const change = (last?.after as RichMenuChange | undefined) ?? null;
+    // A rollback row names the menu it removed, so a replacement is undone at most once.
+    const undone = change
+      ? await db.query.auditLog.findFirst({ where: and(eq(auditLog.clubId, club.id), eq(auditLog.action, RICH_MENU_ROLLED_BACK), eq(auditLog.entityId, change.richMenuId)) })
+      : undefined;
+    if (!change?.previousRichMenuId || undone) return c.json({ error: 'nothing_to_roll_back' }, 409);
+    const now = app.deps.now();
+    try {
+      const found = await clientsFor(club);
+      if (!found) return c.json({ error: 'line_not_configured' }, 409);
+      await rollbackRichMenu(found.clients, change);
+    } catch (err) {
+      return c.json({ error: 'line_error', message: describeLineError(err) }, 502);
+    }
+    await adminAudit(db, c, { clubId: club.id, action: RICH_MENU_ROLLED_BACK, entity: 'rich_menu', entityId: change.richMenuId, before: change, after: { defaultRichMenuId: change.previousRichMenuId } }, now);
+    return c.json({ ok: true, richMenuId: change.previousRichMenuId });
+  });
 
   /** B6's `issueTesterCode` is not merged yet. */
   r.post('/clubs/:slug/tester-code', async (c) => {

@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { requirePlatformAdmin, type AuthEnv } from '../auth.js';
 import type { AppContext } from '../context.js';
+import { calendarRoutes } from './calendar.js';
 import { clubsRoutes } from './clubs.js';
 import { controlsRoutes } from './controls.js';
 import { dataRoutes } from './data.js';
@@ -23,5 +24,6 @@ export function adminRoutes(app: AppContext) {
   r.route('/', supportRoutes(app));
   r.route('/', debugRoutes(app));
   r.route('/', dataRoutes(app));
+  r.route('/', calendarRoutes(app)); // A9 event calendar and city calendar entry
   return r;
 }

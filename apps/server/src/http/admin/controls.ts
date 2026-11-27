@@ -21,7 +21,8 @@ export const jsonBody = (c: Context) => c.req.json().catch(() => null) as Promis
  * Wrong codes count against the user like failed logins (`recordAuthFailure`). After
  * MAX_AUTH_FAILURES the account is locked and the session that guessed is revoked, so a stolen
  * session cookie cannot brute-force the code. A locked account answers 401 `totp_locked`.
- * A correct code clears the failure count.
+ * A correct code clears the failure count. A user with no TOTP secret gets 403
+ * `second_factor_not_enrolled` and no failure is counted.
  */
 export async function freshTotpRefusal(app: AppContext, c: Context<AuthEnv>, body: unknown): Promise<Response | null> {
   const { db } = app.deps;
@@ -31,7 +32,10 @@ export async function freshTotpRefusal(app: AppContext, c: Context<AuthEnv>, bod
   const user = await db.query.users.findFirst({ where: eq(users.id, c.var.user.id) });
   if (!user) return c.json({ error: 'unauthorized' }, 401);
   if (user.lockedUntil && user.lockedUntil > now) return c.json({ error: 'totp_locked' }, 401);
-  if (!user.totpSecret || !verifyTotp(base32Decode(user.totpSecret), code, now)) {
+  // No second factor enrolled (staff accounts until enrolment ships, spec §12.3): refuse without
+  // counting a failure, so trying codes can never lock the account.
+  if (!user.totpSecret) return c.json({ error: 'second_factor_not_enrolled' }, 403);
+  if (!verifyTotp(base32Decode(user.totpSecret), code, now)) {
     const failures = await recordAuthFailure(db, user.id, now);
     if (failures >= MAX_AUTH_FAILURES) {
       await db

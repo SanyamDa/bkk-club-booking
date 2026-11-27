@@ -1,7 +1,20 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { adminApi, saveSupport, type AdminClub, type CredentialSummary } from '../../api';
+import { NightsCalendar, type NightsApi } from '../staff/Calendar';
 import { errText, fmtTime } from './AdminLayout';
+
+/** The club's event calendar, edited on its behalf (spec §12.3 Club data; plan A9). */
+function EventCalendar({ slug, openWeekdays }: { slug: string; openWeekdays?: number[] }) {
+  const nightsApi = useMemo<NightsApi>(() => ({ list: (from, days) => adminApi.nights(slug, from, days), save: (b) => adminApi.saveNight(slug, { ...b }) }), [slug]);
+  return (
+    <div className="card stack">
+      <h2>Event calendar</h2>
+      <p className="faint" style={{ margin: 0 }}>Close a night with its reason, or name an event night. City days (elections, concerts) are entered once B13 ships.</p>
+      <NightsCalendar key={slug} nightsApi={nightsApi} openWeekdays={openWeekdays} />
+    </div>
+  );
+}
 import { HealthTile } from './Clubs';
 import { ClubControls } from './Controls';
 
@@ -150,6 +163,7 @@ export function ClubDetail() {
   const [club, setClub] = useState<AdminClub | null>(null);
   const [profile, setProfile] = useState<Record<string, unknown> | null | undefined>(undefined);
   const [creds, setCreds] = useState<CredentialSummary[]>([]);
+  const [openWeekdays, setOpenWeekdays] = useState<number[] | undefined>();
   const [error, setError] = useState('');
   const [statusError, setStatusError] = useState('');
 
@@ -162,7 +176,11 @@ export function ClubDetail() {
       setError(errText(e));
     }
     // Optional detail route; the profile form starts empty without it.
-    adminApi.club(slug).then((d) => { setProfile(d.profile ?? null); setCreds(d.credentials ?? []); }).catch(() => setProfile(null));
+    adminApi.club(slug).then((d) => {
+      setProfile(d.profile ?? null);
+      setCreds(d.credentials ?? []);
+      setOpenWeekdays((d as { settings?: { openWeekdays?: number[] } }).settings?.openWeekdays);
+    }).catch(() => setProfile(null));
   };
   useEffect(() => { void load(); }, [slug]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -214,6 +232,7 @@ export function ClubDetail() {
           <TimelineJump slug={slug} />
         </div>
         {profile !== undefined && <ProfileEditor slug={slug} initial={profile} />}
+        <EventCalendar slug={slug} openWeekdays={openWeekdays} />
       </div>
       <div className="side stack" style={{ gap: 20 }}>
         <SupportStart club={club} />

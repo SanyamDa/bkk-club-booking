@@ -6,7 +6,7 @@ import type { ResponseRecord } from '../../src/app.js';
 import { holdTable } from '../../src/bookings/service.js';
 import type { Config } from '../../src/config.js';
 import type { Db } from '../../src/db/client.js';
-import { clubMemberships, conversations, deposits, guests, rawWebhooks, tables, users, type Club, type MembershipRole } from '../../src/db/schema.js';
+import { alerts, clubMemberships, conversations, deposits, guests, invites, rawWebhooks, tables, users, type Club, type MembershipRole } from '../../src/db/schema.js';
 import type { AppContext } from '../../src/http/context.js';
 import { newId } from '../../src/lib/util.js';
 import { hashPassword } from '../../src/platform/passwords.js';
@@ -216,5 +216,16 @@ export async function isolationFixtures(db: Db, club: Club): Promise<Record<stri
   // A5 debug routes (`/api/admin/clubs/:slug/webhooks/:id/replay`).
   const rawWebhookId = newId();
   await db.insert(rawWebhooks).values({ id: rawWebhookId, clubId: club.id, channel: 'line', body: { events: [] }, signatureOk: true });
-  return { 'bookings/:id': booking.id, 'conversations/:id': conversationId, 'deposits/:id': depositId, 'webhooks/:id': rawWebhookId };
+  // A15 alerts feed (`/api/staff/clubs/:slug/feed/:id/resolve`): one open needs-input alert.
+  const alertId = newId();
+  await db.insert(alerts).values({ id: alertId, clubId: club.id, level: 'needs_input', kind: 'isolation', textEn: 'isolation', textTh: 'isolation', createdAt: FIXTURE_NOW });
+  // A8 team routes (`/team/invites/:id`, `/team/members/:userId`): one pending invite and one host.
+  const inviteId = newId();
+  await db.insert(invites).values({ id: inviteId, clubId: club.id, email: `invitee-${inviteId}@test.local`, role: 'host', tokenHash: `isolation-${inviteId}`, expiresAt: new Date('2100-01-01T00:00:00Z') });
+  const memberId = newId();
+  await db.insert(users).values({ id: memberId, email: `member-${memberId}@test.local`, name: 'Isolation Member' });
+  await db.insert(clubMemberships).values({ userId: memberId, clubId: club.id, role: 'host' });
+  // A9 settings routes (`/zones/:id`, `/tables/:id`): the club's own zone and table.
+  const zonesAndTables = { 'zones/:id': table.zoneId, 'tables/:id': table.id };
+  return { 'bookings/:id': booking.id, 'conversations/:id': conversationId, 'deposits/:id': depositId, 'webhooks/:id': rawWebhookId, 'feed/:id': alertId, 'invites/:id': inviteId, 'members/:userId': memberId, ...zonesAndTables };
 }

@@ -38,6 +38,10 @@ import { currentNightDate, formatNight } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
 import { requireClubRole, type AuthEnv, type Role } from './auth.js';
 import type { AppContext } from './context.js';
+import { staffAlertRoutes } from './staff-alerts.js';
+import { staffPosRoutes } from './staff-pos.js';
+import { staffSettingsRoutes } from './staff-settings.js';
+import { teamRoutes } from './team.js';
 
 /** Roles per route (plan A2 Decisions). */
 const STAFF_ROLES: Role[] = ['owner', 'manager', 'host', 'door'];
@@ -66,6 +70,10 @@ export function staffRoutes(app: AppContext) {
 
   const staff = requireClubRole(app, ...STAFF_ROLES);
   const managers = requireClubRole(app, ...MANAGER_ROLES);
+
+  r.route('/', staffPosRoutes(app)); // A11 POS report import
+  r.route('/', teamRoutes(app)); // A8 staff accounts and invites
+  r.route('/', staffSettingsRoutes(app)); // A9 settings, prices, nights calendar, profile, quota
 
   /** A staff-surface event for the club in the URL, attributed to the signed-in person. */
   function staffEvent(c: StaffContext, e: Omit<EventInput, 'clubId' | 'occurredAt' | 'actorType' | 'actorId' | 'dataOrigin' | 'isTest'>) {
@@ -348,6 +356,8 @@ export function staffRoutes(app: AppContext) {
       liffEndpoint: `${app.config.PUBLIC_URL.replace(/\/$/, '')}/liff/details`,
       liffConfigured: Boolean(club.liffId),
       promptpayConfigured: Boolean(club.promptpayId),
+      // The PromptPay and greeting editors need a fresh second-factor code (spec §12.3).
+      secondFactorEnrolled: Boolean(c.var.user.totpSecret),
       settings: club.settings,
     });
   });
@@ -412,6 +422,9 @@ export function staffRoutes(app: AppContext) {
       headers: { 'content-type': type, 'content-length': String(info.size), 'cache-control': 'private, no-store' },
     });
   });
+
+  // ----- Alerts feed, counter, resolve, LINE switch (A15) -----
+  r.route('/', staffAlertRoutes(app));
 
   return r;
 }

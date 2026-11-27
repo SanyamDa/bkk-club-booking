@@ -81,11 +81,22 @@ export interface SetupStep {
   detail: string;
 }
 
+/** A rich menu we installed, and the default it replaced (kept for rollback, plan A10). */
+export interface RichMenuChange {
+  richMenuId: string;
+  previousRichMenuId: string | null;
+}
+
 export interface SetupReport {
   ok: boolean;
   steps: SetupStep[];
   bot?: { displayName: string; basicId: string; chatMode: string; addFriendUrl: string };
+  /** Set when this run installed a rich menu. */
+  richMenu?: RichMenuChange;
 }
+
+/** A club's greeting text, one or both languages. */
+export type GreetingText = { en?: string; th?: string };
 
 export function describeLineError(err: unknown): string {
   if (err instanceof HTTPFetchError) {
@@ -111,6 +122,7 @@ export interface SetupClients {
     | 'getWebhookEndpoint'
     | 'testWebhookEndpoint'
     | 'getRichMenuList'
+    | 'getDefaultRichMenuId'
     | 'deleteRichMenu'
     | 'createRichMenu'
     | 'setDefaultRichMenu'
@@ -123,6 +135,12 @@ export interface SetupClients {
   updateLiffEndpoint?: (liffId: string, url: string) => Promise<void>;
   /** True when the club uses the platform's shared login channel and LIFF app (A4b). */
   loginShared?: boolean;
+  /**
+   * Reads the OA's current greeting message (plan A10). LINE's Messaging API has no endpoint for
+   * it, so the real clients leave this unset and the founder pastes the text instead; the fake
+   * returns its stored greeting. `null` means it could not be read.
+   */
+  readGreeting?: () => Promise<GreetingText | null>;
 }
 
 /** Points a LIFF app at `url`, using a short-lived token of the LINE Login channel that owns it. */
@@ -155,7 +173,25 @@ export function realSetupClients(accessToken: string, login: LoginChannel | null
  * Local fake LINE (config.LINE_FAKE): same shape as `realSetupClients`, no network, and every
  * setup step reports green, so the console wizard can be walked with made-up credentials.
  */
-export function fakeSetupClients(_accessToken: string, login: LoginChannel | null): SetupClients {
+/** What the fake LINE account holds: its rich menus, the default one and the greeting (plan A10). */
+export interface FakeLineState {
+  menus: { richMenuId: string; name: string }[];
+  defaultRichMenuId: string | null;
+  greeting: GreetingText | null;
+  nextId: number;
+}
+
+export const fakeLineState = (): FakeLineState => ({
+  menus: [],
+  defaultRichMenuId: null,
+  greeting: { en: 'Welcome! (greeting imported from the fake LINE account)', th: 'ยินดีต้อนรับ (ข้อความทักทายจากบัญชี LINE จำลอง)' },
+  nextId: 1,
+});
+
+/** Shared by every fake client of a local LINE_FAKE run, so a menu rollback can be walked. */
+const defaultFakeLine = fakeLineState();
+
+export function fakeSetupClients(_accessToken: string, login: LoginChannel | null, line: FakeLineState = defaultFakeLine): SetupClients {
   let endpoint = '';
   const ok = async () => ({});
   return {
@@ -167,10 +203,25 @@ export function fakeSetupClients(_accessToken: string, login: LoginChannel | nul
       },
       getWebhookEndpoint: async () => ({ endpoint, active: true }),
       testWebhookEndpoint: async () => ({ success: true, timestamp: new Date().toISOString(), statusCode: 200, reason: 'OK', detail: '200' }),
-      getRichMenuList: async () => ({ richmenus: [] }),
-      deleteRichMenu: ok,
-      createRichMenu: async () => ({ richMenuId: 'richmenu-fake' }),
-      setDefaultRichMenu: ok,
+      getRichMenuList: async () => ({ richmenus: line.menus.map((m) => ({ ...m })) }),
+      getDefaultRichMenuId: async () => {
+        if (!line.defaultRichMenuId) throw new Error('no default rich menu');
+        return { richMenuId: line.defaultRichMenuId };
+      },
+      deleteRichMenu: async (id: string) => {
+        line.menus = line.menus.filter((m) => m.richMenuId !== id);
+        if (line.defaultRichMenuId === id) line.defaultRichMenuId = null;
+        return {};
+      },
+      createRichMenu: async (req: { name: string }) => {
+        const richMenuId = `richmenu-fake-${line.nextId++}`;
+        line.menus.push({ richMenuId, name: req.name });
+        return { richMenuId };
+      },
+      setDefaultRichMenu: async (id: string) => {
+        line.defaultRichMenuId = id;
+        return {};
+      },
       validateReply: ok,
       getMessageQuota: async () => ({ type: 'none' }),
       getMessageQuotaConsumption: async () => ({ totalUsage: 0 }),
@@ -178,7 +229,27 @@ export function fakeSetupClients(_accessToken: string, login: LoginChannel | nul
     blob: { setRichMenuImage: ok } as unknown as SetupClients['blob'],
     loginShared: Boolean(login?.shared),
     updateLiffEndpoint: login && !login.shared ? async () => {} : undefined,
+    readGreeting: async () => (line.greeting ? { ...line.greeting } : null),
   };
+}
+
+/** The OA's current default rich menu id, or null when none is set (LINE answers 404). */
+async function currentDefaultRichMenuId(clients: SetupClients): Promise<string | null> {
+  try {
+    return (await clients.api.getDefaultRichMenuId()).richMenuId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Undoes a rich-menu replacement (plan A10): the kept menu becomes the default again and the new
+ * one is deleted.
+ */
+export async function rollbackRichMenu(clients: SetupClients, change: RichMenuChange): Promise<void> {
+  if (!change.previousRichMenuId) throw new Error('no previous rich menu to restore');
+  await clients.api.setDefaultRichMenu(change.previousRichMenuId);
+  await clients.api.deleteRichMenu(change.richMenuId);
 }
 
 export async function runLineSetup(opts: {
@@ -189,6 +260,8 @@ export async function runLineSetup(opts: {
   publicUrl: string;
   sampleMessages: Message[];
   refreshRichMenu?: boolean;
+  /** With `refreshRichMenu`: keep the menus already there (the old default is kept for rollback). */
+  keepOldRichMenu?: boolean;
   webhookRetries?: number;
   retryDelayMs?: number;
 }): Promise<SetupReport> {
@@ -253,11 +326,14 @@ export async function runLineSetup(opts: {
     if (ours.length > 0 && !opts.refreshRichMenu) {
       step('Rich menu', true, 'Already installed (use --refresh-menu to rebuild it).');
     } else {
-      for (const m of ours) await clients.api.deleteRichMenu(m.richMenuId);
+      const previousRichMenuId = await currentDefaultRichMenuId(clients);
+      if (!opts.keepOldRichMenu) for (const m of ours) await clients.api.deleteRichMenu(m.richMenuId);
       const { richMenuId } = await clients.api.createRichMenu(richMenuRequest(club));
       const png = renderRichMenuPng(club);
       await clients.blob.setRichMenuImage(richMenuId, new Blob([new Uint8Array(png)], { type: 'image/png' }));
       await clients.api.setDefaultRichMenu(richMenuId);
+      const deleted = !opts.keepOldRichMenu && ours.some((m) => m.richMenuId === previousRichMenuId);
+      report.richMenu = { richMenuId, previousRichMenuId: deleted ? null : previousRichMenuId };
       step('Rich menu', true, 'Installed: Book a table · My booking · Location · Talk to a host.');
     }
   } catch (err) {

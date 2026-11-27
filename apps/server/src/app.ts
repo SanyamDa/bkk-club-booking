@@ -17,10 +17,12 @@ import type { AppContext } from './http/context.js';
 import { liffRoutes } from './http/liff.js';
 import { mediaRoutes } from './http/media.js';
 import { staffRoutes } from './http/staff.js';
+import { inviteAcceptRoutes } from './http/team.js';
 import { webhookRoutes } from './http/webhook.js';
 import { dbCredentialStore, envCredentialStore, onlyDemoClubs } from './line/credentials.js';
-import { GatewayRegistry } from './line/gateway.js';
+import { GatewayRegistry, type LineGateway, type Message } from './line/gateway.js';
 import { lineIdTokenVerifier } from './line/idtoken.js';
+import { registerStaffAlertSender } from './platform/alerts.js';
 import { fakeLiffEndpointUpdater, fakeSetupClients, realLiffEndpointUpdater, realSetupClients } from './line/setup.js';
 import { fakeLineTokenIssuer, realLineTokenIssuer } from './line/tokens.js';
 
@@ -80,6 +82,24 @@ export function createApp(
     updateLiffEndpoint: opts.updateLiffEndpoint ?? (config.LINE_FAKE ? fakeLiffEndpointUpdater : realLiffEndpointUpdater),
   };
 
+  // A15: urgent alerts (and info ones the club switched on) reach the staff LINE group through the outbox.
+  // When the club's LINE token cannot be issued (bad credentials: the line_disconnected case), the
+  // staff row is still recorded and the outbox logs the failed push; the throw tells raiseAlert
+  // the alert was not sent, and raiseAlert never passes it on.
+  registerStaffAlertSender(db, async (club, text) => {
+    const msgs = [{ type: 'text', text } as Message];
+    let gateway: LineGateway;
+    try {
+      gateway = await gateways.forClub(club);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const down = { push: async () => { throw new Error(`club LINE channel unavailable: ${reason}`); } } as unknown as LineGateway;
+      await deps.outbox.toStaff(down, club, msgs);
+      throw err;
+    }
+    await deps.outbox.toStaff(gateway, club, msgs);
+  });
+
   const app = new Hono();
   const onResponse = opts.onResponse;
   if (onResponse) {
@@ -95,6 +115,7 @@ export function createApp(
   app.route('/line/webhook', webhookRoutes(ctx));
   app.route('/media', mediaRoutes(ctx));
   app.route('/api/liff', liffRoutes(ctx));
+  app.route('/api/auth/invites', inviteAcceptRoutes(ctx)); // A8
   app.route('/api/auth', authRoutes(ctx));
   app.route('/api/staff', staffRoutes(ctx));
   app.route('/api/admin', adminRoutes(ctx));

@@ -74,8 +74,12 @@ export function StaffLayout() {
           <NavLink to="/staff/handoffs">
             Chats{handoffCount > 0 && <span className="badge">{handoffCount}</span>}
           </NavLink>
+          <NavLink to="/staff/feed">Alerts</NavLink>
           <NavLink to="/staff/new">New booking</NavLink>
+          <NavLink to="/staff/pos">POS import</NavLink>
+          <NavLink to="/staff/calendar">Calendar</NavLink>
           <NavLink to="/staff/settings">Setup</NavLink>
+          <NavLink to="/staff/team">Team</NavLink>
           <button className="btn small" onClick={logout}>Log out</button>
         </nav>
       </header>

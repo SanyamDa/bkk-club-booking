@@ -1,6 +1,89 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { adminApi, ApiError, type CredentialSummary, type LineStatusAdmin, type PlanInputs, type SetupReport } from '../../api';
+import { adminApi, api, ApiError, type CredentialSummary, type LineStatusAdmin, type PlanInputs, type SetupReport } from '../../api';
+
+type RichMenuChange = { richMenuId: string; previousRichMenuId: string | null };
+type MigrateResult = { greeting: { en: string; th: string }; report: SetupReport; richMenu: RichMenuChange | null };
+
+/** A10 calls, kept here so this page does not touch the shared api.tsx. */
+const migrationApi = {
+  migrate: (slug: string, b: { totp: string; greeting?: { en?: string; th?: string } }) =>
+    api<MigrateResult>(`/api/admin/clubs/${encodeURIComponent(slug)}/line/migrate`, { body: b }),
+  rollbackMenu: (slug: string) => api<{ ok: true; richMenuId: string }>(`/api/admin/clubs/${encodeURIComponent(slug)}/line/rich-menu/rollback`, { body: {} }),
+};
+
+/**
+ * Step 7 (plan A10): the club's old greeting moves into our settings (we send it from now on) and
+ * the rich menu is replaced; the old menu is kept so it can be put back.
+ */
+function Migration({ slug }: { slug: string }) {
+  const [en, setEn] = useState('');
+  const [th, setTh] = useState('');
+  const [totp, setTotp] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState<MigrateResult | null>(null);
+  const [rolledBack, setRolledBack] = useState('');
+
+  async function migrate(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    setRolledBack('');
+    try {
+      const greeting = en.trim() || th.trim() ? { ...(en.trim() ? { en: en.trim() } : {}), ...(th.trim() ? { th: th.trim() } : {}) } : undefined;
+      setResult(await migrationApi.migrate(slug, { totp, ...(greeting ? { greeting } : {}) }));
+    } catch (err) {
+      setError(err instanceof ApiError && err.status === 422 ? 'LINE does not let us read the greeting. Paste the club’s current greeting text above.' : errText(err));
+    } finally {
+      setTotp('');
+      setBusy(false);
+    }
+  }
+
+  async function rollback() {
+    setError('');
+    try {
+      setRolledBack((await migrationApi.rollbackMenu(slug)).richMenuId);
+    } catch (err) {
+      setError(err instanceof ApiError && err.status === 409 ? 'Nothing to roll back.' : errText(err));
+    }
+  }
+
+  return (
+    <form className="stack" onSubmit={migrate} autoComplete="off">
+      <p className="faint" style={{ margin: 0 }}>Copy the greeting from OA Manager before switching it off. Leave both empty to read it from LINE where possible.</p>
+      <div className="field">
+        <label htmlFor="m-en">Current greeting (English)</label>
+        <textarea id="m-en" className="input" rows={3} value={en} onChange={(e) => setEn(e.target.value)} />
+      </div>
+      <div className="field">
+        <label htmlFor="m-th">Current greeting (Thai)</label>
+        <textarea id="m-th" className="input" rows={3} value={th} onChange={(e) => setTh(e.target.value)} />
+      </div>
+      <TotpField id="m-totp" value={totp} onChange={setTotp} />
+      {error && <div className="error">{error}</div>}
+      <div className="row wrap">
+        <button className="btn primary" disabled={busy || totp.length !== 6}>{busy ? 'Migrating…' : 'Import greeting and replace menu'}</button>
+        {result?.richMenu?.previousRichMenuId && !rolledBack && (
+          <button type="button" className="btn small" onClick={rollback}>Roll back rich menu</button>
+        )}
+      </div>
+      {result && (
+        <div className="stack" style={{ gap: 6 }}>
+          <div className="faint" style={{ whiteSpace: 'pre-wrap' }}>Greeting saved. EN: {result.greeting.en}{'\n'}TH: {result.greeting.th}</div>
+          {result.report.steps.filter((st) => st.name === 'Rich menu').map((st) => (
+            <div key={st.name} className="row"><Ok ok={st.ok} /> <span>{st.detail}</span></div>
+          ))}
+          {result.richMenu && (
+            <div className="faint mono">New menu {result.richMenu.richMenuId} · old menu {result.richMenu.previousRichMenuId ?? '(none)'} kept for rollback</div>
+          )}
+        </div>
+      )}
+      {rolledBack && <div className="faint">Old menu {rolledBack} is the default again.</div>}
+    </form>
+  );
+}
 import { errText, fmtTime, Ok, TotpField } from './AdminLayout';
 
 /**
@@ -268,6 +351,10 @@ export function LineWizard() {
           </dl>
         )}
         <p className="faint" style={{ margin: 0 }}>When everything is green, switch the club to live on the club page.</p>
+      </Step>
+
+      <Step n={7} minute="any time" title="Greeting and rich menu migration" who="Platform" done={undefined}>
+        <Migration slug={slug} />
       </Step>
     </div>
   );

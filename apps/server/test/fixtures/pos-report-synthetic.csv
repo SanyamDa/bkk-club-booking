@@ -1,0 +1,5 @@
+Bill No,Table,Guests,Open Time,Close Time,Net Sales,Payment,Note
+INV-0001,B1,6,2026-11-27 22:15,2026-11-28 02:40,"18,450.00",Card,"Birthday, cake on arrival"
+INV-0002,T1,2,2026-11-27 23:05,2026-11-28 00:30,"3,200.00",Cash,
+INV-0003,,1,2026-11-28 00:10,2026-11-28 00:25,450.00,Cash,Bar walk-in
+INV-0004,V2,8,2026-11-28 01:30,2026-11-28 04:55,"26,900.50",Transfer,

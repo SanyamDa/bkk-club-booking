@@ -5,6 +5,8 @@ import { runAlertChecks } from '../platform/alert-checks.js';
 import { sendWeeklyReports } from '../platform/club-report.js';
 import { runBrainExpiry, sendBrainDigests } from './brain-expiry.js';
 import { runNightlyCheck } from './nightly-check.js';
+import { releaseNoShows } from './no-show.js';
+import { sendDueReminders } from './reminders.js';
 import { Scheduler } from './scheduler.js';
 
 const MINUTE = 60_000;
@@ -32,6 +34,12 @@ export function buildScheduler(ctx: AppContext, now: () => Date): Scheduler {
   s.register('brain-expiry', 15 * MINUTE, async (at) => {
     await runBrainExpiry(db, at); // B15
     await sendBrainDigests(db, at);
+  });
+  s.register('reminders', MINUTE, async (at) => {
+    await sendDueReminders(ctx, at); // B10
+  });
+  s.register('no-show', MINUTE, async (at) => {
+    await releaseNoShows(ctx, at); // B10
   });
   return s;
 }

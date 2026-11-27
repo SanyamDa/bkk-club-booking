@@ -60,6 +60,14 @@ export interface ClubSettings {
   address: string;
   mapUrl: string;
   drinksMenuUrl?: string;
+  /** B10: day-of reminder time, `HH:MM` Bangkok on the night (default 18:00). */
+  reminderTime?: string;
+  /** B10: minutes after `arrivalBy` (plus any running-late minutes) before a table is released (default 30). */
+  arrivalGraceMinutes?: number;
+  /** B10: a guest's "running late" pushes the release time back (default true). */
+  runningLateExtendsRelease?: boolean;
+  /** B10: the no-show job marks unarrived bookings no-show and releases the table (default true). */
+  autoNoShow?: boolean;
 }
 
 export const clubs = pgTable('clubs', {

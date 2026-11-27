@@ -70,6 +70,20 @@ export class Notifier {
     ]);
   }
 
+  /** B10: day-of reminder with [Running late] [Need to cancel] [Location]. A push (counts against quota). */
+  async reminder(booking: Booking) {
+    const c = await this.ctx(booking.clubId, booking.id);
+    if (!c) return;
+    await this.deps.outbox.toGuest(c.gateway, c.club, c.view.guest, [M.reminder(c.club, c.lang, c.view)]);
+  }
+
+  /** B10: the no-show job released a table; the staff group is told. */
+  async noShowReleased(booking: Booking) {
+    const c = await this.ctx(booking.clubId, booking.id);
+    if (!c) return;
+    await this.deps.outbox.toStaff(c.gateway, c.club, [M.staffNoShow(c.view)]);
+  }
+
   /** Free-text reply typed by a host in the dashboard. */
   async hostReply(clubId: string, guestId: string, text: string, _actor: Actor) {
     const guest = await this.deps.db.query.guests.findFirst({

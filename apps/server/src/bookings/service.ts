@@ -657,6 +657,51 @@ export const markArrived = (db: Db, clubId: string, id: string, actor: Actor, no
 export const markNoShow = (db: Db, clubId: string, id: string, actor: Actor, now: Date) =>
   transition(db, clubId, id, ['confirmed'], 'no_show', actor, now, undefined, { set: { noShowAt: now } });
 
+/**
+ * B10 no-show job: a confirmed booking past its release time becomes `no_show` through
+ * `changeStatus` and its table is released with `releaseTable`, in one transaction.
+ */
+export async function releaseNoShow(db: Db, clubId: string, bookingId: string, actor: Actor, now: Date): Promise<Booking> {
+  return db.transaction(async (tx) => {
+    const booking = await tx.query.bookings.findFirst({ where: and(eq(bookings.id, bookingId), eq(bookings.clubId, clubId)) });
+    if (!booking) throw new BookingError('not_found');
+    if (booking.status !== 'confirmed') throw new BookingError('invalid_state', `Cannot release a ${booking.status} booking`);
+    const updated = await changeStatus(tx, booking, 'no_show', actor, { code: 'released', text: 'Not arrived by the release time' }, now, {
+      set: { noShowAt: now },
+    });
+    await releaseTable(tx, updated, actor, now);
+    return { ...updated, releasedAt: now };
+  });
+}
+
+/** Minutes a guest may say they are running late (spec §5.2 step 8). */
+export const RUNNING_LATE_MINUTES = [15, 30, 60] as const;
+
+/**
+ * B10: the guest is running late. Sets `running_late_minutes` on their confirmed booking, with an
+ * audit row and a `running_late` event in one transaction. Not a status change.
+ */
+export async function setRunningLate(db: Db, clubId: string, bookingId: string, actor: Actor, minutes: number, now: Date): Promise<Booking> {
+  if (!(RUNNING_LATE_MINUTES as readonly number[]).includes(minutes)) throw new BookingError('invalid_state', 'Unsupported minutes');
+  return db.transaction(async (tx) => {
+    const booking = await tx.query.bookings.findFirst({ where: and(eq(bookings.id, bookingId), eq(bookings.clubId, clubId)) });
+    if (!booking) throw new BookingError('not_found');
+    if (booking.status !== 'confirmed') throw new BookingError('invalid_state', `Cannot change a ${booking.status} booking`);
+    const [updated] = await tx
+      .update(bookings)
+      .set({ runningLateMinutes: minutes, updatedAt: now })
+      .where(and(eq(bookings.id, bookingId), eq(bookings.clubId, clubId)))
+      .returning();
+    await audit(tx, clubId, actor, 'running_late', bookingId, { minutes }, {
+      before: { runningLateMinutes: booking.runningLateMinutes },
+      after: { runningLateMinutes: minutes },
+      at: now,
+    });
+    await emit(tx, { ...bookingEventBase(updated!, actor, now), type: 'running_late', props: { minutes } });
+    return updated!;
+  });
+}
+
 /** Expires the stale holds on one table and night, inside the caller's transaction. */
 async function expireStaleOnTable(tx: Db, tableId: string, nightDate: string, now: Date) {
   const stale = await tx

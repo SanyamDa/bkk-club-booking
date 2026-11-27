@@ -33,6 +33,7 @@ import { WebhookLog } from './pages/admin/WebhookLog';
 import { OnboardForm } from './pages/onboard/OnboardForm';
 import { InboxPanel } from './pages/staff/InboxPanel';
 import { Brain } from './pages/staff/brain/Brain';
+import { Door } from './pages/door/Door';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -45,6 +46,7 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/invite" element={<AcceptInvite />} />
         <Route path="/inbox-panel" element={<InboxPanel />} />
         <Route path="/onboard/:token" element={<OnboardForm />} />
+        <Route path="/door" element={<Door />} />
         <Route path="/staff" element={<StaffLayout />}>
           <Route index element={<Night />} />
           <Route path="bookings/:id" element={<BookingDetail />} />

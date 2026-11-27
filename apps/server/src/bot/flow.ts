@@ -7,7 +7,10 @@ import {
   availableTables,
   BookingError,
   bookingAwaitingSlip,
+  cancelBooking,
   currentBookingForGuest,
+  RUNNING_LATE_MINUTES,
+  setRunningLate,
   getBookingView,
   holdTable,
   isNightBookable,
@@ -24,13 +27,15 @@ import {
   conversations,
   guests,
   messages as messagesTable,
+  tables as tablesTable,
   type Club,
   type Conversation,
   type Guest,
 } from '../db/schema.js';
 import type { LineGateway, Message } from '../line/gateway.js';
 import type { Outbox } from '../line/outbox.js';
-import { formatNight } from '../lib/time.js';
+import { formatClock, formatNight } from '../lib/time.js';
+import { releaseAt } from '../jobs/no-show.js';
 import { newId } from '../lib/util.js';
 import { langOf, t, type Lang } from './i18n.js';
 import { detectIntent, testerCodeIn } from './intents.js';
@@ -39,6 +44,8 @@ import { isTestContext, isTestGuestAtCreate, redeemTesterCode } from '../data/te
 import type { Links } from './links.js';
 import * as M from './messages.js';
 import { handleStaffLink } from './staff-link.js';
+import { answerGuestMessage, extractContext, type ModelClient } from '../brain/answer.js';
+import { extractBookingDetails, hasBookingDetails, looksLikeBookingRequest, paxKeyFor, type BookingDetails } from '../brain/extract.js';
 
 export interface BotDeps {
   db: Db;
@@ -47,6 +54,8 @@ export interface BotDeps {
   uploadsDir: string;
   now: () => Date;
   log: (msg: string, err?: unknown) => void;
+  /** B16: AI answers for free text; null or absent keeps the keyword rules and the menu. */
+  ai?: ModelClient | null;
 }
 
 interface Turn {
@@ -200,14 +209,18 @@ async function handleText(turn: Turn, text: string) {
     case 'my_booking':
       await showMyBooking(turn);
       return;
-    case 'book':
-      await startBooking(turn);
+    case 'book': {
+      // B16: "โต๊ะ 6 คน เสาร์นี้" jumps past the steps the guest already answered.
+      const details = extractBookingDetails(text, await extractContext(turn.deps.db, turn.club, turn.now));
+      if (hasBookingDetails(details)) await prefillBooking(turn, details);
+      else await startBooking(turn);
       return;
+    }
     case 'location':
       await send(turn, [M.plain(`${turn.club.settings.address}\n${turn.club.settings.mapUrl}`, M.menuQuickReplies(turn.club, turn.lang))]);
       return;
     default:
-      await send(turn, [M.menu(turn.club, turn.lang)]);
+      await handleFreeText(turn, text);
   }
 }
 
@@ -247,9 +260,67 @@ async function handlePostback(turn: Turn, data: string, params?: webhook.Postbac
     case 'host':
       await requestHandoff(turn, 'Guest tapped "Talk to a host"');
       return;
+    case 'late': // B10
+      await runningLate(turn, p.get('b') ?? '', p.get('m'));
+      return;
+    case 'cancel': // B10
+      await guestCancel(turn, p.get('b') ?? '', false);
+      return;
+    case 'cancel_yes': // B10
+      await guestCancel(turn, p.get('b') ?? '', true);
+      return;
     default:
       await send(turn, [M.menu(turn.club, turn.lang)]);
   }
+}
+
+// ---------- B10: running late and guest cancel ----------
+
+/** The guest's own confirmed booking, or undefined (another guest's id, another club's, or not confirmed). */
+async function ownConfirmed(turn: Turn, bookingId: string) {
+  const view = await getBookingView(turn.deps.db, { clubId: turn.club.id, id: bookingId });
+  if (!view || view.booking.guestId !== turn.guest.id || view.booking.status !== 'confirmed') return undefined;
+  return view;
+}
+
+async function cannotChange(turn: Turn) {
+  await send(turn, [M.plain(t(turn.lang, 'cannotChangeBooking'), M.menuQuickReplies(turn.club, turn.lang))]);
+}
+
+/** Spec §5.2 step 8: [15 min] [30 min] [1 hr]; the host is alerted and the release time moves when the club allows. */
+async function runningLate(turn: Turn, bookingId: string, minutesParam: string | null) {
+  const view = await ownConfirmed(turn, bookingId);
+  if (!view) return cannotChange(turn);
+  const minutes = Number(minutesParam);
+  if (!(RUNNING_LATE_MINUTES as readonly number[]).includes(minutes)) {
+    await send(turn, [M.askLate(turn.lang, bookingId)]);
+    return;
+  }
+  const actor = { type: 'guest' as const, id: turn.guest.id };
+  const updated = await setRunningLate(turn.deps.db, turn.club.id, bookingId, actor, minutes, turn.now);
+  const until = formatClock(releaseAt(turn.club, updated));
+  await send(turn, [M.plain(t(turn.lang, 'lateNoted', { code: view.table.code, time: until }), M.menuQuickReplies(turn.club, turn.lang))]);
+  await staff(turn, [M.staffRunningLate({ ...view, booking: updated }, minutes, until)]);
+}
+
+/** Spec §5.2 step 8: the policy is shown first; on confirm the booking is cancelled and the host alerted. */
+async function guestCancel(turn: Turn, bookingId: string, confirmed: boolean) {
+  const view = await ownConfirmed(turn, bookingId);
+  if (!view) return cannotChange(turn);
+  if (!confirmed) {
+    await send(turn, [M.cancelAsk(turn.club, turn.lang, view)]);
+    return;
+  }
+  try {
+    await cancelBooking(turn.deps.db, turn.club.id, bookingId, { type: 'guest', id: turn.guest.id }, { code: 'guest_cancelled', text: 'Guest cancelled in chat' }, turn.now);
+  } catch (err) {
+    if (err instanceof BookingError) return cannotChange(turn);
+    throw err;
+  }
+  await send(turn, [
+    M.plain(t(turn.lang, 'cancelledByGuest', { ref: view.booking.refCode, night: formatNight(view.booking.nightDate, turn.lang) }), M.menuQuickReplies(turn.club, turn.lang)),
+  ]);
+  await staff(turn, [M.staffGuestCancelled(view)]);
 }
 
 // ---------- Booking steps ----------
@@ -334,14 +405,14 @@ async function sendTables(turn: Turn, nightDate: string, key: string, prefix: Me
   await send(turn, [...prefix, ...M.tablesCarousel(turn.club, turn.lang, options, nightDate, label)]);
 }
 
-async function chooseTable(turn: Turn, tableId: string, nightDate: string) {
+async function chooseTable(turn: Turn, tableId: string, nightDate: string, guestPax?: number) {
   const key = turn.conv.state.paxRange ?? '2-4';
   const range = paxRange(key)!;
   try {
     const booking = await holdTable(
       turn.deps.db,
       turn.club,
-      { guestId: turn.guest.id, tableId, nightDate, pax: range.max > SELF_BOOK_MAX_PAX ? range.min : range.max },
+      { guestId: turn.guest.id, tableId, nightDate, pax: guestPax ?? (range.max > SELF_BOOK_MAX_PAX ? range.min : range.max) },
       turn.now,
     );
     const view = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: booking.id }))!;
@@ -444,7 +515,9 @@ async function showMyBooking(turn: Turn) {
   }
   const view = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: current.id }))!;
   if (current.status === 'confirmed') {
-    await send(turn, [M.confirmation(turn.club, turn.lang, view, turn.deps.links.pass(current))]);
+    // B10: My booking offers [Running late] [Cancel] [Talk to a host] (spec §5.3).
+    const card = M.confirmation(turn.club, turn.lang, view, turn.deps.links.pass(current));
+    await send(turn, [{ ...card, quickReply: { items: M.bookingActions(turn.lang, current.id) } } as Message]);
     return;
   }
   if (current.status === 'held' || current.status === 'awaiting_payment') {
@@ -454,7 +527,73 @@ async function showMyBooking(turn: Turn) {
   await send(turn, [M.alreadyBooked(turn.club, turn.lang, view)]);
 }
 
-async function requestHandoff(turn: Turn, reason: string, opts: { silent?: boolean } = {}) {
+// ---------- AI answers (B16) ----------
+
+/**
+ * Free text the keyword rules did not route. Booking details found by the deterministic pass jump
+ * into the flow with no model call ("17A sat 6ppl"); otherwise the AI answers from the club brain.
+ */
+async function handleFreeText(turn: Turn, text: string) {
+  const ctx = await extractContext(turn.deps.db, turn.club, turn.now);
+  const details = extractBookingDetails(text, ctx);
+  if (looksLikeBookingRequest(details)) return prefillBooking(turn, details);
+  const ai = turn.deps.ai;
+  if (!ai) {
+    await send(turn, [M.menu(turn.club, turn.lang)]);
+    return;
+  }
+  const out = await answerGuestMessage(
+    { db: turn.deps.db, client: ai, log: turn.deps.log },
+    { club: turn.club, guest: turn.guest, conv: turn.conv, lang: turn.lang },
+    text,
+    turn.now,
+  );
+  switch (out.kind) {
+    case 'answer':
+      await send(turn, [M.plain(out.text, M.menuQuickReplies(turn.club, out.lang))]);
+      return;
+    case 'menu':
+      await send(turn, [M.menu(turn.club, turn.lang)]);
+      return;
+    case 'booking':
+      await prefillBooking(turn, out.details);
+      return;
+    case 'my_booking':
+      await showMyBooking(turn);
+      return;
+    case 'handoff': {
+      const why: Record<typeof out.reason, string> = {
+        ai_cost_cap: 'AI cost cap reached',
+        ai_unavailable: 'AI unavailable',
+        faq_missed: 'Bot has no answer',
+        guard: 'Bot answer blocked (price or availability)',
+        guest_request: 'Guest asked for a host',
+      };
+      const reason = `${why[out.reason]}: "${text.slice(0, 120)}"${out.summary ? `\n${out.summary}` : ''}`;
+      await requestHandoff(turn, reason, { topic: out.topic ?? out.reason });
+      return;
+    }
+  }
+}
+
+/** Jumps to the first booking step the details do not answer (spec §8.1). */
+async function prefillBooking(turn: Turn, d: BookingDetails) {
+  const current = await currentBookingForGuest(turn.deps.db, turn.club, turn.guest.id, turn.now);
+  if (current || !d.date) return startBooking(turn);
+  if (!d.pax || !isNightBookable(turn.club, d.date, turn.now)) return chooseNight(turn, d.date);
+  const key = paxKeyFor(d.pax);
+  turn.conv = await updateConversation(turn.deps.db, turn.conv.id, { state: { nightDate: d.date } });
+  const table = d.tableCode
+    ? await turn.deps.db.query.tables.findFirst({ where: and(eq(tablesTable.clubId, turn.club.id), eq(tablesTable.code, d.tableCode)) })
+    : undefined;
+  // A named table that is inactive or too small falls back to the table list for the party size.
+  if (!table || !table.active || d.pax > table.maxPax || paxRange(key)!.min > SELF_BOOK_MAX_PAX) return choosePax(turn, key);
+  turn.conv = await updateConversation(turn.deps.db, turn.conv.id, { state: { nightDate: d.date, paxRange: key } });
+  await chooseTable(turn, table.id, d.date, d.pax);
+}
+
+/** `topic` (B16) is for B14b's `startEpisode`; until `chat/episodes.ts` exists the reason text carries it. */
+async function requestHandoff(turn: Turn, reason: string, opts: { silent?: boolean; topic?: string } = {}) {
   turn.conv = await updateConversation(turn.deps.db, turn.conv.id, {
     mode: 'human',
     handoffRequestedAt: turn.now,

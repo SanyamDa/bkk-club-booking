@@ -765,6 +765,28 @@ Expand with superpowers:writing-plans at the start of the phase.
 
 **Migration (Track B, Phase 1):** B14 yes (the custom migration in its row). B9, B9b, B10, B10b, B11, B12 and B13 no: W0 added `price_rules`, `deposits.slip_*`, `bookings.reminder_sent_at`, `removal_requests`, `notices`, `nights`, `door_counts`, `occupancy_snapshots`, `crowd_ratings` and `calendar_days`.
 
+#### Task B10: Reminders, running late, guest cancel, no-show job (expanded)
+
+**Spec:** §5.2 steps 8 and 9, §5.3 (My booking), §7.2 (arrival cut-off with grace), §12.4 fast-forward.
+
+**Files:** Create `apps/server/src/jobs/reminders.ts`, `jobs/no-show.ts`. Modify `jobs/index.ts` (register `reminders` and `no-show`, every minute), `bot/flow.ts` (postbacks `late`, `cancel`, `cancel_yes`; My booking quick replies), `bookings/service.ts` (`setRunningLate`, `releaseNoShow`, appended), `bot/notify.ts` (`reminder`, `noShowReleased`), `bot/messages.ts`, `bot/i18n.ts`, `db/schema/core.ts` (optional `ClubSettings` keys). `demo/reset.ts` (`fastForward`) is B7's and not on the side branch: the widening is a two-line switch onto `remindNow` / `releaseNow` at merge. Test: `apps/server/test/reminders.test.ts`.
+
+**Decisions:**
+- New optional `ClubSettings` keys, defaults in code (no migration, no backfill): `reminderTime` (`HH:MM`, default `18:00`), `arrivalGraceMinutes` (default 30), `runningLateExtendsRelease` (default true), `autoNoShow` (default true). A time whose hour is before `nightEndHour` (the after-midnight part of the night) falls on the next calendar day (00:30 on a Saturday night is Sunday 00:30); every other time, an afternoon `reminderTime` included, is on the night's own date. (Review fix: the earlier `nightStartHour` rule pushed a 15:00 reminder, or the default 18:00 at a club opening at 20:00, past that night's arrival time, so it was never sent.)
+- Release time = night date at `arrivalBy` + `running_late_minutes` (when `runningLateExtendsRelease`) + `arrivalGraceMinutes`.
+- `reminders` job: a `confirmed` booking with `reminder_sent_at` null whose reminder time has passed and whose arrival time has not. It claims the booking with a conditional update of `reminder_sent_at` and emits `reminder.sent` (`kind: 'day_of'`) in one transaction, then pushes the reminder (`Notifier.reminder`) with quick replies [Running late] [Need to cancel] [Location]. The claim makes it once only. A reminder is not marketing, so no opt-out check.
+- `no-show` job: a `confirmed` booking of tonight or last night past its release time, in a club with `autoNoShow`, goes through `releaseNoShow`: `changeStatus` to `no_show` (sets `no_show_at`, actor `system`, reason `released`) and B2's `releaseTable` in one transaction, then the staff group gets "17A not arrived, released". A booking checked in (`arrived`) is never touched. Assumption: the spec's host prompt [Release] [Keep 30 min] is replaced by automatic release with `autoNoShow`; a club that wants to decide sets it off and marks no-shows from the dashboard.
+- Running late: `a=late&b=<id>` asks [15 min] [30 min] [1 hr]; `a=late&b=<id>&m=<15|30|60>` calls `setRunningLate` (sets `running_late_minutes`, audit `running_late`, event `running_late` with `minutes`), tells the guest the new release time and alerts the staff group. Only the guest's own `confirmed` booking.
+- Guest cancel: `a=cancel&b=<id>` shows the club's cancellation rule (`rules[0]`, the deposit line) and [Yes, cancel] [Keep booking]; `a=cancel_yes&b=<id>` calls `cancelBooking` with actor guest and reason `guest_cancelled` (history, audit and `booking.cancelled` through `changeStatus`), frees the table and alerts the staff group.
+- My booking for a confirmed booking adds the quick replies [Running late] [Cancel] [Talk to a host] to the confirmation card.
+- Fast-forward: `remindNow(ctx, clubId, bookingId, now)` and `releaseNow(ctx, clubId, bookingId, now)` run the job body for that one booking as if its time had come; other bookings are untouched.
+
+**Interfaces (Produces):** `reminderDueAt(club, nightDate): Date`, `sendDueReminders(ctx, now, only?: { clubId: string; bookingId: string }): Promise<number>`, `remindNow(ctx, clubId, bookingId, now): Promise<boolean>` in `jobs/reminders.ts`; `releaseAt(club, booking): Date`, `releaseNoShows(ctx, now, only?): Promise<number>`, `releaseNow(ctx, clubId, bookingId, now): Promise<boolean>` in `jobs/no-show.ts`; `setRunningLate(db, clubId, bookingId, actor: Actor, minutes: number, now): Promise<Booking>`, `releaseNoShow(db, clubId, bookingId, actor: Actor, now): Promise<Booking>` in `bookings/service.ts`.
+
+**Tests (`reminders.test.ts`):** `reminder sent once at the configured lead time`; `no reminder for another night, a cancelled booking or after the arrival time`; `running late sets running_late_minutes and pushes the release time`; `guest cancel shows the policy, then cancels with history and event`; `no-show after the release time releases the table`; `running late delays the no-show, and autoNoShow off keeps the booking`; `a checked-in booking is never marked no-show`; `fast-forward to the reminder time sends the reminder, and to the release time releases the table, for that booking only`; `both jobs are registered on the scheduler`.
+
+**Migration:** no.
+
 #### Task B9b: Prices from `price_rules` (expanded)
 
 **Spec:** §9 (`price_rules`, `valid_from`, `valid_to`), §6.2.
@@ -834,6 +856,37 @@ Expand with superpowers:writing-plans at the start of the phase.
 - `the next nights job run closes a new alcohol-ban day on rows nobody edited` (`it.todo` until B8b's `ensureNights` lands; B8b reads `alcoholBanDates`).
 
 **Migration:** no (`calendar_days` comes from W0).
+
+#### Task B11: Door screen (expanded)
+
+**Spec:** §6.2 Door, §5 (confirmation card QR), §14.3 "People actually inside", §13 Accessibility (large targets, dark).
+
+**Files:** Create `apps/server/src/http/door.ts`, `apps/web/src/pages/door/Door.tsx`. Modify `app.ts` (one mount line), `data/event-types.ts` (`door.count` gains the `kind` prop), `docs/EVENTS.md` (regenerated), `test/helpers/track-b.ts` (no new param: the check-in route reuses Track A's `bookings/:id` fixture), `apps/web/src/main.tsx` (one route line `/door`), `pages/staff/Layout.tsx` (a door-role login is sent to `/door`; one "Door" nav item). Test: `apps/server/test/door.test.ts`.
+
+**Decisions:**
+- `doorRoutes(app)` is mounted at `/api/staff`, paths under `/clubs/:slug/door`, behind `requireClubRole(app, 'owner', 'manager', 'host', 'door')`: a door-role account alone is enough; a promoter gets 403.
+- `GET /door?date=` (default: the current night, `currentNightDate`): `{ nightDate, arrivals, counts }`. `arrivals` are the night's `confirmed`, `arrived` and `no_show` bookings (ref, guest name, table, zone, pax, `arrivedPax`, notes, status). `counts` = `{ byKind: { table_guest, guestlist, walk_in, ticket }, total }`, the net of `door_counts.delta`.
+- `GET /door/find?q=`: the pass QR encodes the booking ref (`/media/pass`), so `q` matches the ref exactly (case-insensitive) or a substring of the guest's name, LINE display name or phone; the caller's club only, the current night only, at most 20.
+- `POST /door/bookings/:id/check-in { arrivedPax? }` calls B2's `markArrived` (so the `booking.checked_in` event, history and audit come with it); `arrivedPax` defaults to the booked pax. A booking of another club is 404 (looked up by club before anything else); a booking for another night is 409 `wrong_night`; a booking not `confirmed` is 409 `invalid_state`. The A19 POS bill opens as on the staff `arrived` route.
+- `POST /door/count { kind, delta: 1 | -1, clickId? }` writes one `door_counts` row (`user_id` = the caller) and emits `door.count` (`channel: 'door'`, `dataOrigin: 'first_party'`, props `kind`, `count_in`, `count_out`, `total` = the night's net after the click, `is_test` = demo club) in one transaction. A `-1` that would take the kind's net below 0 is 409 `below_zero`. A repeated `clickId` (a retry from a flaky phone) writes nothing more: the row id is `dc_<clubId>_<clickId>` (club-scoped, since `door_counts.id` is global and a click id from one club must not swallow another club's tap) and the event's `dedupe_key` `door:<clickId>` (already unique per club). The below-zero check and insert run under `pg_advisory_xact_lock(hashtext('door:<clubId>:<nightDate>'))`, so concurrent taps serialize. Neither door route sends the guest's phone or LINE display name; both are search-only.
+- Web: `/door` is a full-screen dark page outside the staff layout: camera QR scan with the browser's `BarcodeDetector` where the phone has it, else the search box (spec: name search fallback), one tap to check in with a party-size stepper, and a clicker with four kinds at +1/−1, all targets ≥ 56 px. No new web dependency (assumption: door phones are Android Chrome; iOS Safari uses the search box until a decoder is chosen).
+
+**Interfaces (Produces):** `doorRoutes(app: AppContext): Hono<AuthEnv>` in `http/door.ts`; `DOOR_KINDS = ['table_guest', 'guestlist', 'walk_in', 'ticket'] as const`; `doorCounts(db, clubId, nightDate): Promise<{ byKind: Record<DoorKind, number>; total: number }>` (B12 and A16b may read it).
+
+**Tests (`door.test.ts`):**
+- `check-in records arrived_pax and emits booking.checked_in`.
+- `check-in without a party size records the booked pax`.
+- `check-in of another club's booking is 404 and changes nothing`.
+- `check-in of a booking for another night is refused`.
+- `clicker writes door_counts by kind with the user and emits door.count`.
+- `clicker minus never takes a kind below zero`.
+- `a repeated clickId writes one row and one event`.
+- `find matches the QR ref and the guest name, only in the caller's club`.
+- `door screen shows tonight's arrivals and counts by kind`.
+- `works with a door-role account only: door can use every door route, a promoter gets 403`.
+- `isolation.test.ts` passes with the door routes.
+
+**Migration:** no (`door_counts` comes from W0).
 
 ---
 
@@ -926,6 +979,24 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 
 **Migration:** no.
 
+#### Task B16: AI answers (expanded)
+
+**Files:** `brain/{answer,guard,tools,extract}.ts`, `bot/flow.ts` (`handleFreeText`, `prefillBooking`, `book` intent pre-fill, `chooseTable` optional pax, `requestHandoff` `topic` option), `bot/deps.ts` (`BotDepOptions.ai`, `fakeModelClient`), `apps/server/package.json` (dependency `@anthropic-ai/sdk@1.14.0`), test `test/ai-answers.test.ts`.
+
+**Decisions:**
+- One model call per guest message, through an injectable `ModelClient` (`bot/deps.ts` builds `anthropicModelClient(config.ANTHROPIC_API_KEY)`; no key, or `ai: null`, keeps today's menu). Tests use `fakeModelClient`; no test reaches Anthropic.
+- Prompt: fixed instructions, then the compiled brain (`latestSnapshot`) with the cache breakpoint, then per-message context and the guest text inside `<guest_message>` (data, never instructions). `claude-haiku-5-5` first; on any error `claude-sonnet-5-5` once; both failing hands to a host (`ai_unavailable`). `tool_choice: auto`, one tool call, `effort: low`.
+- Tools are terminal (no second model turn): `reply` (the §8.5 fixed result: answer, lang, notes_used, topic, needs_handoff, unclear, summary), `check_availability` and `start_booking` (jump into the button flow with the validated details), `get_booking` (My booking), `request_handoff` (topic + 2-line summary). Only declared fields are read; a `club_id` or `guest_id` in model output is never read; club and guest come from the session.
+- Extraction: a deterministic Thai/English pass (`extractBookingDetails`) runs first and costs no tokens. With the `book` intent, a date or table code pre-fills; on other free text, only a table code or a night plus a party size does ("I lost my phone on Saturday" goes to the AI). Model details pass `normalizeDetails` (unknown table codes and past dates dropped). `prefillBooking` jumps to the first unanswered step; a named table that fits the party is held at once with the guest's pax.
+- Guard: B15's `lintNote` price and availability detector plus the club's table codes; any amount, table code or availability claim not produced by the booking system in the same turn fails (the live path has no booking result in the turn, so all fail). A failing answer on a price/booking topic goes to the button flow; otherwise to a host with `faq.missed`.
+- Cost: `cost_usd_micros` from list prices (haiku 0.10/0.50, sonnet 2/10 $/MTok; cache read 0.1x, write 1.25x). Month spend = sum of the club's `ai.call` events this Bangkok calendar month (test rows included). Cap `platform_flags['ai-cost-cap:<clubId>'].value.usdMicros`, default US$100 when unset. At 80 % a `needs_input` alert `ai_cost_warning`, at the cap an `urgent` alert `ai_cost_cap` (each once per club per month, claimed in `platform_flags` `ai-cost-alert:<clubId>:<YYYY-MM>:<warn|cap>`), through A15's `raiseAlert`. At or over the cap no model call is made and the chat goes to a host.
+- Events: `ai.call` (props model, input_tokens incl. cache, output_tokens, latency_ms, cost_usd_micros), `ai.answered` (props notes_used = count, topic; raw `{ noteIds, snapshotVersion, question, answer }`), `faq.missed` (props topic; raw `{ text }`, read by B19 gaps), `bot.fallback_menu` when the model cannot tell what the guest wants.
+- Handoff: `chat/episodes.ts` (B14b) is not on this branch, so `requestHandoff` (today's path) is used; the reason text carries the 2-line summary and `opts.topic` is passed for B14b's `startEpisode({ topic })`.
+
+**Tests (`ai-answers.test.ts`):** `guard strips invented price`; `cost cap reached -> hand to host`; `warning raised before cost cap reached`; `Anthropic API down -> hand to host`; `falls back to claude-sonnet-5-5 when claude-haiku-5-5 fails`; `'โต๊ะ 6 คน เสาร์นี้' pre-fills date and pax`; `'17A sat 6ppl' pre-fills table code`; `tool ignores club id in model output`; `unclear message shows button menu and records bot.fallback_menu`; `question the brain cannot answer records faq.missed with the question`; `handoff carries 2-line summary`; `ai.answered logs note ids`.
+
+**Migration:** no.
+
 #### Task B19: Brain manager UI (expanded)
 
 **Files:** `http/brain.ts` (router), `brain/gaps.ts` (gap query, reused by B18), `app.ts` (one mount line), `test/helpers/track-b.ts` (fixture `notes/:noteId`), `pages/staff/brain/Brain.tsx`, `pages/staff/Layout.tsx` (one nav item), `apps/web/src/main.tsx` (one route line), test `test/brain-ui.test.ts`.
@@ -936,7 +1007,7 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 - Approval queue: draft notes. Each shows `frontmatter.question` and `frontmatter.hostReply` when present (B18 writes them; B15 drafts from import and onboarding have none), and the title of the note it replaces (`supersedesId`). Ranked by `frontmatter.takeovers` (count of takeovers on the topic, written by B18) descending, then newest first. Until B18 merges every draft has 0 takeovers, so the order is newest first.
 - Approve is one tap: `POST .../notes/:noteId/approve` with no body calls `approveNote`. [Edit] is `PATCH .../notes/:noteId` (`updateNote`, which writes a version row when the body changes) and then approve. [Reject] calls `rejectNote`.
 - A note the manager writes (`POST .../notes`, also [Write an answer] on a gap) is saved **live**: the manager is the approver. With `gapTopic`, the note stores `frontmatter.gapTopic`, which closes that gap.
-- Gaps: `faq.missed` events of the last 30 days, grouped by `props.topic` (or, with no topic, by the lower-cased question text), most frequent first, with the count, the last time asked and the latest question (`raw.text`, written by B16). A gap is closed when a live note has `frontmatter.gapTopic` equal to its key and was approved after the last miss. A live club does not see test events; the demo club does. B16 does not emit `faq.missed` yet, so gaps stay empty until it does.
+- Gaps: `faq.missed` events of the last 30 days, grouped by `props.topic` (or, with no topic, by the lower-cased question text), most frequent first, with the count, the last time asked and the latest question (`raw.text`, written by B16). A gap is closed when a live note has `frontmatter.gapTopic` equal to its key and was approved after the last miss. A live club does not see test events; the demo club does. B16 emits `faq.missed` with `raw.text`.
 - Errors: lint failure 422 `{ error: 'lint', issues, fix }`; over the token cap 409 `{ error: 'over_cap', tokenCount }`; approving a retired note 409 `not_draft`.
 
 **Interfaces:**

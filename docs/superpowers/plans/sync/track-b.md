@@ -288,3 +288,98 @@ export async function testRowsInAnalytics(db: Db): Promise<number>; // must be 0
 **Unverified:** no real Metabase run; `provision.mjs` (Metabase REST API) and the image tag untested; `init-role.sh` not run against a real Postgres (PGlite tests cover the role through `SET LOCAL ROLE`).
 
 **Tests:** `analytics.test.ts` (12 pass); `instagram.test.ts` (14 pass, 3 todo).
+
+## 2026-11-27 B11 Door screen, built by Session A on track-c
+
+**Built:** `http/door.ts` mounted in `app.ts` (`app.route('/api/staff', doorRoutes(ctx))`), routes under `/api/staff/clubs/:slug/door` behind `requireClubRole(app, 'owner', 'manager', 'host', 'door')` (door role alone is enough; promoter 403): `GET /door?date=`, `GET /door/find?q=`, `POST /door/bookings/:id/check-in { arrivedPax? }` (B2 `markArrived`; 404 other club, 409 `wrong_night`, 409 `invalid_state`; A19 POS bill opens as on the staff `arrived` route), `POST /door/count { kind, delta: 1|-1, clickId? }` (one `door_counts` row + `door.count` event in one tx; 409 `below_zero`; repeated `clickId` writes nothing). Web: `pages/door/Door.tsx` at `/door` (route line in `main.tsx`), door-role login redirected there from `pages/staff/Layout.tsx`, "Door" nav item, door styles appended to `styles.css`.
+
+**Interfaces (Produces):**
+```ts
+export const DOOR_KINDS: readonly ['table_guest', 'guestlist', 'walk_in', 'ticket'];
+export type DoorKind = (typeof DOOR_KINDS)[number];
+export async function doorCounts(db: Db, clubId: string, nightDate: string): Promise<{ byKind: Record<DoorKind, number>; total: number }>; // in http/door.ts
+export function doorRoutes(app: AppContext): Hono<AuthEnv>;
+```
+- **Event change (additive, v stays 1):** `door.count` props gain `kind` (none): props are `kind`, `count_in`, `count_out`, `total` (night net after the click). `channel: 'door'`, `dataOrigin: 'first_party'`, `dedupe_key: door:<clickId>` when given. `docs/EVENTS.md` updated.
+- B12 (`crowd.rated` route) goes in the same `http/door.ts` router under `/clubs/:slug/door/...`.
+- Isolation: the check-in route reuses Track A's `bookings/:id` fixture; `isolationFixtures` (track-b) adds nothing.
+
+**Assumption in place of a human decision:** QR scan uses the browser's `BarcodeDetector` (Android Chrome); where it is missing (iOS Safari) the page falls back to ref/name/phone search, which spec §6.2 names as the fallback. No new web dependency.
+
+**Unverified against a real service:** the camera QR scan (`BarcodeDetector`) has not run on a real phone or a real printed pass; the A19 POS bill open on check-in runs only against the POS test fake.
+
+**Tests:** `door.test.ts` (10 pass); `isolation.test.ts` (6 pass); `events.test.ts` (8 pass). Web: typecheck and `vite build` only. The browser walk of `/door` (login as a door-role account, scan or search, check in, clicker +1/-1) is still to be done by a human.
+
+## 2026-11-27 B10 Reminders, running late, guest cancel, no-show job, built by Session A on track-c
+
+**Built:** jobs `reminders` and `no-show` (every minute) registered in `buildScheduler`. Bot postbacks `a=late&b=<id>[&m=15|30|60]`, `a=cancel&b=<id>`, `a=cancel_yes&b=<id>`; My booking on a confirmed booking carries [Running late] [Cancel] [Talk to a host] quick replies. Staff group alerts for running late, guest cancel and no-show release (TH + EN). Plan section "Task B10 (expanded)" added.
+
+**Interfaces (Produces):**
+```ts
+// jobs/reminders.ts
+export function reminderDueAt(club: Pick<Club, 'settings'>, nightDate: string): Date;
+export async function sendDueReminders(ctx: AppContext, now: Date, only?: { clubId: string; bookingId: string }): Promise<number>;
+export async function remindNow(ctx: AppContext, clubId: string, bookingId: string, now: Date): Promise<boolean>;
+// jobs/no-show.ts
+export function atNightTime(club: Pick<Club, 'settings'>, nightDate: string, hhmm: string): Date;
+export function releaseAt(club: Pick<Club, 'settings'>, booking: Pick<Booking, 'nightDate' | 'runningLateMinutes'>): Date;
+export async function releaseNoShows(ctx: AppContext, now: Date, only?: { clubId: string; bookingId: string }): Promise<number>;
+export async function releaseNow(ctx: AppContext, clubId: string, bookingId: string, now: Date): Promise<boolean>;
+// bookings/service.ts (new, frozen W0 signatures untouched)
+export async function releaseNoShow(db: Db, clubId: string, bookingId: string, actor: Actor, now: Date): Promise<Booking>; // changeStatus -> no_show (reason 'released') + releaseTable, one tx
+export const RUNNING_LATE_MINUTES: readonly [15, 30, 60];
+export async function setRunningLate(db: Db, clubId: string, bookingId: string, actor: Actor, minutes: number, now: Date): Promise<Booking>; // audit 'running_late' + event running_late
+// bot/notify.ts: Notifier.reminder(booking), Notifier.noShowReleased(booking)
+```
+- **New optional `ClubSettings` keys** (defaults in code, no migration): `reminderTime` ('18:00'), `arrivalGraceMinutes` (30), `runningLateExtendsRelease` (true), `autoNoShow` (true). A9's settings UI may expose them.
+- **For B7 (`demo/reset.ts`, not on this branch):** widen `fastForward`'s `what` to `'hold_expiry' | 'reminder' | 'release'`; `'reminder'` calls `remindNow(ctx, clubId, bookingId, now)`, `'release'` calls `releaseNow(ctx, clubId, bookingId, now)`. Both act on that one booking only.
+
+**Assumption in place of a human decision:** the spec's host prompt "17A not arrived — release table? [Release] [Keep 30 min]" is replaced by automatic release after arrival + running late + grace, with a staff alert; a club that wants to decide sets `autoNoShow: false` and marks no-shows from the dashboard. Guest cancel frees the table through the `cancelled` status (no `table.released` event; that event is the no-show release).
+
+**Unverified against a real service:** reminder, running-late, cancel and no-show pushes go through the LINE client test fake only; no real LINE push or quick-reply rendering has been seen on a phone. Fast-forward wiring into `demo/reset.ts` waits on B7.
+
+**Tests:** `reminders.test.ts` (10 pass); `booking-history.test.ts › buildScheduler registers every job` updated with the two jobs. No web change.
+
+## 2026-11-27 B16 AI answers, built by Session A on track-c
+
+**Built:** free-text guest messages answered from the compiled brain (`latestSnapshot`) by `claude-haiku-5-5`, fallback `claude-sonnet-5-5`, through an injectable model client; output guard; per-club monthly cost cap with warning; deterministic Thai/English booking-detail pre-fill. Plan section "Task B16 (expanded)" added. New dependency `@anthropic-ai/sdk@1.14.0` in `apps/server/package.json`.
+
+**Interfaces (Produces):**
+```ts
+// brain/answer.ts
+export interface ModelClient { call(req: ModelRequest): Promise<ModelReply> }
+export function anthropicModelClient(apiKey: string): ModelClient;
+export interface ModelRequest { model: AiModel; instructions: string; brain: string; tools: Anthropic.Tool[]; userContent: string }
+export interface ModelReply { toolCalls: { name: string; input: unknown }[]; text: string; usage: ModelUsage } // ModelUsage { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }
+export const AI_PRIMARY_MODEL = 'claude-haiku-5-5'; export const AI_FALLBACK_MODEL = 'claude-sonnet-5-5';
+export interface AnswerDeps { db: Db; client: ModelClient; log: (msg: string, err?: unknown) => void }
+export interface AnswerSession { club: Club; guest: Guest; conv: Conversation; lang: 'th' | 'en' }
+export type AiOutcome =
+  | { kind: 'answer'; text: string; lang: 'th' | 'en'; noteIds: string[]; topic: string }
+  | { kind: 'menu' }
+  | { kind: 'booking'; details: BookingDetails }
+  | { kind: 'my_booking' }
+  | { kind: 'handoff'; reason: 'ai_cost_cap' | 'ai_unavailable' | 'faq_missed' | 'guard' | 'guest_request'; topic: string | null; summary: string };
+export async function answerGuestMessage(deps: AnswerDeps, s: AnswerSession, text: string, now: Date): Promise<AiOutcome>;
+export async function aiCostCap(db: Db, clubId: string): Promise<number>;          // platform_flags['ai-cost-cap:<clubId>'].value.usdMicros, default DEFAULT_AI_COST_CAP_USD_MICROS (100_000_000)
+export async function aiSpendThisMonth(db: Db, clubId: string, now: Date): Promise<number>; // sum ai.call props.cost_usd_micros, Bangkok month
+export function callCostUsdMicros(model: AiModel, usage: ModelUsage): number;
+// brain/extract.ts
+export function extractBookingDetails(text: string, ctx: ExtractContext): BookingDetails; // { date?, pax?, tableCode?, zonePref? }
+export function normalizeDetails(input: unknown, ctx: ExtractContext): BookingDetails;
+// brain/guard.ts
+export function guardAnswer(text: string, clubTableCodes: readonly string[], facts?: TurnFacts): GuardIssue[];
+// brain/tools.ts: TOOL_DEFINITIONS (reply, check_availability, start_booking, get_booking, request_handoff), parseToolCall
+// bot/deps.ts: BotDepOptions.ai?: ModelClient | null (omitted: built from config.ANTHROPIC_API_KEY; null: AI off)
+export function fakeModelClient(respond: (req: ModelRequest) => Partial<ModelReply> | Promise<Partial<ModelReply>>): ModelClient & { calls: ModelRequest[] };
+```
+- Event shapes: `ai.answered` raw `{ noteIds: string[], snapshotVersion, question, answer }` (B18 reads `raw.noteIds`); `faq.missed` props `{ topic }`, raw `{ text }`; `ai.call` props as declared; `bot.fallback_menu` on an unclear message (AI path only).
+- Alerts: `ai_cost_warning` (needs_input, at 80 % of the cap) and `ai_cost_cap` (urgent), once per club per Bangkok month.
+
+**For B14b (`chat/episodes.ts`, not on this branch):** `requestHandoff(turn, reason, { topic })` in `bot/flow.ts` now receives the AI topic code (or the reason code `ai_cost_cap` / `ai_unavailable`); pass it to `startEpisode({ topic })` when B14b moves handoff into `chat/episodes.ts`.
+
+**Assumptions in place of a human decision:** default cap US$100/month when unset (A16 stats still shows `capUsdMicros: null` then); warning at 80 %; prices from the Anthropic list price table. No real Anthropic call in tests.
+
+**Unverified against a real service:** `anthropicModelClient` has never called the real Anthropic API (no key in this environment): the model ids `claude-haiku-5-5` / `claude-sonnet-5-5`, the `effort: low` parameter, prompt-cache hits and the list prices in `MODEL_PRICES` need one live check with a real key before launch. Answer quality on real Thai guest messages is untested.
+
+**Tests:** `ai-answers.test.ts` (12 pass); `flow.test.ts` (17 pass). No web change.

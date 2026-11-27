@@ -59,8 +59,9 @@ const STARTED: EventType = 'booking.started';
 const CONFIRMED: EventType = 'booking.confirmed';
 
 /**
- * Where the club's monthly AI cost cap lives: `platform_flags[key].value.usdMicros`. Assumed until
- * B16 (AI answers) merges; B16 reads and writes the same key. No row means no cap is set.
+ * Where the club's monthly AI cost cap lives: `platform_flags[key].value.usdMicros`. B16
+ * (`brain/answer.ts`) enforces it; with no row B16 applies `DEFAULT_AI_COST_CAP_USD_MICROS` and this
+ * page shows no cap.
  */
 export const aiCostCapKey = (clubId: string) => `ai-cost-cap:${clubId}`;
 

@@ -118,3 +118,28 @@ h2 { font-size: 17px; }
 @media (max-width: 720px) {
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* ---------- Door mode (B11): full screen, dark, large targets ---------- */
+.door { max-width: 640px; margin: 0 auto; padding: 12px 16px 48px; display: flex; flex-direction: column; gap: 14px; font-size: 17px; }
+.door-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.door-title { font-size: 22px; font-weight: 600; }
+.door-inside { display: flex; flex-direction: column; align-items: center; }
+.door-inside strong { font-size: 40px; line-height: 1; color: var(--accent); }
+.door-card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+.door-section { font-size: 14px; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.06em; }
+.door-btn { min-height: 56px; min-width: 56px; padding: 0 18px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface-2); color: var(--text); font: inherit; font-size: 20px; cursor: pointer; }
+.door-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.door-btn.left { text-align: left; font-size: 17px; width: 100%; }
+.door-input { min-height: 56px; font-size: 18px; }
+.door-video { width: 100%; border-radius: var(--radius); background: #000; }
+.door-guest { font-size: 26px; font-weight: 600; }
+.door-table { font-size: 34px; font-weight: 700; color: var(--accent); }
+.door-notes { color: var(--warn); }
+.door-stepper { display: flex; align-items: center; justify-content: center; gap: 24px; }
+.door-stepper strong { font-size: 40px; min-width: 64px; text-align: center; }
+.door-kind { display: grid; grid-template-columns: 64px 1fr 64px; gap: 10px; align-items: center; }
+.door-kind-label { display: flex; justify-content: space-between; align-items: center; font-size: 18px; }
+.door-kind-label strong { font-size: 28px; }
+.door-msg { padding: 14px; border-radius: var(--radius); font-size: 18px; font-weight: 600; }
+.door-msg.ok { background: #183524; color: var(--ok); }
+.door-msg.bad { background: #3a1c19; color: var(--danger); }

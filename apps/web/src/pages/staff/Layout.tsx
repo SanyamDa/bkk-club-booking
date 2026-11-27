@@ -43,6 +43,11 @@ export function StaffLayout() {
   useEffect(() => {
     if (isPromoter && pathname !== '/staff/promoters') navigate('/staff/promoters', { replace: true });
   }, [isPromoter, pathname]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A door login goes straight to door mode (plan B11).
+  const isDoor = clubs?.find((c) => c.slug === club)?.role === 'door';
+  useEffect(() => {
+    if (isDoor) navigate('/door', { replace: true });
+  }, [isDoor]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the handoff badge fresh on every page.
   useEffect(() => {
@@ -89,6 +94,7 @@ export function StaffLayout() {
             Chats{handoffCount > 0 && <span className="badge">{handoffCount}</span>}
           </NavLink>
           <NavLink to="/staff/feed">Alerts</NavLink>
+          <NavLink to="/door">Door</NavLink>
           <NavLink to="/staff/new">New booking</NavLink>
           <NavLink to="/staff/pos">POS import</NavLink>
           <NavLink to="/staff/calendar">Calendar</NavLink>

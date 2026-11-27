@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "live": "tsx src/scripts/live.ts",
+    "load": "tsx src/scripts/load.ts",
     "admin:create": "tsx src/scripts/create-admin.ts"
   },
   "dependencies": {

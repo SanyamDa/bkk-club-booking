@@ -180,11 +180,28 @@ ORDER BY n DESC;
 
 Alert when any club has 5 or more rows in 15 minutes. A burst of `webhook_bad_signature` for one club after a console change usually means a wrong channel secret.
 
-Example check (exits 1 and calls the alert URL above the threshold):
+`infra/check-webhook-errors.sh` runs this check. It alerts when a club has `THRESHOLD` (default 5) or more errors in `WINDOW_MIN` (default 15) minutes, or when errors exceed `MAX_RATE_PCT` (default 5%) of that club's inbound messages in the window (only when the club had at least `MIN_INBOUND`, default 20, inbound messages). It reads the compose database through `docker compose exec`, or `DATABASE_URL` when set. Exit code 0 is ok, 1 is an alert, 2 means the check could not run (that alerts too). It calls `ALERT_URL` on an alert and `OK_URL` on success, so a heartbeat monitor also catches a check that stopped running:
 
 ```sh
-*/5 * * * * cd /srv/club && n=$(docker compose exec -T db psql -U club -d club -Atc "SELECT coalesce(max(c),0) FROM (SELECT count(*) c FROM ops_events WHERE at > now() - interval '15 minutes' AND kind IN ('webhook_bad_signature','webhook_unknown_club','bot_error','send_failed') GROUP BY club_id) t") && [ "$n" -lt 5 ] || curl -fsS "<alert-url>?n=$n"
+*/5 * * * * cd /srv/club && ALERT_URL=https://hc-ping.com/<uuid>/fail OK_URL=https://hc-ping.com/<uuid> infra/check-webhook-errors.sh >> /var/log/club-webhook-check.log 2>&1
 ```
+
+Until B3 adds `raw_webhooks`, the denominator is inbound rows in `messages`. A signature failure writes no message, so the absolute threshold is what catches a wrong channel secret.
+
+### Peak-load test (spec §13 Peak load)
+
+Run before the pilot, and again after any change to the bot turn or the database. Target: 50 bookings/min per club and 1,000 inbound messages/min in total, Friday 22:00-01:00 pattern (ramp up, peak 23:30-00:30, taper), with p95 reply latency under 3 s and under 1% errors. The script exits 1 when the target is missed.
+
+```sh
+# local: server with DEV_SIMULATOR=1 (npm run dev), full rate, 3 hours compressed into 5 minutes
+npm run load -w @club/server -- --mode sim --clubs demo --duration 300
+# quick smoke run at 10% of the rate
+npm run load -w @club/server -- --duration 30 --scale 0.1
+# staging, signed like LINE (measures the webhook ack, not the reply; the club's access token must not be real)
+LOAD_CHANNEL_SECRET=<channel secret> npm run load -w @club/server -- --mode webhook --base https://staging.example.com --clubs demo
+```
+
+`--mode sim` posts to `/api/dev/:slug/event`, which runs the whole bot turn before it answers, so the response time is the reply latency. `--mode webhook` signs each body with the channel secret, as LINE does; that route answers before the turn runs. A booking is two events from one guest (the `a=book` postback, then the night pick); the rest of the 1,000/min is free text from distinct guests. Set `LOAD_COOKIE` once the simulator needs a platform-admin login (B8).
 
 ## 6. Still open
 

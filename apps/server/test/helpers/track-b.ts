@@ -5,7 +5,8 @@ import { newId } from '../../src/lib/util.js';
 
 /**
  * Per-club rows Track B adds for isolation tests, keyed like Track A's (segment before the param
- * plus the param). B19: one draft brain note (`/brain/notes/:noteId/...`).
+ * plus the param). B5's `POST /api/staff/clubs/:slug/staff-link-code` has no route param beyond
+ * `:slug`. B19: one draft brain note (`/brain/notes/:noteId/...`).
  */
 export async function isolationFixtures(db: Db, club: Club): Promise<Record<string, string>> {
   const noteId = newId();

@@ -132,7 +132,8 @@ export function createApp(
   app.route('/api/admin', adminRoutes(ctx));
   app.route('/api/onboard', onboardPublicRoutes(ctx)); // A17 pre-call form (token in the path, hashed at rest)
   app.route('/integrations', integrationRoutes(ctx)); // A19
-  if (config.DEV_SIMULATOR) app.route('/api/dev', devRoutes(ctx));
+  app.route('/api/admin/sim', devRoutes(ctx)); // B8: simulator behind platform-admin login, every environment
+  if (config.DEV_SIMULATOR) app.route('/api/dev', devRoutes(ctx)); // B8: same routes and login; loadConfig keeps it dev/test only
   app.onError((err, c) => {
     log(`Unhandled error on ${c.req.method} ${c.req.path}`, err);
     return c.json({ error: 'server_error' }, 500);

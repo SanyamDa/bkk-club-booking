@@ -128,7 +128,7 @@ function NightEditor({ date, row, onSave, onClose }: { date: string; row: NightR
               <input id="n-dep" className="input" inputMode="decimal" value={deposit} onChange={(e) => setDeposit(e.target.value)} />
             </div>
           </div>
-          <p className="faint" style={{ margin: 0 }}>Event prices apply once the booking flow reads price rules (Track B, B9b).</p>
+          <p className="faint" style={{ margin: 0 }}>The event price replaces the weekday price for every table that night.</p>
         </>
       )}
       <div className="field">

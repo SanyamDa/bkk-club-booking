@@ -5,7 +5,7 @@ import { createApp } from '../src/app.js';
 import { detectIntent } from '../src/bot/intents.js';
 import { bookings } from '../src/db/schema.js';
 import { FRIDAY, FRIDAY_AFTERNOON, setupDb } from './helpers.js';
-import { staffCookie as loginStaff, staffUrl, testConfig } from './helpers/track-a.js';
+import { adminCookie, staffCookie as loginStaff, staffUrl, testConfig } from './helpers/track-a.js';
 
 const config = testConfig({ PUBLIC_URL: 'http://localhost:5173', DEV_SIMULATOR: true });
 
@@ -34,12 +34,19 @@ const json = (body: unknown, headers: Record<string, string> = {}) => ({
   body: JSON.stringify(body),
 });
 
+// B8: the simulator needs a platform-admin session; one admin login per test (the clock never moves).
+let simCookie: Promise<string> | undefined;
+beforeEach(() => {
+  simCookie = undefined;
+});
+const simAuth = async () => ({ cookie: await (simCookie ??= adminCookie(app)) });
+
 async function sim(userId: string, body: Record<string, unknown>) {
-  const res = await req('/api/dev/demo/event', json({ userId, displayName: 'Ari', ...body }));
+  const res = await req('/api/dev/demo/event', json({ userId, displayName: 'Ari', ...body }, await simAuth()));
   expect(res.status).toBe(200);
 }
 async function transcript(userId: string): Promise<Msg[]> {
-  const res = await req(`/api/dev/demo/transcript?userId=${userId}`);
+  const res = await req(`/api/dev/demo/transcript?userId=${userId}`, { headers: await simAuth() });
   return ((await res.json()) as { messages: Msg[] }).messages;
 }
 async function lastOut(userId: string): Promise<any> {
@@ -193,7 +200,8 @@ describe('intents', () => {
     ['my booking', 'my_booking'],
     ['where are you located? need the map', 'location'],
     ['Details sent · VL-7K2Q', 'details_sent'],
-    ['link A1B2C3', 'staff_link'],
+    ['link A1B2C3D4', 'staff_link'],
+    ['link A1B2C3', 'unknown'], // B5: the old 6-character code no longer links
     ['🔥🔥', 'unknown'],
   ])('%s → %s', (text, kind) => {
     expect(detectIntent(text).kind).toBe(kind);

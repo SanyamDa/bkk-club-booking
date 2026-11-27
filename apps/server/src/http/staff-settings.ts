@@ -273,7 +273,7 @@ export function staffSettingsRoutes(app: AppContext) {
     return c.json(table);
   });
 
-  // ----- Prices (price_rules; the booking flow reads them after B9b) -----
+  // ----- Prices (price_rules; the booking flow reads them through bookings/pricing.ts) -----
   r.get('/clubs/:slug/prices', managers, async (c) => c.json({ priceRules: await currentPriceRules(db, c.var.club, app.deps.now()) }));
 
   r.put('/clubs/:slug/prices', managers, async (c) => {

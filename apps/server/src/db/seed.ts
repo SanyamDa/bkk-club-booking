@@ -1,7 +1,6 @@
 import { eq } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { channels, clubs, tables, zones, type ClubSettings } from './schema.js';
-import { newLinkCode } from '../lib/util.js';
 
 /**
  * A fictional club used for development and sales demos. Do not rename it to a real venue
@@ -74,7 +73,6 @@ export async function seedDemoClub(db: Db, env: NodeJS.ProcessEnv = process.env)
     liffId: env.DEMO_LIFF_ID || null,
     promptpayId: env.DEMO_PROMPTPAY_ID || null,
     promptpayName: 'Velora Demo Co., Ltd.',
-    staffLinkCode: newLinkCode(),
     status: 'demo',
   });
   await db.insert(channels).values({ id: `chan_line_${DEMO_CLUB_ID}`, clubId: DEMO_CLUB_ID, kind: 'line' });

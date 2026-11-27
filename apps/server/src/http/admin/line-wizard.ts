@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gte, isNull, lt } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { auditLog, channels, clubs, messages, type Club } from '../../db/schema.js';
+import { issueTesterCode } from '../../data/test-flag.js';
 import { sampleMessages } from '../../line/samples.js';
 import { describeLineError, rollbackRichMenu, runLineSetup, type RichMenuChange, type SetupReport } from '../../line/setup.js';
 import { credentialSummary, setClubCredential } from '../../platform/credentials.js';
@@ -264,11 +265,17 @@ export function lineWizardRoutes(app: AppContext) {
     return c.json({ ok: true, richMenuId: change.previousRichMenuId });
   });
 
-  /** B6's `issueTesterCode` is not merged yet. */
+  /**
+   * One-time tester code for the live test (§12.2, B6's `issueTesterCode`). The code is in this
+   * response only: the database keeps its hash, and the audit row never holds the code.
+   */
   r.post('/clubs/:slug/tester-code', async (c) => {
     const club = await clubBySlug(db, c.req.param('slug'));
     if (!club) return c.json({ error: 'not_found' }, 404);
-    return c.json({ error: 'not_ready', message: 'Tester codes need Track B task B6.' }, 503);
+    const now = app.deps.now();
+    const issued = await issueTesterCode(db, club.id, c.var.user.id, now);
+    await adminAudit(db, c, { clubId: club.id, action: 'line.tester_code_issued', entity: 'club', entityId: club.id, after: { expiresAt: issued.expiresAt.toISOString() } }, now);
+    return c.json({ code: issued.code, expiresAt: issued.expiresAt.toISOString() });
   });
 
   /** What the console shows about stored secrets: kind, last 4, who and when. */

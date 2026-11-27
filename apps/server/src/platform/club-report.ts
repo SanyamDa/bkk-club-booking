@@ -385,14 +385,3 @@ export async function sendWeeklyReports(ctx: AppContext, now: Date): Promise<voi
     }
   }
 }
-
-/**
- * Runs `sendWeeklyReports` every 15 minutes until the returned function is called. Stand-in for
- * B's scheduler: `jobs/index.ts` calls this until `scheduler.register('club-report', ...)` exists.
- */
-export function startClubReports(ctx: AppContext, now: () => Date): () => void {
-  const timer = setInterval(() => {
-    sendWeeklyReports(ctx, now()).catch((err) => ctx.deps.log('Weekly club reports failed', err));
-  }, 15 * 60_000);
-  return () => clearInterval(timer);
-}

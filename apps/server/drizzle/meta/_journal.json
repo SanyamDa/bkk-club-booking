@@ -40,8 +40,15 @@
     {
       "idx": 5,
       "version": "7",
+      "when": 1795811824351,
+      "tag": "0005_b6_test_rows",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
       "when": 1795814400382,
-      "tag": "0005_analytics_views",
+      "tag": "0006_analytics_views",
       "breakpoints": true
     }
   ]

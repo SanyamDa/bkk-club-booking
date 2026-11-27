@@ -226,10 +226,17 @@ export const bookings = pgTable(
   },
   (t) => [
     // The rule that makes double bookings impossible: one active booking per table per night.
+    // Real and test rows (B6, spec §9) each have their own index, so a test booking never blocks
+    // a real guest, and two test bookings still cannot share a table.
     uniqueIndex('bookings_one_active_per_table_night')
       .on(t.tableId, t.nightDate)
       .where(
-        sql`${t.status} in ('held','awaiting_payment','payment_review','confirmed','arrived')`,
+        sql`${t.status} in ('held','awaiting_payment','payment_review','confirmed','arrived') and ${t.isTest} = false`,
+      ),
+    uniqueIndex('bookings_one_active_test_per_table_night')
+      .on(t.tableId, t.nightDate)
+      .where(
+        sql`${t.status} in ('held','awaiting_payment','payment_review','confirmed','arrived') and ${t.isTest} = true`,
       ),
     index('bookings_club_night').on(t.clubId, t.nightDate),
     index('bookings_guest').on(t.guestId),

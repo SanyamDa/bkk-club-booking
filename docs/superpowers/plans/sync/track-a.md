@@ -401,7 +401,7 @@ The extra `liffEndpoint` argument of `setPlatformLoginChannel` is beyond the pla
 
 Requests for Track B: B5 consumes `credentials.login(club)`. With `shared: true` the ID token's `sub` is our provider's id, not the id that the club's webhook sees. B5's first-use pair check (`linkLiffSub`) must replace the direct `sub === lineUserId` compare.
 
-Blockers and `it.todo`: none in A4b. A5's gate tests that depend on B5 stay `it.todo` until B5 merges (plan A5).
+Blockers and `it.todo`: none in A4b. A5's gate tests that depend on B5 stay `it.todo` until B5 merges (plan A5). B5 done (2026-11-27): `linkLiffSub` replaced the direct compare when `shared` is true, and the A5 gate test is a real test.
 
 ## 2026-11-27 — A7 (hosted 24/7)
 
@@ -519,13 +519,13 @@ Fresh TOTP for credential, PromptPay, greeting and platform login changes: JSON 
 Requests for Track B:
 - B3: call `isGloballyStopped`. Switch the direct `ops_events` insert in `http/admin/line-wizard.ts` to `recordOps`. Wire `processDelivery` into `POST .../webhooks/:id/replay` (503 `not_ready` today). Enable the `it.todo` tests: gate `raw_webhooks` row, pause stops replies, end-to-end trace, failed send in message log.
 - B0: publish `applyClubContent`; `template: 'velora-like'` answers 501 `not_ready` until then.
-- B5: enable `console-created club: details read with a valid ID token...`.
-- B6: publish `issueTesterCode`; `POST .../tester-code` answers 503 `not_ready` until then.
+- B5: done (2026-11-27). `console-created club: details read with a valid ID token...` is a real test.
+- B6: done (2026-11-27). `POST .../tester-code` calls `issueTesterCode` and returns `{ code, expiresAt }` once; the todo is a real test.
 
 Deferred (decision): `POST .../test-message {to:'self'}` answers 501 `not_ready`, because no founder LINE user id is stored anywhere. Storing it needs a `users` column (migration) and a way to capture the id (e.g. the founder adds the club's OA and sends a link code); tracked by an `it.todo` in `admin-support.test.ts`. `staff_group` works. The debug webhook and message lists now write a `debug.view` audit row each (entity `raw_webhooks` / `messages`, entity id the club id, query in `data`). The velora-like club assertions are an `it.todo` in `admin.test.ts` until B0 merges.
 
 `it.todo` waiting on Track B (10 in all):
-- `admin.test.ts`: "create club then receive a signed webhook with no restart: a raw_webhooks row for that club (needs B3)"; "pause stops replies within one message" (B3); "console-created club: details read with a valid ID token is 200, with no token it is refused" (B5); "one guest message is traceable end to end" (B3); "failed send shows in the message log with LINE's error" (B3); "a velora-like club gets complete settings, a channels row, a refPrefix no other club has, and Velora tables and prices" (B0); "tester-code route returns the code once" (B6).
+- `admin.test.ts`: "create club then receive a signed webhook with no restart: a raw_webhooks row for that club (needs B3)"; "pause stops replies within one message" (B3); "console-created club: details read with a valid ID token is 200, with no token it is refused" (B5, now a real test); "one guest message is traceable end to end" (B3); "failed send shows in the message log with LINE's error" (B3); "a velora-like club gets complete settings, a channels row, a refPrefix no other club has, and Velora tables and prices" (B0); "tester-code route returns the code once" (B6, now a real test).
 - `admin-support.test.ts`: "test-message {to: 'self'} pushes to the founder's own LINE account (needs a stored founder LINE user id)" (decision, not B); "one guest message is traceable end to end" (B3); "failed send shows in the message log with LINE's error" (B3).
 
 ## 2026-11-27 — A6 (founder console web v1)

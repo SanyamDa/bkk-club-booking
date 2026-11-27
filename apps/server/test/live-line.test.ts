@@ -191,7 +191,7 @@ describe('real-LINE behaviour', () => {
     const app = createApp(config, ctx.db, { bot: { now: () => FRIDAY_AFTERNOON, log: () => {} }, verifyIdToken: verify });
     const guest = await makeGuest(ctx.db, { lineUserId: 'Uowner' });
     const booking = await holdTable(ctx.db, ctx.club, { guestId: guest.id, tableId: 'table_demo_B4', nightDate: FRIDAY, pax: 6 }, FRIDAY_AFTERNOON);
-    const t = links.detailsToken(booking);
+    const t = links.detailsToken(booking, FRIDAY_AFTERNOON);
     const submit = (idToken?: string) =>
       app.app.request('/api/liff/booking/details', {
         method: 'POST',

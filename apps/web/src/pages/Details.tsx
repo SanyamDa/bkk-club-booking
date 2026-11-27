@@ -46,6 +46,8 @@ const L = {
     alreadyDone: 'Your details are already saved. Go back to the chat to continue.',
     other: 'Other',
     wrongUser: 'This booking was started from a different LINE account. Open it from your own chat with the club.',
+    linkExpired: 'This link has expired. Go back to the chat to get a new one.',
+    notConfigured: 'This form is not available right now. Go back to the chat and ask to talk to a person.',
   },
   th: {
     title: 'ข้อมูลผู้จอง',
@@ -61,6 +63,8 @@ const L = {
     alreadyDone: 'บันทึกข้อมูลแล้ว กรุณากลับไปที่แชทค่ะ',
     other: 'อื่นๆ',
     wrongUser: 'การจองนี้เริ่มจากบัญชี LINE อื่น กรุณาเปิดจากแชทของคุณกับร้านค่ะ',
+    linkExpired: 'ลิงก์นี้หมดอายุแล้ว กรุณากลับไปที่แชทเพื่อรับลิงก์ใหม่ค่ะ',
+    notConfigured: 'แบบฟอร์มนี้ยังใช้ไม่ได้ในตอนนี้ กรุณากลับไปที่แชทและขอคุยกับพนักงานค่ะ',
   },
 } as const;
 
@@ -78,10 +82,29 @@ function readParams(): URLSearchParams {
   return here;
 }
 
+/** What `GET /api/liff/club` returns before the page has an ID token (plan B5). */
+interface ClubInfo {
+  name: string;
+  accentColor: string;
+  liffId: string | null;
+}
+
+/** The booking read, with the LIFF ID token in the X-Line-Id-Token header when we have one. */
+async function readBooking(ref: string, token: string, idToken: string | undefined): Promise<BookingInfo> {
+  const res = await fetch(`/api/liff/booking?ref=${encodeURIComponent(ref)}&t=${encodeURIComponent(token)}`, {
+    headers: idToken ? { 'X-Line-Id-Token': idToken } : undefined,
+    credentials: 'same-origin',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(res.status, data);
+  return data as BookingInfo;
+}
+
 export function Details() {
   const params = useMemo(readParams, []);
   const ref = params.get('ref') ?? '';
   const token = params.get('t') ?? '';
+  const clubSlug = params.get('club') ?? '';
   const [info, setInfo] = useState<BookingInfo | null>(null);
   const [inLine, setInLine] = useState(false);
   const [liffReady, setLiffReady] = useState(false);
@@ -93,7 +116,27 @@ export function Details() {
   useEffect(() => {
     (async () => {
       try {
-        const data = await api<BookingInfo>(`/api/liff/booking?ref=${encodeURIComponent(ref)}&t=${encodeURIComponent(token)}`);
+        // B5: the booking read needs the guest's ID token, so start LIFF first from the
+        // unauthenticated club lookup (only name, accent colour and LIFF id).
+        let idToken: string | undefined;
+        const club = clubSlug ? await api<ClubInfo>(`/api/liff/club?club=${encodeURIComponent(clubSlug)}`).catch(() => null) : null;
+        if (club) document.documentElement.style.setProperty('--accent', club.accentColor);
+        if (club?.liffId) {
+          try {
+            await liff.init({ liffId: club.liffId });
+            if (!liff.isLoggedIn()) {
+              // Opened outside the LINE app: log in so we can prove who is reading and submitting.
+              liff.login({ redirectUri: window.location.href });
+              return;
+            }
+            idToken = liff.getIDToken() ?? undefined;
+            setLiffReady(true);
+            setInLine(liff.isInClient());
+          } catch {
+            setInLine(false);
+          }
+        }
+        const data = await readBooking(ref, token, idToken);
         setInfo(data);
         document.documentElement.lang = data.lang;
         document.documentElement.style.setProperty('--accent', data.club.accentColor);
@@ -106,34 +149,31 @@ export function Details() {
           otherNationality: nat && !NATIONALITIES.includes(nat) ? nat : '',
           pax: Math.min(Math.max(data.booking.pax, data.booking.minPax), data.booking.maxPax),
         }));
-        if (data.club.liffId) {
-          try {
-            await liff.init({ liffId: data.club.liffId });
-            if (!liff.isLoggedIn()) {
-              // Opened outside the LINE app: log in so we can prove who is submitting.
-              liff.login({ redirectUri: window.location.href });
-              return;
-            }
-            setLiffReady(true);
-            setInLine(liff.isInClient());
-          } catch {
-            setInLine(false);
-          }
-        }
         setState(data.booking.status !== 'held' || data.booking.detailsDone ? 'gone' : 'form');
-      } catch {
+      } catch (err) {
         setState('gone');
-        setError('notFound');
+        const code = err instanceof ApiError ? err.body.error : undefined;
+        setError(
+          code === 'link_expired' ? 'linkExpired'
+            : code === 'wrong_user' || code === 'login_required' ? 'wrongUser'
+              : code === 'login_not_configured' ? 'notConfigured'
+                : 'notFound',
+        );
       }
     })();
-  }, [ref, token]);
+  }, [ref, token, clubSlug]);
 
   if (!info && state === 'loading') return <div className="guest muted">…</div>;
   const lang: Lang = info?.lang ?? 'en';
   const s = L[lang];
 
   if (!info || state === 'gone') {
-    const msg = error === 'notFound' || !info ? s.notFound : info.booking.detailsDone ? s.alreadyDone : s.expired;
+    const msg =
+      error === 'linkExpired' ? s.linkExpired
+        : error === 'wrongUser' ? s.wrongUser
+          : error === 'notConfigured' ? s.notConfigured
+            : error === 'notFound' || !info ? s.notFound
+              : info.booking.detailsDone ? s.alreadyDone : s.expired;
     return (
       <div className="guest stack">
         <h1>{info?.club.name ?? ''}</h1>
@@ -161,7 +201,7 @@ export function Details() {
           // Sent from the guest's own chat, so the bot can answer with a free reply.
           await liff.sendMessages([{ type: 'text', text: info.detailsSentText }]);
         } catch {
-          await api('/api/liff/booking/review', { body: { ref, t: token } });
+          await api('/api/liff/booking/review', { body: { ref, t: token, idToken } });
         }
         liff.closeWindow();
       }
@@ -170,7 +210,7 @@ export function Details() {
       setState('form');
       if (err instanceof ApiError && err.body.issues) {
         setFieldErrors(Object.fromEntries(err.body.issues.map((i) => [i.field ?? '', i.message])));
-      } else if (err instanceof ApiError && (err.body.error === 'hold_expired' || err.body.error === 'invalid_state')) {
+      } else if (err instanceof ApiError && (err.body.error === 'hold_expired' || err.body.error === 'invalid_state' || err.body.error === 'link_expired')) {
         setState('gone');
       } else if (err instanceof ApiError && (err.body.error === 'wrong_user' || err.body.error === 'login_required')) {
         setError(s.wrongUser);

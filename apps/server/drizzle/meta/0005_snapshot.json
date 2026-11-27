@@ -1,5 +1,5 @@
 {
-  "id": "008c8d25-8126-437b-a30a-a4efdebfeb86",
+  "id": "2782a4b9-4fe7-4a18-85cd-1c195c42ee71",
   "prevId": "22068f14-b2cc-4307-b51e-cde52c6efec2",
   "version": "7",
   "dialect": "postgresql",
@@ -124,9 +124,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -342,10 +342,32 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "where": "\"bookings\".\"status\" in ('held','awaiting_payment','payment_review','confirmed','arrived') and \"bookings\".\"is_test\" = false",
+          "concurrently": false,
           "method": "btree",
-          "where": "\"bookings\".\"status\" in ('held','awaiting_payment','payment_review','confirmed','arrived')",
-          "concurrently": false
+          "with": {}
+        },
+        "bookings_one_active_test_per_table_night": {
+          "name": "bookings_one_active_test_per_table_night",
+          "columns": [
+            {
+              "expression": "table_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "night_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"bookings\".\"status\" in ('held','awaiting_payment','payment_review','confirmed','arrived') and \"bookings\".\"is_test\" = true",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "bookings_club_night": {
           "name": "bookings_club_night",
@@ -364,9 +386,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "bookings_guest": {
           "name": "bookings_guest",
@@ -379,60 +401,60 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "bookings_club_id_clubs_id_fk": {
           "name": "bookings_club_id_clubs_id_fk",
           "tableFrom": "bookings",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "bookings_guest_id_guests_id_fk": {
           "name": "bookings_guest_id_guests_id_fk",
           "tableFrom": "bookings",
+          "tableTo": "guests",
           "columnsFrom": [
             "guest_id"
           ],
-          "tableTo": "guests",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "bookings_table_id_tables_id_fk": {
           "name": "bookings_table_id_tables_id_fk",
           "tableFrom": "bookings",
+          "tableTo": "tables",
           "columnsFrom": [
             "table_id"
           ],
-          "tableTo": "tables",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "bookings_ref_code_unique": {
           "name": "bookings_ref_code_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "ref_code"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -579,10 +601,10 @@
       "uniqueConstraints": {
         "clubs_slug_unique": {
           "name": "clubs_slug_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "slug"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -663,37 +685,37 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "conversations_club_id_clubs_id_fk": {
           "name": "conversations_club_id_clubs_id_fk",
           "tableFrom": "conversations",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "conversations_guest_id_guests_id_fk": {
           "name": "conversations_guest_id_guests_id_fk",
           "tableFrom": "conversations",
+          "tableTo": "guests",
           "columnsFrom": [
             "guest_id"
           ],
-          "tableTo": "guests",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -822,37 +844,37 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "deposits_club_id_clubs_id_fk": {
           "name": "deposits_club_id_clubs_id_fk",
           "tableFrom": "deposits",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "deposits_booking_id_bookings_id_fk": {
           "name": "deposits_booking_id_bookings_id_fk",
           "tableFrom": "deposits",
+          "tableTo": "bookings",
           "columnsFrom": [
             "booking_id"
           ],
-          "tableTo": "bookings",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -984,24 +1006,24 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "guests_club_id_clubs_id_fk": {
           "name": "guests_club_id_clubs_id_fk",
           "tableFrom": "guests",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1142,9 +1164,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "messages_line_message_id": {
           "name": "messages_line_message_id",
@@ -1163,9 +1185,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "messages_club_external_id": {
           "name": "messages_club_external_id",
@@ -1184,37 +1206,37 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "messages_club_id_clubs_id_fk": {
           "name": "messages_club_id_clubs_id_fk",
           "tableFrom": "messages",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "messages_guest_id_guests_id_fk": {
           "name": "messages_guest_id_guests_id_fk",
           "tableFrom": "messages",
+          "tableTo": "guests",
           "columnsFrom": [
             "guest_id"
           ],
-          "tableTo": "guests",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1306,24 +1328,24 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "nights_club_id_clubs_id_fk": {
           "name": "nights_club_id_clubs_id_fk",
           "tableFrom": "nights",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1409,37 +1431,37 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "pos_bills_club_id_clubs_id_fk": {
           "name": "pos_bills_club_id_clubs_id_fk",
           "tableFrom": "pos_bills",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "pos_bills_booking_id_bookings_id_fk": {
           "name": "pos_bills_booking_id_bookings_id_fk",
           "tableFrom": "pos_bills",
+          "tableTo": "bookings",
           "columnsFrom": [
             "booking_id"
           ],
-          "tableTo": "bookings",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1532,37 +1554,37 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "price_rules_club_id_clubs_id_fk": {
           "name": "price_rules_club_id_clubs_id_fk",
           "tableFrom": "price_rules",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "price_rules_night_id_nights_id_fk": {
           "name": "price_rules_night_id_nights_id_fk",
           "tableFrom": "price_rules",
+          "tableTo": "nights",
           "columnsFrom": [
             "night_id"
           ],
-          "tableTo": "nights",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1686,37 +1708,37 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "tables_club_id_clubs_id_fk": {
           "name": "tables_club_id_clubs_id_fk",
           "tableFrom": "tables",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "tables_zone_id_zones_id_fk": {
           "name": "tables_zone_id_zones_id_fk",
           "tableFrom": "tables",
+          "tableTo": "zones",
           "columnsFrom": [
             "zone_id"
           ],
-          "tableTo": "zones",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1778,15 +1800,15 @@
         "zones_club_id_clubs_id_fk": {
           "name": "zones_club_id_clubs_id_fk",
           "tableFrom": "zones",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1885,9 +1907,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "alerts_club_kind_open": {
           "name": "alerts_club_kind_open",
@@ -1912,24 +1934,24 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "alerts_club_id_clubs_id_fk": {
           "name": "alerts_club_id_clubs_id_fk",
           "tableFrom": "alerts",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1998,24 +2020,24 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "channels_club_id_clubs_id_fk": {
           "name": "channels_club_id_clubs_id_fk",
           "tableFrom": "channels",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2060,15 +2082,15 @@
         "club_alert_settings_club_id_clubs_id_fk": {
           "name": "club_alert_settings_club_id_clubs_id_fk",
           "tableFrom": "club_alert_settings",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2149,24 +2171,24 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "club_credentials_club_id_clubs_id_fk": {
           "name": "club_credentials_club_id_clubs_id_fk",
           "tableFrom": "club_credentials",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2210,28 +2232,28 @@
         "club_memberships_user_id_users_id_fk": {
           "name": "club_memberships_user_id_users_id_fk",
           "tableFrom": "club_memberships",
+          "tableTo": "users",
           "columnsFrom": [
             "user_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "club_memberships_club_id_clubs_id_fk": {
           "name": "club_memberships_club_id_clubs_id_fk",
           "tableFrom": "club_memberships",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -2354,15 +2376,15 @@
         "club_profile_club_id_clubs_id_fk": {
           "name": "club_profile_club_id_clubs_id_fk",
           "tableFrom": "club_profile",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2425,37 +2447,37 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "guest_notes_club_id_clubs_id_fk": {
           "name": "guest_notes_club_id_clubs_id_fk",
           "tableFrom": "guest_notes",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "guest_notes_guest_id_guests_id_fk": {
           "name": "guest_notes_guest_id_guests_id_fk",
           "tableFrom": "guest_notes",
+          "tableTo": "guests",
           "columnsFrom": [
             "guest_id"
           ],
-          "tableTo": "guests",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2518,37 +2540,37 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "guest_tags_guest_id_guests_id_fk": {
           "name": "guest_tags_guest_id_guests_id_fk",
           "tableFrom": "guest_tags",
+          "tableTo": "guests",
           "columnsFrom": [
             "guest_id"
           ],
-          "tableTo": "guests",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "guest_tags_club_id_clubs_id_fk": {
           "name": "guest_tags_club_id_clubs_id_fk",
           "tableFrom": "guest_tags",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -2623,25 +2645,25 @@
         "invites_club_id_clubs_id_fk": {
           "name": "invites_club_id_clubs_id_fk",
           "tableFrom": "invites",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "invites_token_hash_unique": {
           "name": "invites_token_hash_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "token_hash"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -2746,50 +2768,50 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "promoter_attributions_booking_id_bookings_id_fk": {
           "name": "promoter_attributions_booking_id_bookings_id_fk",
           "tableFrom": "promoter_attributions",
+          "tableTo": "bookings",
           "columnsFrom": [
             "booking_id"
           ],
-          "tableTo": "bookings",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "promoter_attributions_club_id_clubs_id_fk": {
           "name": "promoter_attributions_club_id_clubs_id_fk",
           "tableFrom": "promoter_attributions",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "promoter_attributions_promoter_id_promoters_id_fk": {
           "name": "promoter_attributions_promoter_id_promoters_id_fk",
           "tableFrom": "promoter_attributions",
+          "tableTo": "promoters",
           "columnsFrom": [
             "promoter_id"
           ],
-          "tableTo": "promoters",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2871,37 +2893,37 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "promoters_club_id_clubs_id_fk": {
           "name": "promoters_club_id_clubs_id_fk",
           "tableFrom": "promoters",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "promoters_user_id_users_id_fk": {
           "name": "promoters_user_id_users_id_fk",
           "tableFrom": "promoters",
+          "tableTo": "users",
           "columnsFrom": [
             "user_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2970,24 +2992,24 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "sessions_user_id_users_id_fk": {
           "name": "sessions_user_id_users_id_fk",
           "tableFrom": "sessions",
+          "tableTo": "users",
           "columnsFrom": [
             "user_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3080,37 +3102,37 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "support_grants_user_id_users_id_fk": {
           "name": "support_grants_user_id_users_id_fk",
           "tableFrom": "support_grants",
+          "tableTo": "users",
           "columnsFrom": [
             "user_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "support_grants_club_id_clubs_id_fk": {
           "name": "support_grants_club_id_clubs_id_fk",
           "tableFrom": "support_grants",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3198,10 +3220,10 @@
       "uniqueConstraints": {
         "users_email_unique": {
           "name": "users_email_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "email"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -3280,24 +3302,24 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "booking_status_history_booking_id_bookings_id_fk": {
           "name": "booking_status_history_booking_id_bookings_id_fk",
           "tableFrom": "booking_status_history",
+          "tableTo": "bookings",
           "columnsFrom": [
             "booking_id"
           ],
-          "tableTo": "bookings",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3412,24 +3434,24 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "crowd_ratings_club_id_clubs_id_fk": {
           "name": "crowd_ratings_club_id_clubs_id_fk",
           "tableFrom": "crowd_ratings",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3504,24 +3526,24 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "door_counts_club_id_clubs_id_fk": {
           "name": "door_counts_club_id_clubs_id_fk",
           "tableFrom": "door_counts",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3713,9 +3735,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "events_club_occurred": {
           "name": "events_club_occurred",
@@ -3734,9 +3756,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "events_booking": {
           "name": "events_booking",
@@ -3749,9 +3771,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -3759,10 +3781,10 @@
       "uniqueConstraints": {
         "events_seq_unique": {
           "name": "events_seq_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "seq"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -3908,63 +3930,63 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "handoff_episodes_club_id_clubs_id_fk": {
           "name": "handoff_episodes_club_id_clubs_id_fk",
           "tableFrom": "handoff_episodes",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "handoff_episodes_conversation_id_conversations_id_fk": {
           "name": "handoff_episodes_conversation_id_conversations_id_fk",
           "tableFrom": "handoff_episodes",
+          "tableTo": "conversations",
           "columnsFrom": [
             "conversation_id"
           ],
-          "tableTo": "conversations",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "handoff_episodes_first_message_id_messages_id_fk": {
           "name": "handoff_episodes_first_message_id_messages_id_fk",
           "tableFrom": "handoff_episodes",
+          "tableTo": "messages",
           "columnsFrom": [
             "first_message_id"
           ],
-          "tableTo": "messages",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "handoff_episodes_last_message_id_messages_id_fk": {
           "name": "handoff_episodes_last_message_id_messages_id_fk",
           "tableFrom": "handoff_episodes",
+          "tableTo": "messages",
           "columnsFrom": [
             "last_message_id"
           ],
-          "tableTo": "messages",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4033,9 +4055,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "identity_map_person": {
           "name": "identity_map_person",
@@ -4048,9 +4070,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "identity_map_sub": {
           "name": "identity_map_sub",
@@ -4063,37 +4085,37 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "identity_map_club_id_clubs_id_fk": {
           "name": "identity_map_club_id_clubs_id_fk",
           "tableFrom": "identity_map",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "identity_map_guest_id_guests_id_fk": {
           "name": "identity_map_guest_id_guests_id_fk",
           "tableFrom": "identity_map",
+          "tableTo": "guests",
           "columnsFrom": [
             "guest_id"
           ],
-          "tableTo": "guests",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4179,37 +4201,37 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "notices_club_id_clubs_id_fk": {
           "name": "notices_club_id_clubs_id_fk",
           "tableFrom": "notices",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "notices_guest_id_guests_id_fk": {
           "name": "notices_guest_id_guests_id_fk",
           "tableFrom": "notices",
+          "tableTo": "guests",
           "columnsFrom": [
             "guest_id"
           ],
-          "tableTo": "guests",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4294,15 +4316,15 @@
         "occupancy_snapshots_club_id_clubs_id_fk": {
           "name": "occupancy_snapshots_club_id_clubs_id_fk",
           "tableFrom": "occupancy_snapshots",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -4374,9 +4396,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -4458,24 +4480,24 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "raw_webhooks_club_id_clubs_id_fk": {
           "name": "raw_webhooks_club_id_clubs_id_fk",
           "tableFrom": "raw_webhooks",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4544,37 +4566,37 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "removal_requests_club_id_clubs_id_fk": {
           "name": "removal_requests_club_id_clubs_id_fk",
           "tableFrom": "removal_requests",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "removal_requests_guest_id_guests_id_fk": {
           "name": "removal_requests_guest_id_guests_id_fk",
           "tableFrom": "removal_requests",
+          "tableTo": "guests",
           "columnsFrom": [
             "guest_id"
           ],
-          "tableTo": "guests",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4631,24 +4653,24 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "brain_note_versions_note_id_brain_notes_id_fk": {
           "name": "brain_note_versions_note_id_brain_notes_id_fk",
           "tableFrom": "brain_note_versions",
+          "tableTo": "brain_notes",
           "columnsFrom": [
             "note_id"
           ],
-          "tableTo": "brain_notes",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4792,9 +4814,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "brain_notes_club_slug": {
           "name": "brain_notes_club_slug",
@@ -4813,24 +4835,24 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "brain_notes_club_id_clubs_id_fk": {
           "name": "brain_notes_club_id_clubs_id_fk",
           "tableFrom": "brain_notes",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4905,24 +4927,24 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "brain_snapshots_club_id_clubs_id_fk": {
           "name": "brain_snapshots_club_id_clubs_id_fk",
           "tableFrom": "brain_snapshots",
+          "tableTo": "clubs",
           "columnsFrom": [
             "club_id"
           ],
-          "tableTo": "clubs",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4934,10 +4956,10 @@
   },
   "enums": {},
   "schemas": {},
-  "views": {},
   "sequences": {},
   "roles": {},
   "policies": {},
+  "views": {},
   "_meta": {
     "columns": {},
     "schemas": {},

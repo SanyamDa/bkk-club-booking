@@ -3,7 +3,6 @@ import { bookingsForNight } from '../bookings/service.js';
 import { alerts, clubs, deposits, tables, zones, type Club } from '../db/schema.js';
 import type { Db } from '../db/client.js';
 import type { AppContext } from '../http/context.js';
-import { sweepGrantInboxUsers } from '../integrations/chatwoot/provision.js';
 import { bangkokParts, toDateString } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
 import type { LineSetupDetail } from './health.js';
@@ -159,18 +158,4 @@ export async function runAlertChecks(ctx: AppContext, now: Date): Promise<void> 
       ctx.deps.log(`Alert checks failed for club ${club.id}`, err);
     }
   }
-}
-
-/**
- * Runs `runAlertChecks` every minute until the returned function is called. Stand-in for B's
- * scheduler: `jobs/index.ts` calls this until `scheduler.register('alert-checks', ...)` exists
- * (requested in sync/track-a.md).
- */
-export function startAlertChecks(ctx: AppContext, now: () => Date): () => void {
-  const timer = setInterval(() => {
-    runAlertChecks(ctx, now()).catch((err) => ctx.deps.log('Alert checks failed', err));
-    // A13: expired support grants lose their Chatwoot login. Rides this timer until B's scheduler exists.
-    sweepGrantInboxUsers(ctx.deps.db, ctx.chatwoot, now(), ctx.deps.log).catch((err) => ctx.deps.log('Chatwoot grant sweep failed', err));
-  }, 60_000);
-  return () => clearInterval(timer);
 }

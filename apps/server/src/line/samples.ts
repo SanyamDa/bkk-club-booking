@@ -10,11 +10,11 @@ import type { Message } from './gateway.js';
  * message builders. Used to have LINE validate them (line setup) before guests see them.
  */
 export async function sampleMessages(db: Db, club: Club, links: Links, now: Date): Promise<Message[]> {
-  const options = await listTableOptions(db, club.id);
-  const option = options[0];
-  if (!option) return [];
   const nights = upcomingNights(club, now, 4);
   const night = nights[0] ?? '2026-12-04';
+  const options = await listTableOptions(db, club.id, night);
+  const option = options[0];
+  if (!option) return [];
   const booking = {
     id: 'sample-booking',
     clubId: club.id,
@@ -100,7 +100,7 @@ export async function sampleMessages(db: Db, club: Club, links: Links, now: Date
       M.askPax(lang, night),
       ...M.tablesCarousel(club, lang, options, night, '5–8'),
       M.noTables(lang, night, '5–8'),
-      M.held(club, lang, view, links.details(club, booking)),
+      M.held(club, lang, view, links.details(club, booking, now)),
       M.review(club, lang, view),
       ...M.payment(club, lang, view, qr),
       ...M.payment(club, lang, view, null),

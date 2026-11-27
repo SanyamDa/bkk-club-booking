@@ -201,7 +201,7 @@ export function LineWizard() {
     try {
       setTester((await adminApi.testerCode(slug)).code);
     } catch (e) {
-      setTesterError(e instanceof ApiError && e.status === 503 ? 'Tester codes arrive with the guest-side work (B6); not ready yet.' : errText(e));
+      setTesterError(errText(e));
     }
   }
 

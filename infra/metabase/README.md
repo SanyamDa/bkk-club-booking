@@ -6,7 +6,7 @@ figures in our dashboard (A16, A16b), never here.
 
 ## What it can read
 
-Migration `apps/server/drizzle/0005_analytics_views.sql` creates three schemas:
+Migration `apps/server/drizzle/0006_analytics_views.sql` creates three schemas:
 
 | Schema | Holds | Granted to `metabase_ro` |
 |---|---|---|

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { webhook } from '@line/bot-sdk';
 import { and, eq, inArray } from 'drizzle-orm';
 import {
+  abandonUnfinished as abandonUnfinishedBookings,
   availableTables,
   BookingError,
   bookingAwaitingSlip,
@@ -20,7 +21,6 @@ import type { Db } from '../db/client.js';
 import { isUniqueViolation } from '../db/client.js';
 import {
   bookings,
-  clubs,
   conversations,
   guests,
   messages as messagesTable,
@@ -33,9 +33,12 @@ import type { Outbox } from '../line/outbox.js';
 import { formatNight } from '../lib/time.js';
 import { newId } from '../lib/util.js';
 import { langOf, t, type Lang } from './i18n.js';
-import { detectIntent } from './intents.js';
+import { detectIntent, testerCodeIn } from './intents.js';
+import { emit } from '../data/events.js';
+import { isTestContext, isTestGuestAtCreate, redeemTesterCode } from '../data/test-flag.js';
 import type { Links } from './links.js';
 import * as M from './messages.js';
+import { handleStaffLink } from './staff-link.js';
 
 export interface BotDeps {
   db: Db;
@@ -143,30 +146,43 @@ async function handleGroupEvent(deps: BotDeps, club: Club, gateway: LineGateway,
   if (event.type === 'join' && event.replyToken) {
     await gateway.reply(event.replyToken, [
       M.plain(
-        `Hi! To get ${club.name} booking alerts in this group, a manager types "link" followed by the code on the dashboard's Setup page.\nพิมพ์ "link" ตามด้วยรหัสจากหน้า Setup ในแดชบอร์ด เพื่อรับการแจ้งเตือนการจองในกลุ่มนี้`,
+        `Hi! To get ${club.name} booking alerts in this group, a manager presses "Issue link code" on the dashboard's Setup page and types "link" followed by that code here.\nผู้จัดการกด "Issue link code" ในหน้า Setup ของแดชบอร์ด แล้วพิมพ์ "link" ตามด้วยรหัสนั้นในกลุ่มนี้ เพื่อรับการแจ้งเตือนการจอง`,
       ),
     ]);
     return;
   }
   if (event.type !== 'message' || event.message.type !== 'text' || event.source?.type !== 'group') return;
   const intent = detectIntent(event.message.text);
-  if (intent.kind !== 'staff_link' || intent.code !== club.staffLinkCode) return;
-  const [updated] = await deps.db
-    .update(clubs)
-    .set({ staffGroupId: event.source.groupId })
-    .where(eq(clubs.id, club.id))
-    .returning();
-  const confirmation = [
-    M.plain(`✅ This group will now receive ${club.name} booking alerts.\nกลุ่มนี้จะได้รับการแจ้งเตือนการจองแล้ว`),
-  ];
-  if (event.replyToken) await gateway.reply(event.replyToken, confirmation);
-  else await gateway.push(event.source.groupId, confirmation);
-  deps.log(`Staff group linked for club ${updated?.id}`);
+  if (intent.kind !== 'staff_link') return;
+  // B5: the typed code is compared with the stored hash (never `club.staffLinkCode`) and never logged.
+  const result = await handleStaffLink(
+    deps.db,
+    club,
+    gateway,
+    { groupId: event.source.groupId, code: intent.code, replyToken: event.replyToken },
+    deps.now(),
+  );
+  if (result !== 'ignored') deps.log(`Staff group link ${result} for club ${club.id}`);
 }
 
 // ---------- Text ----------
 
 async function handleText(turn: Turn, text: string) {
+  // B6: at an onboarding club, the one-time tester code marks this guest as a tester.
+  const testerCode = turn.club.status === 'onboarding' ? testerCodeIn(text) : null;
+  if (testerCode) {
+    const tester = await redeemTesterCode(turn.deps.db, turn.club, turn.guest, testerCode, turn.now);
+    if (tester) {
+      turn.guest = tester;
+      await send(turn, [
+        M.plain(
+          'Tester registered. Your bookings and messages here are test data.\nลงทะเบียนผู้ทดสอบแล้ว การจองและข้อความของคุณที่นี่เป็นข้อมูลทดสอบ',
+          M.menuQuickReplies(turn.club, turn.lang),
+        ),
+      ]);
+      return;
+    }
+  }
   const intent = detectIntent(text);
   switch (intent.kind) {
     case 'details_sent': {
@@ -258,16 +274,8 @@ async function startBooking(turn: Turn, opts: { force?: boolean } = {}) {
 }
 
 async function abandonUnfinished(turn: Turn) {
-  await turn.deps.db
-    .update(bookings)
-    .set({ status: 'abandoned', statusReason: 'Guest started over', updatedAt: turn.now })
-    .where(
-      and(
-        eq(bookings.clubId, turn.club.id),
-        eq(bookings.guestId, turn.guest.id),
-        inArray(bookings.status, ['held', 'awaiting_payment']),
-      ),
-    );
+  // B2: each abandoned booking gets its history row, audit row and events.
+  await abandonUnfinishedBookings(turn.deps.db, turn.club.id, turn.guest.id, turn.now);
 }
 
 async function continueBooking(turn: Turn, bookingId: string) {
@@ -276,7 +284,7 @@ async function continueBooking(turn: Turn, bookingId: string) {
   const b = view.booking;
   const expired = b.holdExpiresAt && b.holdExpiresAt <= turn.now;
   if (b.status === 'held' && !expired) {
-    if (!b.rulesAcceptedAt) await send(turn, [M.held(turn.club, turn.lang, view, turn.deps.links.details(turn.club, b))]);
+    if (!b.rulesAcceptedAt) await send(turn, [M.held(turn.club, turn.lang, view, turn.deps.links.details(turn.club, b, turn.now))]);
     else await sendReview(turn, b.id);
     return;
   }
@@ -316,7 +324,9 @@ async function choosePax(turn: Turn, key: string) {
 async function sendTables(turn: Turn, nightDate: string, key: string, prefix: Message[] = []) {
   const range = paxRange(key)!;
   const label = `${range.min}–${range.max}`;
-  const options = await availableTables(turn.deps.db, turn.club.id, nightDate, range, turn.now);
+  const options = await availableTables(turn.deps.db, turn.club.id, nightDate, range, turn.now, {
+    isTest: isTestContext({ club: turn.club, guest: turn.guest }),
+  });
   if (options.length === 0) {
     await send(turn, [...prefix, M.noTables(turn.lang, nightDate, label)]);
     return;
@@ -335,7 +345,7 @@ async function chooseTable(turn: Turn, tableId: string, nightDate: string) {
       turn.now,
     );
     const view = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: booking.id }))!;
-    await send(turn, [M.held(turn.club, turn.lang, view, turn.deps.links.details(turn.club, booking))]);
+    await send(turn, [M.held(turn.club, turn.lang, view, turn.deps.links.details(turn.club, booking, turn.now))]);
   } catch (err) {
     if (err instanceof BookingError && err.code === 'table_taken') {
       const code = tableId.split('_').pop() ?? '';
@@ -378,7 +388,7 @@ async function confirm(turn: Turn, bookingId: string) {
       return;
     }
     if (err instanceof BookingError && err.code === 'details_missing') {
-      await send(turn, [M.held(turn.club, turn.lang, view, turn.deps.links.details(turn.club, view.booking))]);
+      await send(turn, [M.held(turn.club, turn.lang, view, turn.deps.links.details(turn.club, view.booking, turn.now))]);
       return;
     }
     if (err instanceof BookingError && err.code === 'invalid_state') {
@@ -472,17 +482,33 @@ async function upsertGuest(db: Db, gateway: LineGateway, club: Club, lineUserId:
   if (found) return found;
   const profile = await gateway.getProfile(lineUserId);
   try {
-    const [g] = await db
-      .insert(guests)
-      .values({
-        id: newId(),
+    return await db.transaction(async (tx) => {
+      const [g] = await tx
+        .insert(guests)
+        .values({
+          id: newId(),
+          clubId: club.id,
+          lineUserId,
+          displayName: profile?.displayName ?? null,
+          lang: langOf(profile?.language),
+          // B6: simulator (`SIM-`) guests and every guest of a demo club are test rows.
+          isTest: isTestGuestAtCreate(club, lineUserId),
+        })
+        .returning();
+      await emit(tx, {
         clubId: club.id,
-        lineUserId,
-        displayName: profile?.displayName ?? null,
-        lang: langOf(profile?.language),
-      })
-      .returning();
-    return g!;
+        type: 'guest.first_seen',
+        occurredAt: new Date(),
+        actorType: 'guest',
+        actorId: g!.id,
+        channel: 'line',
+        dataOrigin: 'line_chat',
+        guestId: g!.id,
+        isTest: isTestContext({ club, guest: g }),
+        dedupeKey: `guest.first_seen:${g!.id}`,
+      });
+      return g!;
+    });
   } catch (err) {
     if (!isUniqueViolation(err)) throw err;
     return (await db.query.guests.findFirst({

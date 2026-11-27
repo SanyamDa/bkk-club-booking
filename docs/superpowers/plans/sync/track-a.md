@@ -887,3 +887,29 @@ Route: `POST /integrations/pos/papaya/:slug`.
 - **Requests to B:** (1) a booking-service transition so a closed POS bill completes its booking and emits `booking.completed`; (2) B3's raw-webhook writer, then A drops the direct `raw_webhooks` insert; (3) a scheduler slot for `syncClosedBills` (no job runs it yet).
 - **Blockers:** Papaya and Loyverse API shapes not checked against a sandbox. No `it.todo` in `pos-sync.test.ts`.
 - **Browser walk:** not applicable (no web change); the check-in bill needs a human run against a POS sandbox.
+
+## 2026-11-27 — A18 Instagram via Chatwoot
+
+- **Landed:** a club's Instagram inbox, created by the founder inside Chatwoot (Instagram login is Chatwoot's OAuth), is linked to the club, gets a per-club webhook, and every incoming Instagram message lands in the club's Chatwoot inbox and in our tables as `data_origin='instagram'` rows. No cross-club view reads them (spec §14.8).
+- **Migration:** none. State lives in `platform_flags['chatwoot:<clubId>:instagram']` and the club's `channels` row (kind `instagram`).
+- **Published (`apps/server/src/integrations/chatwoot/instagram.ts`), exact signatures:**
+  - `export const INSTAGRAM_CHANNEL = 'instagram'`
+  - `export interface InstagramState { inboxId: number; instagramId: string | null; webhookId?: number; tokenHash?: string; connectedAt?: string }`
+  - `export class InstagramInboxMissing extends Error { constructor(clubId: string) }`
+  - `export const instagramFlagKey = (clubId: string) => string` (`chatwoot:${clubId}:instagram`)
+  - `export const instagramWebhookPath = (clubId: string) => string` (`/integrations/chatwoot/${clubId}/instagram`)
+  - `export const instagramWebhookUrl = (publicUrl: string, clubId: string, token: string) => string`
+  - `export async function instagramState(db: Db, clubId: string): Promise<InstagramState | null>`
+  - `export function instagramSummary(state: InstagramState | null): { status: 'connected' | 'partial' | 'not_connected'; inboxId: number | null; instagramId: string | null; connectedAt: string | null }`
+  - `export async function connectInstagram(db: Db, cw: ChatwootClient, key: Buffer, club: { id: string }, opts: { inboxId?: number; publicUrl: string; by: string; now: Date }): Promise<InstagramState>` (throws `InstagramInboxMissing` when Chatwoot has no Instagram inbox yet; throws `InboxNotProvisioned` when A13's Chatwoot account is not set up)
+  - `export function verifyInstagramToken(state: InstagramState | null, token: string | undefined | null): boolean`
+  - `export type InstagramApplied = 'recorded' | 'duplicate' | 'ignored'`
+  - `export async function recordInstagramMessage(db: Db, club: Club, state: InstagramState, body: unknown, now: Date): Promise<InstagramApplied>`
+  - `instagramAdminRoutes(app: AppContext)` in `apps/server/src/http/admin/instagram.ts`, mounted in `http/admin/index.ts`.
+- **Routes:** `GET /api/admin/clubs/:slug/instagram`, `POST /api/admin/clubs/:slug/instagram/connect` (body `{ inboxId?: number }`); webhook `POST /integrations/chatwoot/:clubId/instagram?token=...` (Chatwoot does not sign these: the per-club token, stored as a SHA-256 hash, is the proof of origin; bad tokens are rate-limited like A19). Deliveries go to `raw_webhooks` with channel `chatwoot:instagram` by direct insert.
+- **Rows written (B must match):** guests with `channel_id` = channels row id and `external_user_id` = Instagram sender id (`contact_inbox.source_id`), `line_user_id` null; conversations `external_ref` = `chatwootConversationRef(account, conversation)`; messages `external_id` = `cw:<account>:<message id>`; events `message.received` and `guest.first_seen` with `channel` and `data_origin` `instagram`, `source` `chatwoot`.
+- **§14.8:** admin data-health counts (`http/admin/data.ts`), the cross-club event stream and the club list's last-inbound time (`platform/health.ts`) leave out Instagram rows; the club-scoped stream keeps them.
+- **Requests to B:** (1) a messages writer that takes a channel id and an external id, then A switches `recordInstagramMessage` to it; (2) a unique index on `guests (club_id, channel_id, external_user_id)` (two concurrent first messages can create two guest rows today); (3) B3's raw-webhook writer / `processDelivery`, then A drops the direct insert; (4) the Metabase analytics view (B14) and busyness feed must leave out `data_origin='instagram'` rows; (5) route Instagram messages to the brain, and attach the agent bot to the Instagram inbox when the bot handles Instagram.
+- **Blockers:** Meta app approval for Instagram messaging in Chatwoot. Chatwoot payload shapes (`{ payload: [...] }` inbox list, `Channel::Instagram` or `Channel::FacebookPage` with `instagram_id`, `payload.webhook.id`) not checked against a live Chatwoot. Outgoing messages (including replies typed in the Instagram app) are ignored.
+- **it.todo (waiting on B):** three in `test/instagram.test.ts`: delivery through B3 `processDelivery` / raw-webhook writer; an Instagram message reaching the club's brain (B chat capture); Metabase view and busyness feed leaving out instagram rows (B14 / busyness feed).
+- **Browser walk:** not applicable (no web change in A18). A human still needs to connect a real Instagram account in Chatwoot and send a message end to end.

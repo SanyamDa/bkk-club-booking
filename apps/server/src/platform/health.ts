@@ -1,6 +1,6 @@
 import { and, desc, eq, gte, isNotNull, lt, ne, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { conversations, deposits, messages, opsEvents, type Club } from '../db/schema.js';
+import { channels, conversations, deposits, messages, opsEvents, type Club } from '../db/schema.js';
 import type { SetupReport } from '../line/setup.js';
 
 /** `ops_events.detail` of a `kind = 'line_setup'` row (plan A5). */
@@ -49,7 +49,14 @@ export async function clubHealth(db: Db, club: Club, now: Date): Promise<ClubHea
   const [inbound] = await db
     .select({ at: sql<Date | string | null>`max(${messages.createdAt})` })
     .from(messages)
-    .where(and(eq(messages.clubId, club.id), eq(messages.direction, 'in')));
+    .where(
+      and(
+        eq(messages.clubId, club.id),
+        eq(messages.direction, 'in'),
+        // Spec §14.8 (plan A18): the cross-club club list must not reflect Instagram traffic.
+        sql`not exists (select 1 from ${channels} where ${channels.id} = ${messages.channelId} and ${channels.kind} = 'instagram')`,
+      ),
+    );
   const [failures] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(opsEvents)

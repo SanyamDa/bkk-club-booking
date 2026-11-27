@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { clubs, events, eventsDeadLetter, guests, notices, removalRequests } from '../../db/schema.js';
+import { channels, clubs, events, eventsDeadLetter, guests, notices, removalRequests } from '../../db/schema.js';
 import { addDays, bangkokParts, toDateString } from '../../lib/time.js';
 import { requirePlatformAdmin, type AuthEnv } from '../auth.js';
 import type { AppContext } from '../context.js';
@@ -21,6 +21,12 @@ const streamQuery = z.object({
 
 /** Bangkok calendar day of a timestamp column, as YYYY-MM-DD (Thailand is UTC+7 all year). */
 const bkkDay = (col: unknown) => sql<string>`to_char((${col} at time zone 'UTC') + interval '7 hours', 'YYYY-MM-DD')`;
+
+/**
+ * Spec §14.8 (plan A18): Instagram data stays with its club, "including in aggregated or derived
+ * form". Cross-club reads (the health table, the unscoped event stream) leave those rows out.
+ */
+const notInstagram = sql`${events.dataOrigin} <> 'instagram'`;
 
 /**
  * Data health and the event stream (spec §14.6, plan A5). Mounted under /api/admin:
@@ -45,11 +51,12 @@ export function dataRoutes(app: AppContext) {
     const perDay = await db
       .select({ clubId: events.clubId, day: bkkDay(events.occurredAt), n: sql<number>`count(*)::int` })
       .from(events)
-      .where(sql`${events.occurredAt} >= ${since}`)
+      .where(and(sql`${events.occurredAt} >= ${since}`, notInstagram))
       .groupBy(events.clubId, bkkDay(events.occurredAt));
     const last = await db
       .select({ clubId: events.clubId, at: sql<string | null>`max(${events.occurredAt})` })
       .from(events)
+      .where(notInstagram)
       .groupBy(events.clubId);
     const rejected = await db
       .select({ clubId: sql<string | null>`${eventsDeadLetter.payload}->>'clubId'`, n: sql<number>`count(*)::int` })
@@ -58,6 +65,8 @@ export function dataRoutes(app: AppContext) {
     const guestCounts = await db
       .select({ clubId: guests.clubId, n: sql<number>`count(*)::int` })
       .from(guests)
+      // §14.8: Instagram contacts stay out of this cross-club figure (they never see the LIFF notice either).
+      .where(sql`not exists (select 1 from ${channels} where ${channels.id} = ${guests.channelId} and ${channels.kind} = 'instagram')`)
       .groupBy(guests.clubId);
     const noticed = await db
       .select({ clubId: notices.clubId, n: sql<number>`count(distinct ${notices.guestId})::int` })
@@ -130,7 +139,7 @@ export function dataRoutes(app: AppContext) {
       .from(events)
       .where(
         and(
-          clubId ? eq(events.clubId, clubId) : undefined,
+          clubId ? eq(events.clubId, clubId) : notInstagram,
           conversation ? eq(events.conversationId, conversation) : undefined,
           booking ? eq(events.bookingId, booking) : undefined,
           guest ? eq(events.guestId, guest) : undefined,

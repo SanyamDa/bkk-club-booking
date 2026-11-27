@@ -6,6 +6,7 @@ import { clubsRoutes } from './clubs.js';
 import { controlsRoutes } from './controls.js';
 import { dataRoutes } from './data.js';
 import { debugRoutes } from './debug.js';
+import { instagramAdminRoutes } from './instagram.js';
 import { lineWizardRoutes } from './line-wizard.js';
 import { onboardingAdminRoutes } from './onboarding.js';
 import { platformRoutes } from './platform.js';
@@ -27,5 +28,6 @@ export function adminRoutes(app: AppContext) {
   r.route('/', debugRoutes(app));
   r.route('/', dataRoutes(app));
   r.route('/', calendarRoutes(app)); // A9 event calendar and city calendar entry
+  r.route('/', instagramAdminRoutes(app)); // A18 Instagram via Chatwoot
   return r;
 }

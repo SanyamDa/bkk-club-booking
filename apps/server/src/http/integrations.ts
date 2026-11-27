@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { clubs, rawWebhooks } from '../db/schema.js';
+import { instagramState, recordInstagramMessage, verifyInstagramToken } from '../integrations/chatwoot/instagram.js';
 import { applyLiveBill, loadPosAdapter } from '../integrations/pos/live.js';
 import { PAPAYA_SIGNATURE_HEADER } from '../integrations/pos/papaya.js';
 import { newId } from '../lib/util.js';
@@ -33,6 +34,40 @@ export function integrationRoutes(app: AppContext) {
   const r = new Hono();
   const db = app.deps.db;
   const badSignatures = minuteCounter();
+
+  // A18: Chatwoot account webhook (message_created) for the club's Instagram inbox. The per-club
+  // token in the query string is the only proof of origin (Chatwoot does not sign these).
+  r.post('/chatwoot/:clubId/instagram', bodyLimit({ maxSize: 256 * 1024, onError: (c) => c.json({ error: 'too_large' }, 413) }), async (c) => {
+    const club = await db.query.clubs.findFirst({ where: eq(clubs.id, c.req.param('clubId')) });
+    if (!club) return c.json({ error: 'not_found' }, 404);
+    const state = await instagramState(db, club.id);
+    if (!state?.tokenHash) return c.json({ error: 'not_found' }, 404);
+    const now = app.deps.now();
+    if (!verifyInstagramToken(state, c.req.query('token'))) {
+      if (badSignatures(`${club.id}|${clientIp(c) ?? 'unknown'}`, now) > BAD_SIGNATURE_LIMIT_PER_IP) return c.json({ error: 'rate_limited' }, 429);
+      if (badSignatures(club.id, now) > BAD_SIGNATURE_LIMIT_PER_CLUB) return c.json({ error: 'rate_limited' }, 429);
+      return c.json({ error: 'bad_token' }, 401);
+    }
+    const raw = await c.req.text();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+    const body = parsed !== null && typeof parsed === 'object' ? parsed : { unparsed: raw.slice(0, 10_000) };
+    // Direct insert until B3's raw_webhooks writer merges (plan A18 / B3 fallback).
+    const rawId = newId();
+    await db.insert(rawWebhooks).values({ id: rawId, clubId: club.id, channel: 'chatwoot:instagram', receivedAt: now, body, signatureOk: true, processedAt: null });
+    try {
+      const applied = await recordInstagramMessage(db, club, state, parsed, now);
+      await db.update(rawWebhooks).set({ processedAt: now }).where(eq(rawWebhooks.id, rawId));
+      return c.json({ ok: true, applied });
+    } catch (err) {
+      await db.update(rawWebhooks).set({ error: err instanceof Error ? err.message : String(err) }).where(eq(rawWebhooks.id, rawId));
+      throw err;
+    }
+  });
 
   r.post('/pos/papaya/:slug', bodyLimit({ maxSize: 256 * 1024, onError: (c) => c.json({ error: 'too_large' }, 413) }), async (c) => {
     const club = await db.query.clubs.findFirst({ where: eq(clubs.slug, c.req.param('slug')) });

@@ -1,9 +1,15 @@
 import { useState, type FormEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../../api';
+
+/** Where to land after sign-in: `?next=` when it is a same-site path (e.g. `/admin`), else `/staff`. */
+function nextPath(raw: string | null): string {
+  return raw && raw.startsWith('/') && !raw.startsWith('//') ? raw : '/staff';
+}
 
 export function Login() {
   const navigate = useNavigate();
+  const [params] = useSearchParams();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
@@ -17,7 +23,7 @@ export function Login() {
     setError('');
     try {
       await api('/api/auth/login', { body: { email, password, ...(needsCode ? { totp: code } : {}) } });
-      navigate('/staff', { replace: true });
+      navigate(nextPath(params.get('next')), { replace: true });
     } catch (err) {
       const kind = err instanceof ApiError ? err.body.error : undefined;
       if (kind === 'totp_required') {

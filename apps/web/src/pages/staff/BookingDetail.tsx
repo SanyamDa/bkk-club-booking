@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api, Status } from '../../api';
+import { useStaff } from './Layout';
+import { api, staffPath, Status } from '../../api';
 import { MessageThread, type ThreadMessage } from './MessageThread';
 
 interface Detail {
@@ -16,11 +17,12 @@ interface Detail {
 
 export function BookingDetail() {
   const { id = '' } = useParams();
+  const { club } = useStaff();
   const [d, setD] = useState<Detail | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(() => api<Detail>(`/api/staff/bookings/${id}`).then(setD).catch((e) => setError(String(e.message))), [id]);
+  const load = useCallback(() => api<Detail>(staffPath(club, `/bookings/${id}`)).then(setD).catch((e) => setError(String(e.message))), [club, id]);
   useEffect(() => { void load(); }, [load]);
 
   async function act(action: string, opts: { confirm?: string; askReason?: string } = {}) {
@@ -33,7 +35,7 @@ export function BookingDetail() {
     setBusy(true);
     setError('');
     try {
-      await api(`/api/staff/bookings/${id}/${action}`, { body: { reason } });
+      await api(staffPath(club, `/bookings/${id}/${action}`), { body: { reason } });
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Action failed');
@@ -84,8 +86,8 @@ export function BookingDetail() {
               <p className="faint" style={{ margin: 0 }}>
                 Check the amount is <b>{slip.amount}</b>, it went to the club’s account, and the time is after the booking was made.
               </p>
-              <a href={`/api/staff/deposits/${slip.id}/slip`} target="_blank" rel="noreferrer">
-                <img src={`/api/staff/deposits/${slip.id}/slip`} alt="Payment slip sent by the guest" style={{ maxWidth: '100%', maxHeight: 520, borderRadius: 10, border: '1px solid var(--line)', background: '#fff' }} />
+              <a href={staffPath(club, `/deposits/${slip.id}/slip`)} target="_blank" rel="noreferrer">
+                <img src={staffPath(club, `/deposits/${slip.id}/slip`)} alt="Payment slip sent by the guest" style={{ maxWidth: '100%', maxHeight: 520, borderRadius: 10, border: '1px solid var(--line)', background: '#fff' }} />
               </a>
               {b.status === 'payment_review' || (b.status === 'expired' && slip.status === 'review') ? (
                 <div className="row wrap">

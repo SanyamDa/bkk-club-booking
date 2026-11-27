@@ -5,6 +5,7 @@ import type { GatewayRegistry } from '../line/gateway.js';
 import type { IdTokenVerifier } from '../line/idtoken.js';
 import type { CredentialStore, LoginChannel } from '../line/credentials.js';
 import type { LiffEndpointUpdater, SetupClients } from '../line/setup.js';
+import type { LineTokenIssuer } from '../line/tokens.js';
 
 export interface AppContext {
   config: Config;
@@ -15,6 +16,8 @@ export interface AppContext {
   notifier: Notifier;
   /** Registers background work so tests (and shutdown) can wait for it. */
   track: (p: Promise<unknown>) => void;
+  /** Issues LINE channel access tokens; the console uses it to check new credentials before saving them. */
+  lineTokens: LineTokenIssuer;
   /** LINE API clients for setup/status. Replaced by fakes in tests. */
   lineSetupClients: (accessToken: string, login: LoginChannel | null) => SetupClients;
   verifyIdToken: IdTokenVerifier;

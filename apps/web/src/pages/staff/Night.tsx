@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { api, ApiError, Status } from '../../api';
+import { api, ApiError, staffPath, Status } from '../../api';
 import { useStaff } from './Layout';
 
 interface TableRow {
@@ -52,7 +52,7 @@ export function Night() {
 
   const load = useCallback(async () => {
     try {
-      const d = await api<NightData>(`/api/staff/clubs/${club}/night${date ? `?date=${date}` : ''}`);
+      const d = await api<NightData>(staffPath(club, `/night${date ? `?date=${date}` : ''}`));
       setData(d);
       if (!date) setDate(d.date);
     } catch (err) {
@@ -71,7 +71,7 @@ export function Night() {
     setBusy(id + action);
     setError('');
     try {
-      await api(`/api/staff/bookings/${id}/${action}`, { body: {} });
+      await api(staffPath(club, `/bookings/${id}/${action}`), { body: {} });
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Action failed');

@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { api, ApiError } from '../../api';
+import { api, ApiError, staffPath } from '../../api';
 import { useStaff } from './Layout';
 
 interface TableRow { id: string; code: string; zone: string; minPax: number; maxPax: number; minSpend: string; deposit: string; booking: unknown }
@@ -17,7 +17,7 @@ export function NewBooking() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api<{ date: string; tables: TableRow[] }>(`/api/staff/clubs/${club}/night${date ? `?date=${date}` : ''}`).then((d) => {
+    api<{ date: string; tables: TableRow[] }>(staffPath(club, `/night${date ? `?date=${date}` : ''}`)).then((d) => {
       if (!date) setDate(d.date);
       setTables(d.tables);
     });
@@ -31,7 +31,7 @@ export function NewBooking() {
     setBusy(true);
     setError('');
     try {
-      const res = await api<{ id: string }>(`/api/staff/clubs/${club}/bookings`, { body: { ...form, nightDate: date } });
+      const res = await api<{ id: string }>(staffPath(club, '/bookings'), { body: { ...form, nightDate: date } });
       navigate(`/staff/bookings/${res.id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not create the booking');

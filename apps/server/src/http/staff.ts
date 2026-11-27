@@ -3,13 +3,10 @@ import { stat } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
-import { Hono } from 'hono';
-import { deleteCookie, getCookie } from 'hono/cookie';
+import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import {
   ACTIVE_BOOKING_STATUSES,
-  bookings,
-  clubs,
   conversations,
   deposits,
   guests,
@@ -28,83 +25,62 @@ import {
   listTableOptions,
   markArrived,
   markNoShow,
+  REASON_CODES,
   rejectDeposit,
   type Actor,
+  type Reason,
 } from '../bookings/service.js';
 import { getConversationForClub } from '../chat/conversations.js';
+import { emit, type EventInput } from '../data/events.js';
 import { sampleMessages } from '../line/samples.js';
 import { describeLineError, runLineSetup } from '../line/setup.js';
 import { currentNightDate, formatNight } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
-import { revokeSession, SESSION_COOKIE } from '../platform/sessions.js';
-import { checkClubAccess, clubsOfUser, requireClubRole, requireUser, type AuthEnv, type Role } from './auth.js';
+import { requireClubRole, type AuthEnv, type Role } from './auth.js';
 import type { AppContext } from './context.js';
 
 /** Roles per route (plan A2 Decisions). */
 const STAFF_ROLES: Role[] = ['owner', 'manager', 'host', 'door'];
 const MANAGER_ROLES: Role[] = ['owner', 'manager'];
 
+type StaffContext = Context<AuthEnv>;
+
+/** The actor for audit rows and events: the signed-in person, or a platform user under a support grant (A5). */
+function actorOf(c: StaffContext): Actor {
+  const grant = c.var.supportGrant;
+  return grant
+    ? { type: 'platform', id: c.var.user.id, sessionId: c.var.session.idHash, supportGrantId: grant.id }
+    : { type: 'staff', id: c.var.user.id, sessionId: c.var.session.idHash };
+}
+
 /**
- * Staff dashboard API. Sign-in is per person at /api/auth (http/auth.ts, spec §4, §13); every
- * route here needs a live session and access to the club it touches: `/clubs/:slug/*` through
- * `requireClubRole`, id-addressed routes through `checkClubAccess` on the row's club. A2 moves the
- * id routes under `/clubs/:slug` and switches the lookups to the club-scoped W0 helpers only.
+ * Staff dashboard API, mounted at /api/staff. Sign-in is per person at /api/auth (http/auth.ts,
+ * spec §4, §13). Every route lives under `/clubs/:slug/...` and goes through `requireClubRole`, so
+ * the club comes from the URL and the session (spec §12.1). Every id lookup is club-scoped
+ * (`getBookingView`, the booking-service mutations, `getConversationForClub`, `getDepositForClub`),
+ * so another club's id answers 404 even on the user's own slug.
  */
 export function staffRoutes(app: AppContext) {
   const r = new Hono<AuthEnv>();
   const { db } = app.deps;
 
-  const requireStaff = requireUser(app);
-  const managerOnly = requireClubRole(app, ...MANAGER_ROLES);
-  r.use('/clubs/:slug/settings', managerOnly);
-  r.use('/clubs/:slug/line-setup', managerOnly);
-  r.use('/clubs/:slug/line-status', managerOnly);
-  r.use('/clubs/:slug/*', requireClubRole(app, ...STAFF_ROLES));
-  r.use('/bookings/*', requireStaff);
-  r.use('/conversations/*', requireStaff);
-  r.use('/deposits/*', requireStaff);
-  r.use('/me', requireStaff);
+  const staff = requireClubRole(app, ...STAFF_ROLES);
+  const managers = requireClubRole(app, ...MANAGER_ROLES);
 
-  /** The row's club when the signed-in user may use it with one of `roles`, else the refusal. */
-  async function accessible(
-    userId: string,
-    clubId: string | undefined,
-    roles: Role[] = STAFF_ROLES,
-  ): Promise<{ clubId: string } | { refused: 'not_found' | 'forbidden' }> {
-    if (!clubId) return { refused: 'not_found' };
-    const result = await checkClubAccess(app, userId, clubId, roles);
-    return result === 'ok' ? { clubId } : { refused: result };
+  /** A staff-surface event for the club in the URL, attributed to the signed-in person. */
+  function staffEvent(c: StaffContext, e: Omit<EventInput, 'clubId' | 'occurredAt' | 'actorType' | 'actorId' | 'dataOrigin' | 'isTest'>) {
+    const club = c.var.club;
+    const actor = actorOf(c);
+    return emit(db, {
+      ...e,
+      clubId: club.id,
+      occurredAt: app.deps.now(),
+      actorType: actor.type,
+      actorId: actor.id,
+      dataOrigin: 'first_party',
+      isTest: club.status === 'demo',
+    });
   }
-
-  // The web dashboard still calls these two; they match /api/auth/me and /api/auth/logout.
-  r.get('/me', async (c) => c.json({ clubs: await clubsOfUser(db, c.var.user.id) }));
-  r.post('/logout', async (c) => {
-    const sid = getCookie(c, SESSION_COOKIE);
-    if (sid) await revokeSession(db, sid, app.deps.now());
-    deleteCookie(c, SESSION_COOKIE, { path: '/' });
-    return c.json({ ok: true });
-  });
-
-  async function clubBySlug(slug: string): Promise<Club | undefined> {
-    return db.query.clubs.findFirst({ where: eq(clubs.slug, slug) });
-  }
-
-  // These URLs carry no club yet, so the club comes from the row itself and `accessible` checks
-  // the user's membership there. A2 moves these routes under /clubs/:slug.
-  async function clubIdOfBooking(id: string): Promise<string | undefined> {
-    const [row] = await db.select({ clubId: bookings.clubId }).from(bookings).where(eq(bookings.id, id)).limit(1);
-    return row?.clubId;
-  }
-  async function clubIdOfConversation(id: string): Promise<string | undefined> {
-    const [row] = await db.select({ clubId: conversations.clubId }).from(conversations).where(eq(conversations.id, id)).limit(1);
-    return row?.clubId;
-  }
-  async function clubIdOfDeposit(id: string): Promise<string | undefined> {
-    const [row] = await db.select({ clubId: deposits.clubId }).from(deposits).where(eq(deposits.id, id)).limit(1);
-    return row?.clubId;
-  }
-
-  const STAFF: Actor = { type: 'staff' };
 
   const shape = (b: Booking) => ({
     id: b.id,
@@ -123,9 +99,8 @@ export function staffRoutes(app: AppContext) {
   });
 
   // ----- Tonight: table map + bookings for one night -----
-  r.get('/clubs/:slug/night', async (c) => {
-    const club = await clubBySlug(c.req.param('slug'));
-    if (!club) return c.json({ error: 'not_found' }, 404);
+  r.get('/clubs/:slug/night', staff, async (c) => {
+    const club = c.var.club;
     const now = app.deps.now();
     const date = c.req.query('date') || currentNightDate(now, club.settings.nightEndHour);
     const [options, nightBookings] = await Promise.all([listTableOptions(db, club.id), bookingsForNight(db, club.id, date)]);
@@ -181,19 +156,29 @@ export function staffRoutes(app: AppContext) {
   });
 
   // ----- Booking detail + actions -----
-  r.get('/bookings/:id', async (c) => {
-    const id = c.req.param('id');
-    const access = await accessible(c.var.user.id, await clubIdOfBooking(id));
-    if ('refused' in access) return c.json({ error: access.refused }, access.refused === 'forbidden' ? 403 : 404);
-    const view = await getBookingView(db, { clubId: access.clubId, id });
+  r.get('/clubs/:slug/bookings/:id', staff, async (c) => {
+    const club = c.var.club;
+    const view = await getBookingView(db, { clubId: club.id, id: c.req.param('id') });
     if (!view) return c.json({ error: 'not_found' }, 404);
     const recent = await db
       .select()
       .from(messages)
-      .where(eq(messages.guestId, view.guest.id))
+      .where(and(eq(messages.clubId, club.id), eq(messages.guestId, view.guest.id)))
       .orderBy(desc(messages.createdAt))
       .limit(30);
-    const allDeposits = await db.select().from(deposits).where(eq(deposits.bookingId, view.booking.id)).orderBy(desc(deposits.createdAt));
+    const allDeposits = await db
+      .select()
+      .from(deposits)
+      .where(and(eq(deposits.clubId, club.id), eq(deposits.bookingId, view.booking.id)))
+      .orderBy(desc(deposits.createdAt));
+    await staffEvent(c, {
+      type: 'staff.booking_viewed',
+      bookingId: view.booking.id,
+      guestId: view.guest.id,
+      tableId: view.table.id,
+      zoneId: view.zone.id,
+      nightDate: view.booking.nightDate,
+    });
     return c.json({
       booking: { ...shape(view.booking), table: view.table.code, zone: view.zone.name, rulesAcceptedAt: view.booking.rulesAcceptedAt?.toISOString() ?? null },
       guest: { id: view.guest.id, name: view.guest.name, displayName: view.guest.displayName, phone: view.guest.phone, nationality: view.guest.nationality, viaLine: Boolean(view.guest.lineUserId) },
@@ -211,40 +196,49 @@ export function staffRoutes(app: AppContext) {
     });
   });
 
-  const actionSchema = z.object({ reason: z.string().trim().max(200).optional() });
-  const act = (name: string, roles: Role[], fn: (clubId: string, id: string, reason: string | undefined) => Promise<unknown>) =>
-    r.post(`/bookings/:id/${name}`, async (c) => {
-      const { reason } = actionSchema.parse(await c.req.json().catch(() => ({})));
-      const id = c.req.param('id');
-      const access = await accessible(c.var.user.id, await clubIdOfBooking(id), roles);
-      if ('refused' in access) {
-        return access.refused === 'forbidden'
-          ? c.json({ error: 'forbidden' }, 403)
-          : c.json({ error: 'not_found', message: 'not_found' }, 409);
-      }
+  const actionSchema = z.object({
+    reason: z.string().trim().max(200).optional(),
+    reasonCode: z.enum(REASON_CODES).optional(),
+  });
+  type ActionInput = z.infer<typeof actionSchema>;
+  /** Builds the W0 `Reason` from the optional code and free text; `fallback` when neither is given. */
+  const reasonOf = (input: ActionInput, fallback: Reason): Reason => ({
+    code: input.reasonCode ?? fallback.code,
+    text: input.reason ?? (input.reasonCode ? undefined : fallback.text),
+  });
+  const act = (
+    name: string,
+    roles: typeof staff,
+    fn: (club: Club, id: string, actor: Actor, input: ActionInput) => Promise<unknown>,
+  ) =>
+    r.post(`/clubs/:slug/bookings/:id/${name}`, roles, async (c) => {
+      const parsed = actionSchema.safeParse(await c.req.json().catch(() => ({})));
+      if (!parsed.success) return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
       try {
-        await fn(access.clubId, id, reason);
+        await fn(c.var.club, c.req.param('id'), actorOf(c), parsed.data);
         return c.json({ ok: true });
       } catch (err) {
-        if (err instanceof BookingError) return c.json({ error: err.code, message: err.message }, 409);
+        if (err instanceof BookingError) {
+          return c.json({ error: err.code, message: err.message }, err.code === 'not_found' ? 404 : 409);
+        }
         throw err;
       }
     });
 
-  act('approve', MANAGER_ROLES, async (clubId, id) => {
-    await approveDeposit(db, clubId, id, STAFF, app.deps.now());
-    await app.notifier.confirmed(clubId, id);
+  act('approve', managers, async (club, id, actor) => {
+    await approveDeposit(db, club.id, id, actor, app.deps.now());
+    await app.notifier.confirmed(club.id, id);
   });
-  act('reject', MANAGER_ROLES, async (clubId, id, reason) => {
-    await rejectDeposit(db, clubId, id, STAFF, { code: 'payment_not_verified', text: reason ?? 'Payment could not be verified' }, app.deps.now());
-    await app.notifier.rejected(clubId, id);
+  act('reject', managers, async (club, id, actor, input) => {
+    await rejectDeposit(db, club.id, id, actor, reasonOf(input, { code: 'payment_not_verified', text: 'Payment could not be verified' }), app.deps.now());
+    await app.notifier.rejected(club.id, id);
   });
-  act('cancel', STAFF_ROLES, async (clubId, id, reason) => {
-    await cancelBooking(db, clubId, id, STAFF, { code: 'club_cancelled', text: reason ?? 'Cancelled by the club' }, app.deps.now());
-    await app.notifier.cancelled(clubId, id, reason ?? '');
+  act('cancel', staff, async (club, id, actor, input) => {
+    await cancelBooking(db, club.id, id, actor, reasonOf(input, { code: 'club_cancelled', text: 'Cancelled by the club' }), app.deps.now());
+    await app.notifier.cancelled(club.id, id, input.reason ?? '');
   });
-  act('arrived', STAFF_ROLES, (clubId, id) => markArrived(db, clubId, id, STAFF, app.deps.now()));
-  act('no-show', STAFF_ROLES, (clubId, id) => markNoShow(db, clubId, id, STAFF, app.deps.now()));
+  act('arrived', staff, (club, id, actor) => markArrived(db, club.id, id, actor, app.deps.now()));
+  act('no-show', staff, (club, id, actor) => markNoShow(db, club.id, id, actor, app.deps.now()));
 
   // ----- Manual booking -----
   const manualSchema = z.object({
@@ -256,13 +250,11 @@ export function staffRoutes(app: AppContext) {
     notes: z.string().trim().max(300).optional(),
     depositPaid: z.boolean().default(false),
   });
-  r.post('/clubs/:slug/bookings', async (c) => {
-    const club = await clubBySlug(c.req.param('slug'));
-    if (!club) return c.json({ error: 'not_found' }, 404);
+  r.post('/clubs/:slug/bookings', staff, async (c) => {
     const parsed = manualSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
     try {
-      const b = await createManualBooking(db, club, parsed.data, STAFF, app.deps.now());
+      const b = await createManualBooking(db, c.var.club, parsed.data, actorOf(c), app.deps.now());
       return c.json({ ok: true, id: b.id, ref: b.refCode });
     } catch (err) {
       if (err instanceof BookingError) return c.json({ error: err.code, message: err.message }, 409);
@@ -271,9 +263,8 @@ export function staffRoutes(app: AppContext) {
   });
 
   // ----- Handoffs -----
-  r.get('/clubs/:slug/handoffs', async (c) => {
-    const club = await clubBySlug(c.req.param('slug'));
-    if (!club) return c.json({ error: 'not_found' }, 404);
+  r.get('/clubs/:slug/handoffs', staff, async (c) => {
+    const club = c.var.club;
     const rows = await db
       .select({ conv: conversations, guest: guests })
       .from(conversations)
@@ -285,7 +276,7 @@ export function staffRoutes(app: AppContext) {
       const recent = await db
         .select()
         .from(messages)
-        .where(eq(messages.guestId, guest.id))
+        .where(and(eq(messages.clubId, club.id), eq(messages.guestId, guest.id)))
         .orderBy(desc(messages.createdAt))
         .limit(12);
       out.push({
@@ -299,34 +290,44 @@ export function staffRoutes(app: AppContext) {
     return c.json({ handoffs: out });
   });
 
-  r.post('/conversations/:id/resolve', async (c) => {
-    const id = c.req.param('id');
-    const access = await accessible(c.var.user.id, await clubIdOfConversation(id));
-    if ('refused' in access) return c.json({ error: access.refused }, access.refused === 'forbidden' ? 403 : 404);
-    const conv = await getConversationForClub(db, access.clubId, id);
-    if (!conv) return c.json({ ok: true });
+  // handoff.resolved is emitted here until A14/B14b moves this route to endEpisode.
+  r.post('/clubs/:slug/conversations/:id/resolve', staff, async (c) => {
+    const club = c.var.club;
+    const conv = await getConversationForClub(db, club.id, c.req.param('id'));
+    if (!conv) return c.json({ error: 'not_found' }, 404);
+    if (conv.mode !== 'human') return c.json({ ok: true });
+    const now = app.deps.now();
     await db
       .update(conversations)
-      .set({ mode: 'bot', handoffRequestedAt: null, handoffReason: null, updatedAt: new Date() })
-      .where(and(eq(conversations.id, conv.id), eq(conversations.clubId, conv.clubId)));
+      .set({ mode: 'bot', handoffRequestedAt: null, handoffReason: null, updatedAt: now })
+      .where(and(eq(conversations.id, conv.id), eq(conversations.clubId, club.id)));
+    await staffEvent(c, {
+      type: 'handoff.resolved',
+      conversationId: conv.id,
+      guestId: conv.guestId,
+      props: {
+        durationSec: conv.handoffRequestedAt ? Math.max(0, Math.round((now.getTime() - conv.handoffRequestedAt.getTime()) / 1000)) : null,
+      },
+    });
     return c.json({ ok: true });
   });
 
-  r.post('/conversations/:id/reply', async (c) => {
-    const { text } = z.object({ text: z.string().trim().min(1).max(1000) }).parse(await c.req.json().catch(() => ({})));
-    const id = c.req.param('id');
-    const access = await accessible(c.var.user.id, await clubIdOfConversation(id));
-    if ('refused' in access) return c.json({ error: access.refused }, access.refused === 'forbidden' ? 403 : 404);
-    const conv = await getConversationForClub(db, access.clubId, id);
+  r.post('/clubs/:slug/conversations/:id/reply', staff, async (c) => {
+    // A support session reads and fixes settings; it never messages a guest as the club (spec §16.1 q8, plan A5).
+    if (c.var.supportGrant) return c.json({ error: 'support_no_guest_messages' }, 403);
+    const club = c.var.club;
+    // Club check first, so another club's id answers 404 whatever the body holds.
+    const conv = await getConversationForClub(db, club.id, c.req.param('id'));
     if (!conv) return c.json({ error: 'not_found' }, 404);
-    await app.notifier.hostReply(conv.clubId, conv.guestId, text, STAFF);
+    const parsed = z.object({ text: z.string().trim().min(1).max(1000) }).safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
+    await app.notifier.hostReply(club.id, conv.guestId, parsed.data.text, actorOf(c));
     return c.json({ ok: true });
   });
 
   // ----- Staff alerts feed + settings -----
-  r.get('/clubs/:slug/alerts', async (c) => {
-    const club = await clubBySlug(c.req.param('slug'));
-    if (!club) return c.json({ error: 'not_found' }, 404);
+  r.get('/clubs/:slug/alerts', staff, async (c) => {
+    const club = c.var.club;
     const rows = await db
       .select()
       .from(messages)
@@ -336,9 +337,8 @@ export function staffRoutes(app: AppContext) {
     return c.json({ alerts: rows.map((m) => ({ text: (m.payload as { text?: string }).text ?? '', at: m.createdAt.toISOString() })) });
   });
 
-  r.get('/clubs/:slug/settings', async (c) => {
-    const club = await clubBySlug(c.req.param('slug'));
-    if (!club) return c.json({ error: 'not_found' }, 404);
+  r.get('/clubs/:slug/settings', managers, async (c) => {
+    const club = c.var.club;
     return c.json({
       name: club.name,
       staffLinkCode: club.staffLinkCode,
@@ -359,9 +359,8 @@ export function staffRoutes(app: AppContext) {
   }
 
   /** Connects the club's LINE account to this server (webhook, rich menu, LIFF) and checks every message type. */
-  r.post('/clubs/:slug/line-setup', async (c) => {
-    const club = await clubBySlug(c.req.param('slug'));
-    if (!club) return c.json({ error: 'not_found' }, 404);
+  r.post('/clubs/:slug/line-setup', managers, async (c) => {
+    const club = c.var.club;
     const clients = await lineClientsFor(club);
     if (!clients) return c.json({ error: 'line_not_configured', message: 'Add the LINE channel secret and access token to .env first.' }, 400);
     const { refreshMenu } = (await c.req.json().catch(() => ({}))) as { refreshMenu?: boolean };
@@ -375,9 +374,8 @@ export function staffRoutes(app: AppContext) {
     return c.json(report);
   });
 
-  r.get('/clubs/:slug/line-status', async (c) => {
-    const club = await clubBySlug(c.req.param('slug'));
-    if (!club) return c.json({ error: 'not_found' }, 404);
+  r.get('/clubs/:slug/line-status', managers, async (c) => {
+    const club = c.var.club;
     const clients = await lineClientsFor(club);
     if (!clients) return c.json({ connected: false });
     const expected = `${app.config.PUBLIC_URL.replace(/\/$/, '')}/line/webhook/${club.slug}`;
@@ -400,17 +398,15 @@ export function staffRoutes(app: AppContext) {
   });
 
   // ----- Slip images (private) -----
-  r.get('/deposits/:id/slip', async (c) => {
-    const id = c.req.param('id');
-    const access = await accessible(c.var.user.id, await clubIdOfDeposit(id));
-    if ('refused' in access) return access.refused === 'forbidden' ? c.text('Forbidden', 403) : c.text('Not found', 404);
-    const d = await getDepositForClub(db, access.clubId, id);
+  r.get('/clubs/:slug/deposits/:id/slip', staff, async (c) => {
+    const d = await getDepositForClub(db, c.var.club.id, c.req.param('id'));
     if (!d?.slipPath) return c.text('Not found', 404);
     const root = resolve(app.deps.uploadsDir);
     const file = resolve(root, d.slipPath);
     if (!file.startsWith(root + sep)) return c.text('Not found', 404);
     const info = await stat(file).catch(() => null);
     if (!info) return c.text('Not found', 404);
+    await staffEvent(c, { type: 'staff.slip_viewed', bookingId: d.bookingId, props: { depositId: d.id } });
     const type = file.endsWith('.png') ? 'image/png' : 'image/jpeg';
     return new Response(Readable.toWeb(createReadStream(file)) as ReadableStream, {
       headers: { 'content-type': type, 'content-length': String(info.size), 'cache-control': 'private, no-store' },

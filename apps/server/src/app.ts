@@ -10,6 +10,7 @@ import { Notifier } from './bot/notify.js';
 import { isDevOrTest, type Config } from './config.js';
 import type { Db } from './db/client.js';
 import { jsonLog } from './lib/log.js';
+import { adminRoutes } from './http/admin/index.js';
 import { authRoutes } from './http/auth.js';
 import { devRoutes } from './http/dev.js';
 import type { AppContext } from './http/context.js';
@@ -40,6 +41,8 @@ export function createApp(
     lineSetupClients?: AppContext['lineSetupClients'];
     verifyIdToken?: AppContext['verifyIdToken'];
     updateLiffEndpoint?: AppContext['updateLiffEndpoint'];
+    /** LINE token issuer (default: the fake one with LINE_FAKE, else the real one). */
+    lineTokens?: AppContext['lineTokens'];
     /** Test hook: called with every JSON response body. */
     onResponse?: (r: ResponseRecord) => void;
   } = {},
@@ -51,12 +54,13 @@ export function createApp(
   // Club secrets live encrypted in the database (A4). The env store is only a development
   // fallback for the demo club. LINE_FAKE (development/test only) swaps in a local fake LINE.
   const devOrTest = isDevOrTest(config.NODE_ENV);
+  const lineTokens = opts.lineTokens ?? (config.LINE_FAKE ? fakeLineTokenIssuer() : realLineTokenIssuer());
   const credentials =
     opts.credentials ??
     dbCredentialStore(
       db,
       config.CREDENTIALS_KEY,
-      config.LINE_FAKE ? fakeLineTokenIssuer() : realLineTokenIssuer(),
+      lineTokens,
       devOrTest ? onlyDemoClubs(envCredentialStore()) : undefined,
     );
   const gateways = new GatewayRegistry(credentials);
@@ -70,6 +74,7 @@ export function createApp(
       pending.add(p);
       void p.catch((err) => log('Background task failed', err)).finally(() => pending.delete(p));
     },
+    lineTokens,
     lineSetupClients: opts.lineSetupClients ?? (config.LINE_FAKE ? fakeSetupClients : realSetupClients),
     verifyIdToken: opts.verifyIdToken ?? lineIdTokenVerifier(),
     updateLiffEndpoint: opts.updateLiffEndpoint ?? (config.LINE_FAKE ? fakeLiffEndpointUpdater : realLiffEndpointUpdater),
@@ -92,6 +97,7 @@ export function createApp(
   app.route('/api/liff', liffRoutes(ctx));
   app.route('/api/auth', authRoutes(ctx));
   app.route('/api/staff', staffRoutes(ctx));
+  app.route('/api/admin', adminRoutes(ctx));
   if (config.DEV_SIMULATOR) app.route('/api/dev', devRoutes(ctx));
   app.onError((err, c) => {
     log(`Unhandled error on ${c.req.method} ${c.req.path}`, err);

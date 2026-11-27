@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api } from '../../api';
+import { api, staffPath } from '../../api';
 import { useStaff } from './Layout';
 import { MessageThread, type ThreadMessage } from './MessageThread';
 
@@ -24,7 +24,7 @@ export function Handoffs() {
   const [sent, setSent] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
-    const d = await api<{ handoffs: Handoff[] }>(`/api/staff/clubs/${club}/handoffs`);
+    const d = await api<{ handoffs: Handoff[] }>(staffPath(club, '/handoffs'));
     setList(d.handoffs);
     setHandoffCount(d.handoffs.length);
   }, [club, setHandoffCount]);
@@ -38,14 +38,14 @@ export function Handoffs() {
   async function reply(id: string) {
     const text = drafts[id]?.trim();
     if (!text) return;
-    await api(`/api/staff/conversations/${id}/reply`, { body: { text } });
+    await api(staffPath(club, `/conversations/${id}/reply`), { body: { text } });
     setDrafts({ ...drafts, [id]: '' });
     setSent({ ...sent, [id]: true });
     await load();
   }
 
   async function resolve(id: string) {
-    await api(`/api/staff/conversations/${id}/resolve`, { body: {} });
+    await api(staffPath(club, `/conversations/${id}/resolve`), { body: {} });
     await load();
   }
 

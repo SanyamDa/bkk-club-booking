@@ -423,3 +423,132 @@ Requests for Track B: in `src/bot/deps.ts`, make `defaultLog` the `jsonLog` from
 Blockers and `it.todo`: none. Still open: the production host and region (spec §16.1 question 5) and the error tracking service.
 
 Still to do by a human: the plan's check was not run in this session. That check is `docker compose up` locally, `curl /health` giving `{ "ok": true }`, a signed simulator webhook round trip against Postgres, and the restore drill (dump, drop, restore, app starts).
+
+## 2026-11-27 — A2 (club check on every route)
+
+Landed on `track-a` (not merged yet). Every `/api/staff` route now lives under `/clubs/:slug/...` behind `requireClubRole`. Night view, bookings, cancel, arrived, no-show, handoffs, alerts and slip allow `owner|manager|host|door`; approve, reject, settings, line-setup and line-status allow `owner|manager`. Every id lookup is club-scoped (`getBookingView`, the service mutations, `getConversationForClub`, `getDepositForClub`). Another club's id on the user's own slug answers 404; another club's slug answers 403. `/api/staff/me` and `/api/staff/logout` are removed: use `/api/auth/me` and `/api/auth/logout`. Nothing is exported from `http/staff.ts`.
+
+Published interfaces (`test/helpers/track-a.ts`):
+
+```ts
+export function staffUrl(slug: string, path: string): string // `/api/staff/clubs/${slug}${path}`
+export function routeTable(app: { routes: readonly { method: string; path: string }[] }, prefix: string): { method: string; path: string }[]
+export function makeUser(db: Db, opts: { email: string; clubId?: string; role?: MembershipRole; platformAdmin?: boolean }): Promise<TestUser>
+export function loginAs(app: TestApp, user: TestUser): Promise<string> // cookie; adds a TOTP code for admins
+export function isolationFixtures(db: Db, club: Club): Promise<Record<string, string>> // keys like 'bookings/:id'
+export interface TestUser { id: string; email: string; password: string; totpSecret: string | null; ... }
+```
+
+`AuthEnv` (`src/http/auth.ts`), what `requireClubRole(app, ...roles: Role[])` puts on `c.var`:
+
+```ts
+export type AuthEnv = {
+  Variables: {
+    user: User;
+    session: Session;
+    club: Club;
+    membership: ClubMembership | null; // null when access comes from a support grant
+    supportGrant: SupportGrant | null;
+    actor: Actor; // staff: { type: 'staff', id, sessionId }; support/platform: { type: 'platform', id, sessionId, supportGrantId }
+  };
+};
+```
+
+Web (`apps/web/src/api.tsx`): `export const staffPath = (club: string, path: string) => \`/api/staff/clubs/${encodeURIComponent(club)}${path}\``; every staff page now calls the slugged routes.
+
+Requests for Track B: every router mounted under `/api/staff` or `/api/admin` must put its routes under `/clubs/:slug` (or be added to `UNSCOPED_ALLOWLIST` in `isolation.test.ts`). Each new route param needs a fixture key in `track-b.ts`'s `isolationFixtures`; the key is the segment before the param plus the param (e.g. `nights/:id`). The isolation tests fail on a param with no fixture. `requireClubRole` sets `c.var.club`, `c.var.session` (use `session.idHash`; sessions have no `id` column), `c.var.supportGrant` and `c.var.actor`.
+
+Blockers and `it.todo`: none. Row-level security (A2b) stays deferred (assumed). The browser walk of the staff pages on the slugged routes is still to be done by a human.
+
+## 2026-11-27 — A5 (founder console API v1)
+
+Landed on `track-a` (not merged yet): `http/admin/{index,clubs,line-wizard,controls,platform,support,debug,data}.ts`, `platform/{health,club-templates,support}.ts`, mounted at `/api/admin` behind `requirePlatformAdmin`. `auth.ts` gains support-grant handling: read-only grants refuse writes with 403 `support_read_only`, every request under a grant writes one `audit_log` row (`action 'support.request'`), and responses carry `X-Support-Session`, the value `<club name>, ends <HH:MM>` (Bangkok time) percent-encoded with `encodeURIComponent` (a Thai club name is not a valid header ByteString; read it with `decodeURIComponent`). Under a support grant (read or write), `POST .../conversations/:id/reply` answers 403 `support_no_guest_messages` (spec §16.1 q8: a support session never messages a guest as the club).
+
+Published interfaces:
+
+```ts
+// platform/support.ts
+export function isGloballyStopped(db: Db): Promise<boolean> // platform_flags['global_stop'] is true or { stopped: true }
+export const GLOBAL_STOP_FLAG = 'global_stop'
+// platform/club-templates.ts
+export function newClubSettings(slug: string, now: Date): ClubSettings
+export function baseRefPrefix(slug: string): string
+export function uniqueRefPrefix(slug: string, taken: Iterable<string>): string
+// ops_events rows kind 'line_setup': detail = { report: SetupReport, quota: { used: number; limit: number } | null } (limit 0 = no limit)
+
+// platform/support.ts (continued)
+export const SUPPORT_GRANT_MINUTES = 60
+export class SupportError extends Error { constructor(readonly code: 'not_found' | 'ended') }
+export async function createSupportGrant(db: Db, input: { userId: string; sessionId?: string; club: Club; reason: string; ticketRef?: string | null; ip?: string }, now: Date): Promise<SupportGrant>
+export async function elevateSupportGrant(db: Db, input: { id: string; userId: string; sessionId?: string; reason: string; ip?: string }, now: Date): Promise<SupportGrant>
+export async function endSupportGrant(db: Db, input: { id: string; userId: string; sessionId?: string; ip?: string }, now: Date): Promise<SupportGrant>
+export async function activeGrantsOf(db: Db, userId: string, now: Date): Promise<SupportGrant[]>
+
+// platform/health.ts
+export type LineSetupDetail = { report: SetupReport; quota: { used: number; limit: number } | null }
+export type QuotaView = { limit: number; used: number; pct: number; warn: boolean }
+export const QUOTA_WARN_PCT = 80
+export function quotaView(q: { used: number; limit: number } | null | undefined): QuotaView | null
+export interface ClubHealth { slug; name; status: Club['status']; lineConnected; webhookOk; lineCheckedAt: string | null; lastInboundAt: string | null; failures24h: number; quota: QuotaView | null; handoffsPastTimeout: number; depositsInReview: number; staffGroupLinked: boolean; botPaused: boolean }
+export async function clubHealth(db: Db, club: Club, now: Date): Promise<ClubHealth>
+
+// http/auth.ts
+export function supportSessionHeader(club: Club, grant: SupportGrant): string
+export async function recordAuthFailure(db: Db, userId: string, now: Date): Promise<number>
+export const MAX_AUTH_FAILURES = MAX_FAILURES
+
+// http/context.ts: AppContext gains
+lineTokens: LineTokenIssuer;
+
+// http/admin/controls.ts (helpers for other admin routers)
+export const jsonBody = (c: Context) => Promise<unknown>
+export async function freshTotpRefusal(app: AppContext, c: Context<AuthEnv>, body: unknown): Promise<Response | null>
+export async function adminAudit(...)
+export async function notifyStaffGroup(app: AppContext, club: Club, text: string)
+export async function clubBySlug(db: Db, slug: string): Promise<Club | undefined>
+// http/admin/line-wizard.ts
+export const LIVE_TEST_WINDOW_MS = 60_000
+// http/admin/data.ts
+export const HEALTH_DAYS = 7
+```
+
+Admin routes under `/api/admin`: `GET|POST /clubs`, `GET|PATCH /clubs/:slug`, `PUT /clubs/:slug/profile`, `POST /clubs/:slug/pause`, `PUT /clubs/:slug/promptpay`, `PUT /clubs/:slug/greeting`, `POST /clubs/:slug/line`, `GET /clubs/:slug/line/status`, `POST /clubs/:slug/line/live-test`, `POST /clubs/:slug/tester-code`, `GET /clubs/:slug/credentials`, `GET /clubs/:slug/webhooks`, `GET /clubs/:slug/messages`, `GET /clubs/:slug/conversations/:id/timeline`, `GET /clubs/:slug/bookings/:id/timeline`, `POST /clubs/:slug/webhooks/:id/replay`, `POST /clubs/:slug/test-message`, `GET|POST /global-stop`, `GET|POST /platform/line-login`, `GET|POST /support`, `POST /support/:id/elevate`, `POST /support/:id/end`, `GET /data/health`, `GET /events`.
+
+Fresh TOTP for credential, PromptPay, greeting and platform login changes: JSON body field `totp`; missing → 401 `totp_required`, wrong → 401 `invalid_totp`. Wrong codes count like failed logins (`recordAuthFailure` in `http/auth.ts`); the fifth revokes the session and locks the account, answering 401 `totp_locked`. `POST .../line` checks the new channel id and secret with LINE (`ctx.lineTokens`) before saving and answers 400 with a failed 'LINE credentials' `SetupReport` when LINE refuses them. Staff-group notices after a committed change never fail the request. `POST /api/admin/global-stop` writes `{ stopped: boolean }`.
+
+Requests for Track B:
+- B3: call `isGloballyStopped`. Switch the direct `ops_events` insert in `http/admin/line-wizard.ts` to `recordOps`. Wire `processDelivery` into `POST .../webhooks/:id/replay` (503 `not_ready` today). Enable the `it.todo` tests: gate `raw_webhooks` row, pause stops replies, end-to-end trace, failed send in message log.
+- B0: publish `applyClubContent`; `template: 'velora-like'` answers 501 `not_ready` until then.
+- B5: enable `console-created club: details read with a valid ID token...`.
+- B6: publish `issueTesterCode`; `POST .../tester-code` answers 503 `not_ready` until then.
+
+Deferred (decision): `POST .../test-message {to:'self'}` answers 501 `not_ready`, because no founder LINE user id is stored anywhere. Storing it needs a `users` column (migration) and a way to capture the id (e.g. the founder adds the club's OA and sends a link code); tracked by an `it.todo` in `admin-support.test.ts`. `staff_group` works. The debug webhook and message lists now write a `debug.view` audit row each (entity `raw_webhooks` / `messages`, entity id the club id, query in `data`). The velora-like club assertions are an `it.todo` in `admin.test.ts` until B0 merges.
+
+`it.todo` waiting on Track B (10 in all):
+- `admin.test.ts`: "create club then receive a signed webhook with no restart: a raw_webhooks row for that club (needs B3)"; "pause stops replies within one message" (B3); "console-created club: details read with a valid ID token is 200, with no token it is refused" (B5); "one guest message is traceable end to end" (B3); "failed send shows in the message log with LINE's error" (B3); "a velora-like club gets complete settings, a channels row, a refPrefix no other club has, and Velora tables and prices" (B0); "tester-code route returns the code once" (B6).
+- `admin-support.test.ts`: "test-message {to: 'self'} pushes to the founder's own LINE account (needs a stored founder LINE user id)" (decision, not B); "one guest message is traceable end to end" (B3); "failed send shows in the message log with LINE's error" (B3).
+
+## 2026-11-27 — A6 (founder console web v1)
+
+Landed on `track-a` (not merged yet): `pages/admin/*` mounted at `/admin/*`; `SupportBanner` in the staff layout, shown when a `/api/staff/clubs/*` response carries `X-Support-Session`. Admin login goes through `/staff/login?next=/admin`. Velora-like template, tester code, webhook replay and test-message-to-self show a "not ready" message until the Track B pieces above merge. The wizard deep links are placeholders until the first real Thai OA test (spec §16.1 q1–2). `npm run typecheck` and `npm run build -w @club/web` pass.
+
+Published interfaces (`apps/web/src/api.tsx`):
+
+```ts
+export function useSupportHeader(): string | null // decoded X-Support-Session from the last /api/staff/clubs/* response
+export interface StoredSupport { id: string; clubSlug: string; clubName: string; mode: 'read' | 'write'; expiresAt: string }
+export function storedSupport(): StoredSupport[] // localStorage, unexpired only
+export function saveSupport(s: StoredSupport)
+export function forgetSupport(id: string)
+export interface SetupReport { ok: boolean; steps: { name: string; ok: boolean; detail: string }[]; bot?: { displayName: string; basicId: string; chatMode: string; addFriendUrl: string } }
+export interface CredentialSummary { kind: string; last4: string; setBy: string; setAt: string }
+export interface PlanInputs { expectedBookings: number; hostReplies: number; staffAlerts: number; groupSize: number }
+export interface AdminClub, LineStatusAdmin
+export const adminApi = { me, clubs, createClub, club, setStatus, putProfile, connectLine, lineStatus, liveTest, testerCode, startSupport, elevateSupport, endSupport, webhooks, replay, messages, timeline, testMessage, pause, globalStop, globalStopState, platformLogin, setPlatformLogin, dataHealth, events }
+```
+
+Components (`apps/web/src/pages/admin/`): `AdminLayout`, `Clubs` (+ `HealthTile`), `ClubDetail`, `LineWizard`, `SupportBanner({ club }: { club: string })`, `WebhookLog`, `MessageLog`, `Timeline({ kind }: { kind: 'conversations' | 'bookings' })`, `Controls` (+ `ClubControls`), `DataHealth`, `EventStream`; shared bits in `AdminLayout.tsx`: `fmtTime`, `errText`, `Ok`, `Json`, `TotpField`.
+
+Requests for Track B: none beyond A5's list; the web placeholders switch on when those routes stop answering `not_ready`. Blockers and `it.todo`: none in web.
+
+Still to do by a human: the browser walk from the plan's A6 Check line (admin login with TOTP, create club, `LINE_FAKE=1` made-up credentials and setup report, club profile, support session banner with end time, end it, event stream filtered by one conversation, Data health). It was not done in this session.

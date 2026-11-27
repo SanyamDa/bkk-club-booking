@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate, useOutletContext } from 'react-router-dom';
-import { api, ApiError } from '../../api';
+import { api, ApiError, staffPath, storedSupport } from '../../api';
+import { SupportBanner } from '../admin/SupportBanner';
 
 interface StaffCtx {
   club: string;
@@ -18,10 +19,13 @@ export function StaffLayout() {
   const [handoffCount, setHandoffCount] = useState(0);
 
   useEffect(() => {
-    api<{ clubs: { slug: string; name: string }[] }>('/api/staff/me')
+    api<{ clubs: { slug: string; name: string }[] }>('/api/auth/me')
       .then((d) => {
-        setClubs(d.clubs);
-        if (!d.clubs.some((c) => c.slug === club)) setClub(d.clubs[0]?.slug ?? '');
+        // A founder under a support session sees that club too (A6); the server checks the grant.
+        const support = storedSupport().filter((s) => !d.clubs.some((c) => c.slug === s.clubSlug)).map((s) => ({ slug: s.clubSlug, name: s.clubName }));
+        const all = [...d.clubs, ...support];
+        setClubs(all);
+        if (!all.some((c) => c.slug === club)) setClub(all[0]?.slug ?? '');
       })
       .catch((err) => {
         if (err instanceof ApiError && err.status === 401) navigate('/staff/login', { replace: true });
@@ -36,7 +40,7 @@ export function StaffLayout() {
   useEffect(() => {
     if (!club) return;
     const load = () =>
-      api<{ handoffs: unknown[] }>(`/api/staff/clubs/${club}/handoffs`)
+      api<{ handoffs: unknown[] }>(staffPath(club, '/handoffs'))
         .then((d) => setHandoffCount(d.handoffs.length))
         .catch(() => {});
     load();
@@ -48,7 +52,7 @@ export function StaffLayout() {
   const clubName = clubs.find((c) => c.slug === club)?.name ?? club;
 
   async function logout() {
-    await api('/api/staff/logout', { body: {} });
+    await api('/api/auth/logout', { body: {} });
     navigate('/staff/login');
   }
 
@@ -75,6 +79,7 @@ export function StaffLayout() {
           <button className="btn small" onClick={logout}>Log out</button>
         </nav>
       </header>
+      <SupportBanner club={club} />
       <Outlet context={{ club, clubName, handoffCount, setHandoffCount } satisfies StaffCtx} />
     </div>
   );

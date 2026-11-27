@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { api } from '../../api';
+import { api, staffPath } from '../../api';
 import { useStaff } from './Layout';
 
 interface SettingsData {
@@ -40,14 +40,14 @@ function LinePanel({ club }: { club: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const load = () => api<LineStatus>(`/api/staff/clubs/${club}/line-status`).then(setStatus).catch(() => setStatus({ connected: false }));
+  const load = () => api<LineStatus>(staffPath(club, '/line-status')).then(setStatus).catch(() => setStatus({ connected: false }));
   useEffect(() => { void load(); }, [club]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function runSetup(refreshMenu: boolean) {
     setBusy(true);
     setError('');
     try {
-      setReport(await api<SetupReport>(`/api/staff/clubs/${club}/line-setup`, { body: { refreshMenu } }));
+      setReport(await api<SetupReport>(staffPath(club, '/line-setup'), { body: { refreshMenu } }));
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Setup failed');
@@ -103,7 +103,7 @@ function LinePanel({ club }: { club: string }) {
 export function Settings() {
   const { club } = useStaff();
   const [s, setS] = useState<SettingsData | null>(null);
-  useEffect(() => { api<SettingsData>(`/api/staff/clubs/${club}/settings`).then(setS); }, [club]);
+  useEffect(() => { api<SettingsData>(staffPath(club, '/settings')).then(setS); }, [club]);
   if (!s) return <div className="muted">Loading…</div>;
 
   return (

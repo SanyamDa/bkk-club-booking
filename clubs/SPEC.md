@@ -27,7 +27,7 @@ Around that booking flow sits a platform:
 - **One dashboard for the club.** Messages from LINE, Instagram and later channels sit in one inbox with the guest's bookings beside them. The manager is told when a chat needs them, and sees how many bookings the bot made (§6.3–6.5).
 - **A founder console for us.** We add clubs, run onboarding, open any club's dashboard to help, and debug problems from one place (§12.3).
 - **A demo club, Velora.** We show the whole product end to end to prospective clubs, from the guest's phone to the admin dashboard (§12.4).
-- **Data from day one.** Every chat event, booking step and automation is recorded. The data improves the bot, powers club reports, and feeds a separate app that predicts which club is busiest at a given moment (§14).
+- **Data from day one.** Every chat event, booking step and automation is recorded. The data improves the bot, powers club reports, supplies marketing, and feeds a separate app that predicts which club is busiest at a given moment (§14).
 
 The club's point-of-sale system connects at the level its vendor allows (§11.3). Every POS works at the manual level: staff key in the deposit, and the club uploads its sales report after the night. That is the level for Wongnai POS / FoodStory today, because it has no open API. Where the POS has one (Papaya today), checking a guest in opens the bill and the real spend flows back automatically.
 
@@ -62,7 +62,7 @@ The club's point-of-sale system connects at the level its vendor allows (§11.3)
 | **P1** | **Any club is live in 10–15 minutes** | Minimum overhead for us and for the club. In one short call: the club's LINE account is connected to our bot; the bot is loaded with the club's baseline data (table layout, prices, policies, FAQs); it runs 24/7. From then on the club brain learns from manager takeovers, the club's POS is connected where the vendor allows it, and the manager works from one dashboard across channels with alerts and stats | Median onboarding call **≤ 15 min** (LINE connected, booking flow working with the club's real tables and prices, core FAQs live, staff logged in). **No code change and no deploy** per club. Founder time per club outside the call (checking the form, entering data, the dry run, watching night 1) is recorded for every club, from form received to the end of the first week, and reported beside the call time. The target is set after the first three clubs (§16.1) |
 | **P2** | **Founder admin console** | One place where we add clubs, manage club data, run onboarding, open any club's dashboard to help, and debug any problem. This is how support stays fast as the number of clubs grows | A founder can find the cause of a reported problem (a message that got no answer, a failed send, a stuck booking) in **< 5 min** without database or server access. Every founder access to a club is logged |
 | **P3** | **Demo club: Velora** | A fictional club that we own, used to demonstrate the whole product to prospective clubs: guest booking on a real phone, the staff dashboard, the inbox, the club brain learning, and the founder console | The full demo script (§12.4) runs in **≤ 10 min**, resets with one click, and falls back to the browser simulator when LINE or the phone signal is unavailable. The simulator still needs an internet connection to our server |
-| **P4** | **Data first** | Everything the platform does is recorded as it happens. The data improves the bot, powers reports, and feeds a separate app that predicts which club is busiest | **100%** of booking status changes have a matching event (checked nightly, §14.2). Every event type listed in §14.2 is live by the phase that delivers its feature. The signals that cannot be rebuilt later (§14.3) are captured from the first real guest |
+| **P4** | **Data first** | Everything the platform does is recorded as it happens. The data improves the bot, powers reports, supplies marketing, and feeds a separate app that predicts which club is busiest | **100%** of booking status changes have a matching event (checked nightly, §14.2). Every event type listed in §14.2 is live by the phase that delivers its feature. The signals that cannot be rebuilt later (§14.3) are captured from the first real guest |
 
 **What "live in 10–15 minutes" covers, and what follows it.** P1 has six parts. Two finish on the call, and four start on the call and mature afterwards. §12.2 gives the minute-by-minute script.
 
@@ -143,7 +143,7 @@ One person can belong to several clubs (an owner with two venues), so staff acco
 | Rich menu **Book a table** | Starts the flow at step 1 |
 | Typed message containing a booking keyword (EN/TH: *book, table, reserve, จอง, โต๊ะ, ...*) | Starts the flow at step 1. In Phase 2, the AI pre-fills whatever the message already contains |
 | Promoter link or QR (Phase 3) | Starts the flow with the promoter attached to the booking |
-| Club's Instagram / website link | Opens the booking page inside LINE directly |
+| Club's Instagram / website link | Opens the club's LINE account, where the guest taps **Book a table**. The link goes through our redirect, so the tap is counted (§14.2) |
 
 ### 5.2 Main flow
 
@@ -304,7 +304,7 @@ Each club links one or more staff LINE groups. Which of the messages below reach
 
 ### 6.3 One inbox across channels
 
-The club works from **one inbox** for every channel, with each guest's bookings shown beside the chat. We do not write this inbox ourselves. We run one self-hosted install of **Chatwoot Community Edition** (open source) and connect our bot to it.
+The club works from **one inbox** for every channel, with the guest's bookings shown beside the chat (LINE from the start; other channels once the guest is linked, §11.5). We do not write this inbox ourselves. We run one self-hosted install of **Chatwoot Community Edition** (open source) and connect our bot to it.
 
 **How it is wired**
 
@@ -512,7 +512,7 @@ The learning loop depends on four things the code does not have today. All four 
 
 1. **Per-person staff accounts**, so a reply and an approval have an author.
 2. **An author on every message** (guest, bot, staff, system). Today a host's reply is stored exactly like a bot message.
-3. **A takeover record** (`handoff_episodes`) with a start, an end, who resolved it and which messages it covers. Today resolving a chat erases the handoff fields.
+3. **A takeover record** (`handoff_episodes`) with a start, an end, who resolved it and which messages it covers. Today resolving a chat erases the handoff fields. The timeout fires only when the guest writes again, so a quiet takeover never ends. It needs a timed close (§13.1 row 12).
 4. **Club scope on the reply and resolve actions.** Today they accept any club's conversation.
 
 ---
@@ -569,7 +569,7 @@ club_memberships(user_id, club_id, role[owner|manager|host|door|promoter], UNIQU
 sessions(id_hash, user_id, created_at, expires_at, revoked_at, ip, user_agent)   -- server-side, revocable
 support_grants(id, user_id, club_id, reason, ticket_ref, mode[read|write],
                started_at, expires_at, ended_at, ip)          -- a founder's access to one club
-audit_log   + actor_type[guest|staff|platform|system], actor_id, session_id,
+audit_log   + actor_type[guest|bot|staff|platform|system], actor_id, session_id,
               support_grant_id, reason, ip                    -- club_id nullable for platform events
 
 -- Clubs and channels
@@ -613,7 +613,8 @@ pos_bills   + club_id, table_code, covers; booking_id becomes NULLable (walk-in 
 -- Data platform (§14)
 raw_webhooks(id, club_id, channel, received_at, body jsonb, signature_ok,
              processed_at, error)                              -- written BEFORE we answer 200
-events(seq, id, occurred_at, recorded_at, club_id, type, v, actor_type, actor_id,
+events(seq, id, occurred_at, recorded_at, club_id, type, v,
+       actor_type[guest|bot|staff|platform|system], actor_id,
        channel, data_origin[first_party|line_chat|line_profile|instagram|pos],
        source, guest_id, person_id, conversation_id, booking_id, table_id, zone_id,
        night_date, attempt_id, cause_id, lang, props jsonb, raw jsonb,
@@ -631,7 +632,7 @@ identity_map(person_id, club_id, guest_id, platform_line_sub, phone_hash, first_
 removal_requests(id, club_id, guest_id, requested_at, channel, completed_at, completed_by)   -- §14.9
 ```
 
-- `events.props` holds only coded values (enums, ids, counts). Free text, names and phone numbers go in `events.raw` and in `guests`, so they can be removed for one guest without losing the event (§14.9).
+- `events.props` holds only coded values (enums, ids, counts). Free text, names and phone numbers go in `events.raw` and in `guests`, so they can be removed for one guest without losing the event (§14.9). The analytics area and the data dashboard read `events` through a view that leaves `raw` out (§14.5).
 - `is_test` marks rows created by the demo club, the simulator or an onboarding test. It is set on the guest (a simulator guest, a registered tester, or any guest of a demo club). `bookings` and `events` copy it. Every other table takes it from its guest, booking or club. Three rules:
   1. Test rows of any club never reach a cross-club view, the aggregate area or the production busyness feed.
   2. In a real club, a test row never blocks a table for a real guest (the uniqueness rule on table and night applies to real and test bookings separately) and never appears in the club's reports. Once the club is live, test rows are also hidden from staff views. During onboarding staff see them, so the live test on the call is visible (§12.2).
@@ -649,10 +650,10 @@ removal_requests(id, club_id, guest_id, requested_at, channel, completed_at, com
 |---|---|---|
 | **0: Demo** (own test OA, fictional club) — **built** | Steps 1–7 with buttons, PromptPay QR + manual slip approval, basic dashboard (tonight + bookings + manual booking), staff group alerts, handoff | Team completes 50 test bookings with no double booking. Ready to demo to clubs |
 | **1a: Live on LINE** (own test OA, real phones) — **built, not yet run against a real LINE account** | One-command go-live (`npm run live`): tunnel, webhook set + tested, bilingual rich menu, LIFF endpoint auto-update, every message type validated by LINE, quota readout. LIFF ID-token check. Unfollow handling. Group join instructions. LINE status + "Run LINE setup" in the dashboard | 20 bookings made from real phones (iOS + Android, TH + EN) with no staff help and every webhook delivery handled. Staff group receives every alert |
-| **1b: Platform base** (before any real club) | **Security fixes (§13.1).** Per-person accounts, server-side sessions, club check on every route. An author on every message and a takeover record (`handoff_episodes`) with its start, end and resolver. The handoff timeout runs on a timer and re-alerts before handing back to the bot (§8.7, §5.3). Club credentials entered at runtime and encrypted; LINE stateless tokens. **Founder console v1** (§12.3): club list with health, create and configure a club, LINE connection wizard, support sessions, webhook and message logs, conversation and booking timelines, event stream, data health, club status and bot pause, global stop. **Data collection** (§14.2): `events` + `emit()`, raw webhook stored before the reply, booking status history, entry-point tags, notice records, `is_test`, dated tables and prices (`valid_from`, `valid_to`), the club profile, a `nights` row for every night and the city calendar (§14.3). The identity map (§14.4) and the four access areas (§14.5). **Velora** demo club with one-click reset (§12.4): demo steps 1, 2, 4 and 7. Hosted on a real server and real Postgres (24/7) | A second club is created from the console and takes a signed webhook **with no deploy**. The isolation tests pass. The nightly check finds every booking state change in `events`. A host reply and a bot message are stored with different authors. A resolved takeover leaves a `handoff_episodes` row. A takeover with no staff activity re-alerts and times out even if the guest sends nothing more. Velora demo steps 1, 2, 4 and 7 and the one-click reset work on a real phone. In this phase step 4 is run by asking for a person and is answered from the Chats page (§12.4) |
-| **1: Pilot build, then pilot run** (House of Savoy, 4 weeks) | Everything above + automatic slip verification, reminders, running late / cancel, **door screen** (QR scan, actual party size, door clicker by guest type), no-show handling, settings UI, TH/EN, club's greeting and rich menu migrated. Occupancy snapshots, staff crowd rating, **data dashboard v1** (§14.6). **Busyness feed v0** (§14.7): the API serving week-0 booking heat for the pilot club, plus a sandbox key that returns only Velora's levels, marked as test and never mixed with real clubs, so the separate app can integrate. Guest removal job and marketing opt-out keyword (§14.9, §5.5). Webhook replay and test message in the founder console (§12.3). POS at level L0a, manual entry (§11.3). Start **Meta business verification** and create the Meta app now. To be able to submit **app review**, also stand up a minimal install of the inbox early, with Instagram connected to our own tester account, and make one logged API call per permission (§11.5). Review cannot be requested before that. Together these are the longest lead item | Goals G1–G8 measured. Club agrees to continue. Onboarding call for the pilot club timed against P1. Velora demo step 8 works |
-| **2: Brain and inbox** | **Club brain** (§8): baseline import, AI answers, takeover learning with the approval queue, gaps list. **Inbox** (§6.3) with the LINE bridge. Alert levels (§6.4). Club stats page (§6.5). Onboarding wizard completes in one call, with the pre-call club form (§12.2). Per-club feature switches (§12.3). Submit the Meta app review if it is not submitted yet (§11.5) | ≥ 85% of free-text booking requests correctly pre-filled (sample review). No AI-caused wrong prices or availability. G9 and G10 measured. Three clubs onboarded at ≤ 15 min each. The full Velora demo script (§12.4) runs end to end. Meta app review submitted |
-| **3: Channels, POS and the busyness feed** | **Instagram** in the inbox (§11.5). **POS:** report import (L0b) with column mapping, and a ready-made Wongnai/FoodStory parser once a real export confirms the file has one row per bill (§16.1, question 13). Papaya live sync, Loyverse spend sync (§11.3). **Busyness feed v1** for the separate app (§14.7): per-club weekday baseline, door counts and crowd ratings, every live club. Promoter links + commission tracking, waitlist, bottle pre-orders, payment gateway option, guest CRM + VIP tags, reports | 3 paying clubs. One club live on Instagram. The feed publishes a level for every live club on every open night |
+| **1b: Platform base** (before any real club) | **Security fixes (§13.1).** Per-person accounts, server-side sessions, club check on every route. An author on every message and a takeover record (`handoff_episodes`) with its start, end and resolver. The handoff timeout runs on a timer and re-alerts before handing back to the bot (§8.7, §5.3). Club credentials entered at runtime and encrypted; LINE stateless tokens. **Shared LIFF app** under our provider: LINE Login channel created and published (publishing cannot be undone), first-use identity mapping (§11.1.1), and the device test of `liff.sendMessages()` across providers (§16.1, question 3). **Founder console v1** (§12.3): club list with health, create and configure a club, LINE connection wizard, support sessions, webhook and message logs, conversation and booking timelines, event stream, data health, club status and bot pause, global stop, the simulator behind founder login, and a second factor for founder accounts. **Data collection** (§14.2): `events` + `emit()`, raw webhook stored before the reply, booking status history, entry-point tags, notice records, `is_test`, dated tables and prices (`valid_from`, `valid_to`), the club profile, a `nights` row for every night and the city calendar (§14.3). The identity map (§14.4) and the four access areas (§14.5). **Velora** demo club with one-click reset (§12.4): demo steps 1, 2, 4 and 7. Hosted on a real server and real Postgres (24/7) | A second club is created from the console and takes a signed webhook **with no deploy**. The `liff.sendMessages()` test across providers has been run on a device and its result recorded. The isolation tests pass. The nightly check finds every booking state change in `events`. A host reply and a bot message are stored with different authors. A resolved takeover leaves a `handoff_episodes` row. A takeover with no staff activity re-alerts and times out even if the guest sends nothing more. Velora demo steps 1, 2, 4 and 7 and the one-click reset work on a real phone. In this phase step 4 is run by asking for a person and is answered from the Chats page (§12.4) |
+| **1: Pilot build, then pilot run** (House of Savoy, 4 weeks) | Everything above + automatic slip verification, reminders, running late / cancel, **door screen** (QR scan, actual party size, door clicker by guest type), no-show handling, settings UI, TH/EN, club's greeting and rich menu migrated. Occupancy snapshots, staff crowd rating, **data dashboard v1** (§14.6). **Busyness feed v0** (§14.7): the API serving week-0 booking heat for the pilot club, plus a sandbox key that returns only Velora's levels, marked as test and never mixed with real clubs, so the separate app can integrate. Guest removal job and marketing opt-out keyword (§14.9, §5.5). Webhook replay, test message and the extra checks on the three sensitive changes in the founder console (§12.3). The pre-call club form (§12.2) as a plain form; we enter its answers through the console's bulk edit (Phase 1b). POS at level L0a, manual entry (§11.3). Start **Meta business verification** and create the Meta app now. To be able to submit **app review**, also stand up a minimal install of the inbox early, with Instagram connected to our own tester account, and make one logged API call per permission (§11.5). Review cannot be requested before that. Together these are the longest lead item | Goals G1–G8 measured. Club agrees to continue. Onboarding call for the pilot club timed against P1. In Phase 1 the FAQ part of P1 is the FAQ answers in Settings (§6.2); the brain's answers arrive in Phase 2. Velora demo step 8 works |
+| **2: Brain and inbox** | **Club brain** (§8): baseline import, AI answers, takeover learning with the approval queue, gaps list. **Inbox** (§6.3) with the LINE bridge. Alert levels (§6.4). Club stats page (§6.5). The pre-call form loads straight into the club record, and the wizard gains the baseline brain import and inbox account creation, so the whole of §12.2 completes in one call. Per-club feature switches (§12.3). Submit the Meta app review if it is not submitted yet (§11.5) | ≥ 85% of free-text booking requests correctly pre-filled (sample review). No AI-caused wrong prices or availability. G9 and G10 measured. Three clubs onboarded at ≤ 15 min each. The full Velora demo script (§12.4) runs end to end. Meta app review submitted |
+| **3: Channels, POS and the busyness feed** | **Instagram** in the inbox (§11.5). **POS:** report import (L0b) with column mapping, and a ready-made Wongnai/FoodStory parser once a real export confirms the file has one row per bill (§16.1, question 13). Papaya live sync, Loyverse spend sync (§11.3). **Busyness feed v1** for the separate app (§14.7): per-club weekday baseline, door counts and crowd ratings, every live club. LINE's written answer to question 12 (§16.1) comes before the feed goes to the separate app. Promoter links + commission tracking, waitlist, bottle pre-orders, payment gateway option, guest CRM + VIP tags, reports | 3 paying clubs. One club live on Instagram. The feed publishes a level, or an explicit "no data", for every live club on every open night |
 | **Later** | The extensions backlog (§19, [EXTENSIONS.md](EXTENSIONS.md)): loyalty, targeted offers, birthday specials, review requests and more | Chosen per item when there is demand |
 
 **Why Phase 1b comes before the pilot.** Three of its parts cannot be added later without loss. The security fixes close holes that are open today (§13.1). The club check must exist before a second club shares the system. Data that is not captured on the night it happens cannot be rebuilt (§14.3).
@@ -669,11 +670,12 @@ removal_requests(id, club_id, guest_id, requested_at, channel, completed_at, com
 - **Messaging API** (webhook + reply + push) for all chat.
 - **Rich menu API** for the club's menu. We manage it, with buttons the club controls in Settings.
 - **Flex Messages** for table cards, summaries and confirmations. **Quick replies** and the **date picker action** for steps 1–2.
-- **LIFF** (in-LINE web pages) for the table map, guest details form and My booking. LIFF needs a **LINE Login channel**. We use **one shared LIFF app under our own provider** for every club, so a club has nothing to create. Two consequences:
+- **LIFF** (in-LINE web pages) for the table map, guest details form and My booking. LIFF needs a **LINE Login channel**. We use **one shared LIFF app under our own provider** for every club, so a club has nothing to create. What follows from that:
   - LINE user IDs differ between providers, so the ID the LIFF page sees is ours and the ID the club's webhook sees is the club's. On a guest's first form submit we verify the LIFF identity token against our channel and store the pair. Later submits must match it. This keeps the rule that a forwarded booking link cannot be used by someone else.
-  - The shared LIFF gives us **one ID per person across all clubs**, which the data platform uses (§14.4).
+  - The shared LIFF gives us **one ID per person across all clubs**. We store it from day one (`identity_map.platform_line_sub`, §9). Because it is a LINE-issued ID, it is not used to link a person across clubs until LINE gives written permission (§14.4, §14.8, §16.1 question 12).
   - A per-club LINE Login channel stays available as an option (about 3–4 extra minutes of console work) for a club that wants its own name on the LINE consent screen.
-  - **To test on a device before committing:** that `liff.sendMessages()` works when the LIFF app's provider differs from the OA's provider.
+  - **Tested in Phase 1b, before any club is connected:** that `liff.sendMessages()` works when the LIFF app's provider differs from the OA's provider (§16.1 question 3). If it does not, the details form still opens in the shared LIFF and the bot's next message is sent as a push (the fallback the code already has), which counts against the quota (§11.1.4).
+  - **Known platform risk:** LINE recommends that new LIFF apps are built as LINE MINI Apps, and a LIFF app under a LINE Login channel cannot be migrated to a MINI App channel. Separately, LINE's documentation says the permission behind `liff.sendMessages()` may be disabled after a move from one LIFF app to another. Our fallback is the same counted push. We watch LINE's announcements and keep the booking form working as a plain web link (§15).
 
 **11.1.2 Connecting a club's OA**
 
@@ -682,17 +684,17 @@ There is no one-click connection for LINE accounts in Thailand. (LINE's consent-
 1. **Manual, permanent.** The club's OA **admin**, on a desktop browser, opens LINE OA Manager and **enables the Messaging API**, choosing a provider. ⚠️ **The provider link can never be changed.** Default: a **provider owned by the club**, so the club is never locked to us. Record the decision in the contract.
 2. **Manual.** The admin copies the **Channel ID** and **Channel secret** into our onboarding wizard. These are the only two credentials we need. We store them **encrypted** (`club_credentials`, §9) and no API or screen ever shows them again.
 3. **Automatic, under a minute.** From those two values the platform issues short-lived access tokens on demand (LINE "stateless" tokens, valid 15 minutes, cached about 10), so nobody has to create a long-lived token in the console. It then: reads the account's details, sets the webhook to `https://api.<domain>/line/webhook/<club-slug>` and tests it, builds the rich menu, validates every message type the bot sends, and reads the message quota. Every incoming request is checked against the club's channel secret (`X-Line-Signature`).
-4. **Manual.** In OA Manager's Response settings the admin switches **Webhook on**, **auto-response off** and **greeting off**, and checks the chat response method and response hours, which can also send automatic replies. LINE has no API to change these. The wizard watches the webhook switch and the chat setting and shows them going green. Auto-response cannot be read at all, so the last check is a **live test message from a phone**: exactly one reply proves the old auto-reply is off. We send the greeting from now on.
+4. **Manual.** In OA Manager's Response settings the admin switches **Webhook on**, **auto-response off** and **greeting off**, and checks the chat response method and response hours, which can also send automatic replies. LINE has no API to change these. The wizard watches the webhook switch and the chat setting and shows them going green. Auto-response and the greeting cannot be read at all, so the admin ticks them by hand and the last check is a **live test from a phone that has not added the account**: exactly one greeting on adding it, and exactly one reply to a message, prove the old greeting and auto-reply are off. We send the greeting from now on.
 5. **Manual, can follow the call.** Staff alert group: switch on "Allow bot to join group chats" (in LINE Developers Console, off by default), create the group, invite the bot, and type the one-time link code.
 6. **Automatic.** Plan check: the wizard compares the club's message plan with the expected volume and recommends an upgrade if needed (§11.1.4). Expected volume per month = bookings × 2 pushes + host replies sent from the inbox + group alerts × group size.
 
 **Slower cases.** If the OA already has the Messaging API enabled under an agency's or another vendor's provider, the provider cannot be changed, the club may not be able to see its own channel secret, and connecting us displaces the existing tool. That is a migration and does not fit in 15 minutes. A first-time admin also meets a short developer registration screen in step 1.
 
 **11.1.3 Chat coexistence and handoff**
-- Hosts may keep replying from **LINE OA Manager's chat** on their phones. To check during setup: that the OA's response settings allow **Chat and Webhook to both be on**.
+- **Chat stays switched on in LINE OA Manager**, so hosts can still reply from their phones if our system is down. Day-to-day replies go through the inbox (§6.3). LINE's documentation confirms that **Chat and Webhook can both be on**. With Chat on, the chat response method and response hours can still send automatic replies, so the admin checks them during setup (§11.1.2 step 4).
 - **Known limitation:** messages hosts send from OA Manager do **not** reach our webhook, so the system can't see them. That's why handoff mode ends with **[Mark resolved]** or the inactivity timeout, not by detecting a staff reply.
 - Replies sent from our dashboard go out as **push messages** (they count against the quota, §11.1.4).
-- **Consequence for the club brain:** it learns only from replies sent through our inbox (before Phase 2, the dashboard's Chats page) (§6.3, §8.3). Chat stays on in OA Manager as the fallback if our system is down.
+- **Consequence for the club brain:** it learns only from replies sent through our inbox (before Phase 2, the dashboard's Chats page) (§6.3, §8.3).
 - A reply token lasts about one minute, so a host's typed reply is almost always a counted push.
 
 **11.1.4 Message quota and cost**
@@ -728,7 +730,7 @@ There is no one-click connection for LINE accounts in Thailand. (LINE's consent-
 | POS | Access | What we can do |
 |---|---|---|
 | **Wongnai POS / FoodStory** (LINE MAN Wongnai) | No public API, developer portal or partner sign-up. The known outside connections are accounting tools, and what they receive is a **daily sales file**, synced the next morning. The back office exports a sales report as CSV on request, emailed within 3 hours | **Manual level now.** Import the CSV report. Ask for partner access in parallel; no lead time is published. Wongnai sells its own reservations add-on, so write access is unlikely |
-| **Papaya** (Bangkok POS, lists bars and nightlife) | Public API with a self-serve key, test sandbox and signed webhooks. Needs the club on Papaya's top plan (about US$149 per location per month) | **Full live sync.** At check-in we open the bill on the table, pass the booking reference, and record the deposit as a payment already made. Papaya then tells us when the total changes, the table moves or the bill closes |
+| **Papaya** (Bangkok POS, lists bars and nightlife) | Public API with a self-serve key, test sandbox and signed webhooks. Needs the club on Papaya's top plan (about US$149 per location per month). Papaya lists its own reservations product as coming soon, so access could narrow later | **Full live sync.** At check-in we open the bill on the table, pass the booking reference, and record the deposit as a payment already made. Papaya then tells us when the total changes, the table moves or the bill closes |
 | **Loyverse** | Public API with a self-serve token and webhooks | **Spend only.** Paid receipts after they close. Open bills cannot be read or created |
 | **Qashier, StoreHub, Ocha** | Access by request to the vendor; StoreHub limits its API to its top plan | Manual level until the vendor grants access |
 | **Any other POS** | Unknown | Manual level |
@@ -753,8 +755,8 @@ No aggregator ("one API for many POS") covers Thai POS systems.
 | Level | What happens | Needs | Available today |
 |---|---|---|---|
 | **L0a: Manual entry** | The dashboard and the staff alert show the booking reference and deposit, so the cashier enters the prepayment by hand | Nothing from the POS | Every POS |
-| **L0b: Report import** | After the night, the club uploads the POS's sales report and we match it to bookings | Nothing from the POS vendor. A one-time mapping of report columns and table names | Every POS that exports a sales report. A ready-made parser for the Wongnai/FoodStory CSV comes first |
-| **L1: Read** | We pull closed bills after the night and match them to bookings by table and time. Actual spend shows on the booking and the guest profile | Read API or scheduled export | Loyverse, Papaya |
+| **L0b: Report import** | After the night, the club uploads the POS's sales report and we match it to bookings. Matching individual bookings needs a report with one row per bill showing the table and time. That is unconfirmed for the Wongnai/FoodStory report (§16.1, question 13). If the report gives only daily totals, this level yields a nightly total, not spend per booking | Nothing from the POS vendor. A one-time mapping of report columns and table names | Every POS that exports a sales report. A ready-made parser for the Wongnai/FoodStory CSV comes first |
+| **L1: Read** | We pull closed bills after the night and match them to bookings by table and time. Actual spend shows on the booking and the guest profile | Read API or scheduled export | Papaya. Loyverse once we confirm its receipts carry a table, dining-option or note field to match on (unverified; expect imperfect matching) |
 | **L2: Write** | Checking a guest in opens the bill on that table in the POS, with the deposit recorded as a prepayment | Write API | Papaya |
 | **L3: Real time** | Bill total changes → minimum-spend progress shown to the host live. Bill closed → booking completed with spend | Webhooks | Papaya, for bookings checked in through us |
 
@@ -762,7 +764,7 @@ No aggregator ("one API for many POS") covers Thai POS systems.
 - The bill is opened **at check-in**, not when the booking is confirmed. A POS has open tables, not future reservations.
 - For live sync the host must check the guest in **through our dashboard**. A bill a cashier opens by hand in the POS is invisible to us until it closes.
 - Matching rule for L1+: same table code, same night, bill opened within [arrival_by − 2h, closing time]. Ambiguous matches go to a host for confirmation. Table names in the POS are mapped to our table codes once, at onboarding.
-- A POS connection that takes a pasted key (Papaya, Loyverse) fits in the onboarding call when the club's tables already exist in the POS. Keys are stored encrypted like LINE credentials (§12.3).
+- Loyverse takes one pasted token. Papaya takes two keys per outlet (Reservations and Order Data), each created with a label and our webhook address, plus a one-time match of Papaya's dine-in channels (one per table) to our table codes. Both are done after the onboarding call (§12.2), not inside it. Keys are stored encrypted like LINE credentials (§12.3).
 
 ### 11.4 Other integrations (later)
 
@@ -776,7 +778,8 @@ No aggregator ("one API for many POS") covers Thai POS systems.
 
 - **One-time gate, ours:** our own Meta app must pass **business verification** and **app review** for Instagram messaging before any club's Instagram can connect. Until then only accounts added as testers on our app work. Meta's review needs a finished, testable app and one logged API call per permission before the request can even be submitted. **Start business verification in Phase 1, and bring the inbox's Instagram connection forward on a tester account so the review can be submitted** (§10). It is the longest lead item in the plan and no part of it is in our control.
 - **Per club, after approval:** the person who can log in to the club's Instagram **professional** account completes one login screen inside the inbox. About 2 minutes. An Instagram account run by an outside agency will stall here.
-- **What the bot can do on Instagram through the inbox:** text and attachments only. No buttons, quick replies or date picker. So on Instagram the bot answers questions from the brain and sends a **link to the booking page**; the tap-through booking flow stays on LINE and the web. (Rich Instagram messages are possible later by calling Meta's API directly from our server.)
+- **What the bot can do on Instagram through the inbox:** text and attachments only. No buttons, quick replies or date picker. So on Instagram the bot answers questions from the brain and sends a **link that opens the club's LINE account** (the same link as in §5.1), where the guest taps Book a table and finishes the booking in LINE. This spec has no web-only booking flow. The link goes through our redirect, so the tap is counted as an Instagram entry (§14.2); matching it to the final booking is best effort. (Rich Instagram messages are possible later by calling Meta's API directly from our server.)
+- **An Instagram contact and a LINE guest are separate records** until the guest identity merge in the backlog is built (§19). Until then the bookings panel beside an Instagram chat is empty.
 - **Takeovers are fully visible on Instagram.** Meta sends an event for replies typed in the Instagram app, so the brain can learn from them. The LINE limit in §6.3 does not apply.
 - Meta's messaging window applies: free-form replies within 24 hours of the guest's last message, and up to 7 days for a human agent's reply.
 - **Instagram data stays with its club.** Meta's platform terms do not allow a provider to use one client's Instagram data for its own products or for another client. Instagram events are tagged at the source and kept out of the cross-club data and the busyness feed (§14.8).
@@ -819,16 +822,16 @@ We check the form and create the club in the founder console as **onboarding**. 
 | 1–4 | Enable the Messaging API, choose the club's own provider (§11.1.2 step 1). **Permanent** | Club admin |
 | 4–5 | Paste Channel ID and Channel secret into the wizard | Club admin |
 | 5–6 | Wizard connects everything: tokens, webhook set and tested, rich menu, message check, quota read | Automatic |
-| 6–8 | Response settings: webhook on, auto-response off, greeting off. Wizard shows each one going green | Club admin |
-| 8–10 | **Live test from a phone:** one message gets exactly one reply; a full test booking on the club's real tables; ask for a person and see the alert | Both |
+| 6–8 | Response settings: webhook on, auto-response off, greeting off, chat response method and hours checked. The wizard shows the webhook switch and the chat setting going green (the two LINE lets us read). The admin ticks the other two by hand and the live test confirms them | Club admin |
+| 8–10 | **Live test from a phone that has not added the account:** adding it gets exactly one greeting; it types the wizard's tester code, so its rows are test data (§9, §12.3); one message gets exactly one reply; a test booking on the club's real tables as far as the PromptPay QR (nobody pays: the phone sends any photo as the slip and we approve it in a support session to show the confirmation card); ask for a person and see the alert on the dashboard on our shared screen | Both |
 | 10–12 | Manager and hosts log in to the dashboard with their own accounts. The brain's baseline answers are reviewed at a glance and switched on (from Phase 2; in Phase 1 the FAQ answers in Settings are checked instead) | Club |
-| 12–15 | Plan check (§11.1.4). POS: pick the level; paste a key if the POS has one (§11.3). Switch the club to **live** | Both |
+| 12–15 | Plan check (§11.1.4). POS: record the vendor and switch on the manual level. Key-based connections follow the call (§11.3). Switch the club to **live** | Both |
 
-**"Live" means:** the club's LINE account answers through our bot, a guest can book a real table at the real price, the core FAQs are answered, staff can log in, and the bot runs 24/7.
+**"Live" means:** the club's LINE account answers through our bot, a guest can book a real table at the real price, the core FAQs are answered (in Phase 1 from the FAQ answers in Settings, from Phase 2 by the brain), staff can log in, and the bot runs 24/7.
 
 **After the call (first week, no call needed)**
 
-- Staff alert group (§11.1.2 step 5).
+- Staff alert group (§11.1.2 step 5), linked before the club's first open night. Until it is linked, the club's health tile shows "no alert reaches a phone" (§12.3) and we watch the club's handoffs ourselves.
 - ฿1 PromptPay test transfer verified end to end.
 - Remaining FAQs, and the first approved answers from takeovers.
 - Instagram connection, once our Meta app is approved (§11.5).
@@ -842,20 +845,22 @@ We check the form and create the club in the founder console as **onboarding**. 
 
 The console is where we run the business: adding clubs, onboarding them, looking after their data, and fixing problems. It is built by hand inside the existing app (new pages and a separate API), not on an internal-tool builder, because the controls below are application logic.
 
-**Who can use it.** Named founder accounts only. No shared login. A second factor is required, because one founder account reaches every club's guest phone numbers and payment slips.
+**Who can use it.** Named founder accounts only. No shared login. A second factor is required from Phase 1b, because one founder account reaches every club's guest phone numbers and payment slips.
 
 **What it does**
 
-| Area | What we can do |
-|---|---|
-| **Clubs** | List every club with a health tile: LINE connected, webhook correct and active, last message received, failures in the last 24 h, quota used, handoffs past their timeout, payments waiting for review, bot paused. Create a club from a template. Change its status: onboarding, live, paused, demo |
-| **Onboarding** | The wizard in §12.2. Enter LINE and POS credentials (write-only: shown once, then only the last 4 characters, who set it and when). Run and re-run the LINE setup. Enter and bulk-edit tables, zones, prices and rules. Invite staff and set roles |
-| **Club data** | Edit anything a manager can edit, on the club's behalf: settings, brain notes, bot wording, the event calendar |
-| **Open the club's dashboard** | See exactly what the club's staff see, through a **support session** (below) |
-| **Debug** | **Webhook log:** every delivery we received, raw, with its processing result. **Message log:** every outbound message with reply or push, sent or failed, and LINE's error. **Conversation timeline:** guest messages, bot decisions, host replies and booking changes on one line of time. **Booking timeline:** every status change with who and why. **Replay** a stored webhook as a dry run. **Send a test message** to our own LINE account or the staff group, never to a guest |
-| **Controls** | Pause one club's bot (messages are still stored, no automatic replies, staff alerted). A global stop for all clubs. Per-club feature switches. All without a deploy |
-| **Data** | Data health and the live event stream (§14.6) |
-| **Simulator** | Run a guest conversation against any club as test data. Used for the onboarding dry run and for demos |
+| Area | What we can do | Phase (§10) |
+|---|---|---|
+| **Clubs** | List every club with a health tile: LINE connected, webhook correct and active, last message received, failures in the last 24 h, quota used, handoffs past their timeout, payments waiting for review, staff alert group linked, bot paused. Create a club from a template. Change its status: onboarding, live, paused, demo | Phase 1b |
+| **Onboarding** | The wizard in §12.2. Enter LINE and POS credentials (write-only: shown once, then only the last 4 characters, who set it and when). Run and re-run the LINE setup. Enter and bulk-edit tables, zones, prices and rules. Invite staff and set roles | Phase 1b for LINE and club data. Brain import and inbox accounts: Phase 2. POS keys: Phase 3 |
+| **Club data** | Edit anything a manager can edit, on the club's behalf: settings, brain notes, bot wording, the event calendar | Phase 1b. Brain notes: Phase 2 |
+| **Open the club's dashboard** | See exactly what the club's staff see, through a **support session** (below) | Phase 1b |
+| **Debug** | **Webhook log:** every delivery we received, raw, with its processing result. **Message log:** every outbound message with reply or push, sent or failed, and LINE's error. **Conversation timeline:** guest messages, bot decisions, host replies and booking changes on one line of time. **Booking timeline:** every status change with who and why. **Replay** a stored webhook as a dry run. **Send a test message** to our own LINE account or the staff group, never to a guest | Logs and timelines: Phase 1b. Replay and test message: Phase 1 |
+| **Controls** | Pause one club's bot (messages are still stored, no automatic replies, staff alerted). A global stop for all clubs. Per-club feature switches. All without a deploy | Pause and global stop: Phase 1b. Feature switches: Phase 2 |
+| **Data** | Data health and the live event stream (§14.6) | Phase 1b |
+| **Simulator** | Run a guest conversation against any club as test data. Used for the onboarding dry run and for demos | Phase 1b |
+
+The Phase column follows §10. The extra checks on the three sensitive changes (below) arrive in Phase 1, before the pilot's first night.
 
 **What each status does** (for the owner to confirm, §16.1 question 22)
 
@@ -875,6 +880,7 @@ Fast support needs us to see what the club sees. It also needs a record, because
 - A banner stays on screen for the whole session: *Support access: Velora, ends 23:41* [End now].
 - A session starts **read-only**. Changing something on the club's behalf needs an explicit step up, with a second reason.
 - **Every action in a session is written to the audit log** with the founder's name, the club, the reason, the time and what was viewed or changed. Opening a conversation, a payment slip or a phone number is logged, not only edits.
+- **The inbox is the exception.** It is a separate application (§6.3) and its free edition keeps no access log. So a founder reads a club's chats in our own conversation timeline, where every message is also stored and each conversation opened is logged. Opening the club's inbox itself is possible only through the sign-on link, which needs an active support session and writes one audit row on entry. What the founder views inside the inbox after that is not logged per conversation.
 - A founder can hold sessions for several clubs at once, so support on two clubs does not collide.
 - Three changes need extra care because they move money or reach every guest: the **PromptPay ID** (it decides where deposits go), the **greeting and map link**, and the **LINE credentials**. Each needs a fresh second-factor check, records the before and after values, and notifies the club's owner.
 - The club's contract says we may access its account for support, onboarding and troubleshooting. A support request from the club counts as the instruction to look.
@@ -887,7 +893,7 @@ The demo grows with the phases (§10). The full script needs Phase 2. Before tha
 
 **What Velora has**
 
-- Its own LINE test account under our provider, with the full rich menu, in Thai and English.
+- Its own LINE test account under our provider, with the full rich menu, in Thai and English. The account is on the Basic plan, because demo replies and alerts are counted pushes (§11.1.4). If it is ever on the Free plan, check the quota before each demo.
 - A believable club: zones (VIP riser, DJ side booth, high tables), a floor plan, prices, house rules, opening nights and an event night.
 - A seeded **brain** with the standard FAQs answered, plus a few deliberate gaps for the learning demo.
 - Seeded **history**: several weeks of bookings, no-shows, takeovers and door counts, so the stats page and the data dashboard show real-looking charts. The seed data follows the phases: door counts from Phase 1; the brain, takeovers and stats history from Phase 2.
@@ -899,7 +905,7 @@ The demo grows with the phases (§10). The full script needs Phase 2. Before tha
 | Step | What the customer sees | Shows | Works from |
 |---|---|---|---|
 | 1 | They add Velora on their own phone and tap **Book a table**: night, party size, table cards, details form, rules, PromptPay QR | The guest experience, taps only | Phase 1b |
-| 2 | The table turns from free to held on the dashboard as they tap. They send a slip; it is approved; the confirmation card with the door QR arrives | Live dashboard, no double booking | Phase 1b |
+| 2 | The table turns from free to held on the dashboard as they tap. They send any photo as the slip (we ask them not to pay). It lands in Payment review, we approve it on the dashboard, and the confirmation card with the door QR arrives | Live dashboard, no double booking | Phase 1b |
 | 3 | They type a question the brain knows (*"what's the dress code?"*) and get an instant answer | The bot answers without staff | Phase 2 |
 | 4 | They type a question the brain does **not** know. The chat is handed to a host, an alert arrives, and we answer from the inbox and press [Mark resolved] | Alerts and takeover | Phase 1b, by asking for a person and answering from the Chats page. As written from Phase 2 |
 | 5 | Within a minute the drafted note appears in the approval queue. We approve it. They ask the same question again and the bot answers | The club brain learning | Phase 2 |
@@ -925,7 +931,7 @@ The demo grows with the phases (§10). The full script needs Phase 2. Before tha
 | **Peak load** | Handle 50 bookings/minute per club and 1,000 inbound messages/minute across all clubs. Load-tested before the pilot (Friday night 22:00–01:00 pattern). |
 | **Reliability** | Webhook handling is idempotent (LINE may redeliver; dedupe by message ID). Every state change is logged in the audit trail. |
 | **Security** | LINE signature verification on every webhook. **Club credentials (LINE, POS, Instagram) are stored encrypted in the database**, with the key held outside it; they are entered at runtime, never shown again and never returned by any API. (v1 said "never in the DB". That is changed, because a club must be connectable without a deploy.) Per-person accounts, server-side sessions that can be revoked, role-based access, club check on every route. Second factor for platform admins from day one, for managers later. Audit log of all staff and platform actions. Encryption in transit and at rest. Slip images in private storage with signed URLs. Fixes required before the first real club are in §13.1. |
-| **Privacy and data** | **We are the data controller** for the data the platform collects. Collection is broad by design (§14): every chat event, booking step and automation is recorded. Guests are told at first contact and in the booking form, and the notice version each guest saw is recorded (§5.5). Each club has full access to its own data and its own guests. A guest can stop marketing at any time and can ask for their data to be removed (§14.9). Retention (§14.9): events, booking history, snapshots, door counts and aggregates are kept for the life of the platform; chat messages and raw event payloads for the life of the club's account (v1 said 180 days); slips 1 year (for disputes); raw webhook deliveries 30 days. Two limits come from the channels, not from us: LINE chat content and profile data, and all Instagram data, stay per club unless the channel owner permits wider use (§14.8). |
+| **Privacy and data** | **We are the data controller** for the data the platform collects. Collection is broad by design (§14): every chat event, booking step and automation is recorded. Guests are told at first contact and in the booking form, and the notice version each guest saw is recorded (§5.5). Each club has full access to its own data and its own guests. A guest can stop marketing at any time and can ask for their data to be removed (§14.9). Retention (§14.9): first-party events, booking history, snapshots, door counts and aggregates are kept for the life of the platform; chat messages, raw event payloads and chat-origin events for the life of the club's account (v1 said 180 days); slips 1 year (for disputes); raw webhook deliveries 30 days. Three limits come from the channels, not from us: LINE chat content and profile data, and all Instagram data, stay per club unless the channel owner permits wider use (§14.8); and LINE requires LINE-origin user data to be deleted when a club stops using the platform (§14.9). |
 | **Localisation** | Thai and English everywhere (bot, LIFF pages, dashboard). THB formatting (฿15,000). Asia/Bangkok timezone. Optional Buddhist-era year in Thai. |
 | **Accessibility** | LIFF pages and dashboard meet WCAG 2.2 AA. The table map also has a list view. Door mode has large targets and works in the dark. |
 | **Devices** | LIFF pages are tested on LINE in-app browsers on iOS and Android, including low-end Android. Dashboard works on phone, tablet and laptop. |
@@ -950,16 +956,17 @@ A review of the code as built (Phase 0 + 1a) found the problems below. They were
 | 4 | **One shared staff password**, and a session that carries no user and no club. `/me` lists every club. Routes addressed by booking, conversation or deposit ID have **no club check** | Per-person accounts, server-side sessions, a club check on every route and inside the booking service |
 | 5 | The staff session cannot be revoked. Logging out only deletes the browser cookie | Server-side sessions |
 | 6 | Login attempts are limited by an address the client supplies. The limit can be bypassed, and it can also be used to lock everybody out | Limit by account with back-off, stored in the database |
-| 7 | The guest details link returns the guest's name, phone and nationality to anyone holding the link, and the link never expires | Require the LINE identity check to read as well as to submit. Expire links |
+| 7 | The guest details link returns the guest's name, phone and nationality to anyone holding the link, and the link never expires | Require the LINE identity check to read as well as to submit. A link opened outside LINE never shows stored guest details: the form opens empty unless the guest signs in with LINE first. Links expire with the hold |
 | 8 | No cross-club test exists, although v1 required one | Add a second seeded club to the tests and check every route |
 
 **Reliability problems that also lose data**
 
 | # | Problem | Fix |
 |---|---|---|
-| 9 | The webhook answers LINE before processing and keeps nothing. LINE does not resend a delivery it was told succeeded, so a crash or deploy mid-processing loses the message for good | Store the raw delivery **before** answering. Mark it processed afterwards. Replay unprocessed ones at start-up |
+| 9 | The webhook answers LINE before processing and keeps nothing. LINE does not resend a delivery it was told succeeded, so a crash or deploy mid-processing loses the message for good | Store the raw delivery **before** answering. Mark it processed afterwards. Replay unprocessed ones at start-up. The duplicate check must use the processed marker, not the row written when a message first arrives. Today that row is written before handling, so a replay after a crash would be dropped as a duplicate. On shutdown, wait for in-flight deliveries to finish |
 | 10 | Failed sends, rejected webhooks and bot errors go only to the console | Record them (`ops_events`, message delivery status) so the founder console can show them |
 | 11 | Most booking state changes are not inside a transaction with their history record, and several (hold created, hold expired, booking abandoned) write no history at all | One transaction per state change, including its event (§14.2) |
+| 12 | The handoff timeout is checked only when the guest sends another message. It counts from the request time, not from the last staff activity, and it never re-alerts. A takeover the guest does not follow up stays open for ever | A timed job closes takeovers on the clock, counting from the last staff activity. It re-alerts first, and records the true end time (`handoff_episodes`, §9) |
 
 ---
 
@@ -967,7 +974,7 @@ A review of the code as built (Phase 0 + 1a) found the problems below. They were
 
 ### 14.1 Principle
 
-**We are a data-first company. Record everything the platform does, at the moment it happens, and never overwrite it.** The data has three uses: it improves each club's bot, it powers the club's reports, and it feeds a separate app that predicts which club is busiest at a given moment (§14.7).
+**We are a data-first company. Record everything the platform does, at the moment it happens, and never overwrite it.** The data has four uses: it improves each club's bot, it powers the club's reports, it feeds a separate app that predicts which club is busiest at a given moment (§14.7), and it supplies marketing, for the club and for us. No campaign tool is built now. What marketing will need is captured now (§19), within LINE's and Meta's limits (§14.8).
 
 Today the system keeps the **current state** and loses the **history**. A booking's status is overwritten in place. The raw message from LINE is discarded after reading. A search that found no free table leaves no trace. The data platform changes that from the first real guest, because none of it can be rebuilt afterwards.
 
@@ -982,7 +989,7 @@ It is built as **part of the existing server and database**, not as a separate s
 | `occurred_at`, `recorded_at` | When it happened by the source's clock (LINE's timestamp where there is one), and when we stored it |
 | `club_id`, `night_date` | Which club and which **night** (02:00 Sunday belongs to Saturday night, §7.2). `night_date` is the key the busyness predictor reads by |
 | `type`, `v` | A named event, such as `availability.searched`, and the version of its fields |
-| `actor_type`, `actor_id`, `channel` | Who caused it (guest, bot, staff, system, platform) and where (line, liff, instagram, dashboard, door, pos) |
+| `actor_type`, `actor_id`, `channel` | Who caused it (guest, bot, staff, platform, system) and where (line, liff, instagram, dashboard, door, pos) |
 | `data_origin` | Where the data came from: first-party record, LINE chat, LINE profile, Instagram, POS. Decides what the data may feed (§14.8) |
 | `source` | The entry point: rich menu, quick reply, typed keyword, greeting, reminder, promoter link |
 | `guest_id`, `person_id`, `conversation_id`, `booking_id`, `table_id`, `zone_id` | What the event is about |
@@ -994,12 +1001,15 @@ It is built as **part of the existing server and database**, not as a separate s
 
 **Rules**
 
-- **Same transaction.** An event is written in the same database transaction as the change it describes. Either both happen or neither does. A failed event write must not lose a booking, so event writes that can conflict are written to tolerate it.
-- **The raw delivery is stored before we answer LINE** (`raw_webhooks`), and marked processed afterwards. Unprocessed deliveries are replayed at start-up. This also lets new event types be filled in later from stored deliveries.
-- **Every event type is declared in code** with its fields and a privacy class per field. A document listing all events is generated from that declaration. An event that does not match its declaration goes to a holding table and is never silently dropped.
+- **Same transaction.** `emit()` writes inside the caller's database transaction. There are three cases:
+  1. A valid event is inserted with the change. They commit or roll back together.
+  2. An event that fails its declaration does not stop the change. It is written to `events_dead_letter` in the same transaction and the change commits.
+  3. A repeat of the same `dedupe_key` is skipped (insert with ON CONFLICT DO NOTHING). In Postgres a failed insert would otherwise abort the transaction and lose the booking.
+- **The raw delivery is stored before we answer LINE** (`raw_webhooks`), and marked processed afterwards. Unprocessed deliveries are replayed at start-up. Replay must not be blocked by the message duplicate check (§13.1 row 9). This also lets new event types be filled in later from stored deliveries.
+- **Every event type is declared in code** with its fields and a privacy class per field. A document listing all events is generated from that declaration. An event that does not match its declaration goes to `events_dead_letter` (see Same transaction) and is never silently dropped.
 - **Entry points are tagged.** Today the rich menu, a quick reply and "try again" all send the same signal. Each button gets its own tag. Links that LINE opens without telling us (location, the details form) go through a redirect on our server so the tap is counted.
-- **Staff group chatter is not captured.** Only the bot's own commands in a staff group are recorded.
-- **Nightly checks**, with alerts to us: every booking status change has its event; every live club sent events during its opening hours; no personal data has leaked into `props`; no test data is in the aggregate area, any real club's report or the production feed.
+- **Staff group chatter is not kept.** A delivery is stored whole before we answer LINE. Once it is processed, messages from a staff group are stripped from the stored copy, except the bot's own commands. Nothing else from a staff group becomes an event.
+- **Nightly checks**, with alerts to us: every booking status change has its event; `events_dead_letter` is empty; every live club sent events during its opening hours; no personal data has leaked into `props`; no test data is in the aggregate area, any real club's report or the production feed. A dead-letter row, or a status change without an event, is a failure to fix the next day.
 
 **What is recorded** (the 22 events in v1, renamed, plus what v1 missed)
 
@@ -1008,7 +1018,7 @@ It is built as **part of the existing server and database**, not as a separate s
 | Contact | `guest.first_seen`, `guest.followed`, `guest.unfollowed`, `guest.refollowed`, `notice.shown`, `notice.accepted`, `marketing.opted_out` |
 | Messages | `message.received`, `message.sent` (reply or push, delivered or failed, latency, template), `intent.detected`, `intent.unknown`, `bot.fallback_menu`, `bot.error` |
 | **Demand** | `booking.started`, `night.selected`, `night.rejected`, `pax.selected`, **`availability.searched`** (night, party size, tables shown, **result count, including zero**), `night.sold_out_shown`, `waitlist.joined` |
-| Booking | `table.held`, `table.hold_lost_race`, `hold.expired`, `booking.abandoned` (with the last step reached), `details.submitted`, `rules.accepted`, `deposit.qr_sent`, `slip.received`, `slip.auto_verified`, `slip.review`, `deposit.verified`, `deposit.rejected`, `booking.confirmed`, `booking.manual_created`, `booking.cancelled`, `running_late`, `reminder.sent` |
+| Booking | `table.held`, `table.hold_lost_race`, `hold.expired`, `booking.abandoned` (with the last step reached), `form.opened`, `form.validation_failed`, `form.identity_rejected`, `form.submit_rejected`, `details.submitted`, `rules.accepted`, `deposit.qr_sent`, `slip.received`, `slip.auto_verified`, `slip.review`, `deposit.verified`, `deposit.rejected`, `booking.confirmed`, `booking.manual_created`, `booking.cancelled`, `running_late`, `reminder.sent` |
 | The night | `booking.checked_in` (with actual party size), `booking.no_show`, `table.released`, `door.count`, `crowd.rated`, `night.sold_out`, `booking.completed`, `pos.bill_opened`, `pos.bill_updated`, `pos.bill_closed`, `pos.bill_matched` |
 | Handoff and brain | `handoff.requested` (with trigger), `handoff.resolved` (with duration), `handoff.timed_out`, `host.replied`, `ai.answered` (notes used, topic, language), `ai.call` (model, tokens, latency, cost), `faq.missed`, `brain.note_drafted`, `brain.note_approved`, `brain.note_rejected` |
 | Staff and platform | `staff.login`, `staff.booking_viewed`, `staff.slip_viewed`, `support.session_started`, `support.session_ended`, `club.created`, `club.settings_changed`, `club.price_changed`, `club.event_night_created`, `line.setup_run`, `line.webhook.rejected` |
@@ -1021,7 +1031,7 @@ These are captured from the first real guest. Weather, public holidays and touri
 
 | Signal | How it is captured |
 |---|---|
-| **Demand that did not become a booking** | `availability.searched` with zero results, expired holds, abandoned attempts with the step reached, waitlist joins, the time a night sold out. These are the strongest "busier than usual" signals |
+| **Demand that did not become a booking** | `availability.searched` with zero results, expired holds, abandoned attempts with the step reached, the time a night sold out, and waitlist joins once the waitlist ships (Phase 3). These are the strongest "busier than usual" signals |
 | **The booking curve** | A timed snapshot of each club-night (`occupancy_snapshots`): tables active, held, confirmed and arrived, guests booked, minimum spend booked. Taken at 14, 7, 3 and 1 days before, at 12:00 and 18:00 on the day, then every 30 minutes from doors to close |
 | **People actually inside** | Table bookings are only part of a club's crowd. Walk-ins, guestlist and the standing crowd are invisible to a booking system. Three cheap measures close the gap: **a door clicker** (+1 / −1 on the door screen, tagged table guest, guestlist, walk-in or ticket); **actual party size** entered at check-in; and a **staff crowd rating**, "how full now?" 1–5, asked in the dashboard or door screen every hour from 22:00 to 01:00 by default, set per club |
 | **Inventory and prices as they were** | Tables and prices carry valid-from and valid-to dates, so "share of tables booked" for a past night is measured against that night's tables |
@@ -1034,9 +1044,11 @@ The door screen and clicker do not exist in the code today. They are new screens
 ### 14.4 Guest identity
 
 - **Per club:** a guest is identified by the LINE user ID that club's account sees. LINE issues different IDs under different providers, so this ID is different at every club (clubs own their providers, §11.1.2).
-- **Across clubs:** the platform has its own `person_id`. It is linked two ways: by the ID our shared LIFF app sees (the same for one person at every club, §11.1.1), and by a hash of the phone number given in the booking form. `identity_map` (§9) holds the links.
+- **Across clubs:** the platform has its own `person_id`. `identity_map` (§9) records two links from the first real guest, so nothing is lost: a keyed hash of the phone number the guest gives in our booking form, and the ID our shared LIFF app sees (the same for one person at every club, §11.1.1). The two are kept in separate columns, so each can be switched on or off.
+- **The phone link is on from day one.** The phone number is typed into our own booking form, which on our reading makes it a first-party field (§14.8). LINE has not confirmed that reading. The link is switched off if LINE disagrees.
+- **The LIFF-ID link stays off until LINE approves it in writing.** The ID is LINE-issued, and LINE's terms do not allow user information from different services to be linked without LINE's approval (§14.8). Until then `platform_line_sub` is used only to protect booking links (§11.1.1). Because it is stored from the first guest, approval unlocks the full history.
 - This lets us recognise a returning person across clubs for our own analytics. One club never sees another club's guest records.
-- Linking LINE-issued IDs across accounts is covered by LINE's terms as well as ours. See §14.8 and the open questions (§16).
+- Both points are in the question to LINE (§16.1, question 12).
 
 ### 14.5 Zones and access
 
@@ -1044,16 +1056,16 @@ The data lives in one database, in four areas with separate access:
 
 | Area | Holds | Who reads it |
 |---|---|---|
-| **Operations** | Guests, bookings, messages, slips, raw webhooks | The application only |
+| **Operations** | Guests, bookings, messages, slips, raw webhooks, `events.raw` | The application only |
 | **Vault** | Identity links, encryption key references, notice records, removal requests | The application, with every read logged |
-| **Analytics** | `events` and the tables built from them. Guests appear as IDs, not names | The data dashboard (read-only) |
+| **Analytics** | `events` without the `raw` column, read through a view, and the tables built from them. Guests appear as IDs, not names. `raw` stays in the Operations area | The data dashboard (read-only, with chat-origin rows left out, §14.6) |
 | **Aggregates** | Per-club, per-night, per-time-bucket figures. No guest-level rows | The busyness feed and cross-club views |
 
 ### 14.6 The data dashboard and viewer
 
 Collection and viewing are built together, so the data is usable from the first week.
 
-- **Data dashboard (ours, cross-club):** a self-hosted open-source dashboard tool (**Metabase**, open-source edition) connected read-only to the analytics and aggregate areas. Starter boards: the booking funnel, the booking curve by club and night, demand that found no table, handoff and deflection rates, no-show rate, door counts against bookings, busyness by club and hour. We can build new charts without writing code.
+- **Data dashboard (ours, cross-club):** a self-hosted open-source dashboard tool (**Metabase**, open-source edition). Its database role is read-only and can read two things: a view of `events` that leaves out the `raw` column and every row whose `data_origin` is `instagram`, `line_chat` or `line_profile`; and the aggregate area. Starter boards, built from first-party records only: the booking funnel, the booking curve by club and night, demand that found no table, no-show rate, door counts against bookings, busyness by club and hour. Chat-based figures (handoff and deflection rates, takeovers by topic) are shown one club at a time, on the club stats page (§6.5), which we open through a support session (§12.3). They are not in the cross-club tool. We can build new charts without writing code.
 - **In the founder console** (§12.3), two pages built by us:
   - **Data health:** events per club per day, time of the last event, rejected events, share of guests with a notice record, pending removal requests. A club that goes silent is visible at a glance.
   - **Event stream:** a live, filterable timeline by club, conversation, booking or guest. This is also the main debugging view.
@@ -1065,8 +1077,8 @@ A separate consumer app will show which club is busiest at a given moment. This 
 
 - **One API:** `GET /data/v1/busyness`, with an access key, a rate limit and an access log. It reads only the aggregate area. The app never touches bookings, guests or events.
 - **What it returns:** for each club and each 30-minute bucket, a **level on a 5-step scale relative to that club's own capacity**, with a confidence flag and which inputs were present. No head counts, no guest details, no breakdown by nationality.
-- **Thin data is not published.** A bucket resting on fewer than a set minimum of booked guests (starting value 10, tuned on pilot data), or on a night with no door count, is returned as "no data", not as "quiet".
-- **Inputs are our own first-party records** (§14.8): bookings and holds, demand events, occupancy snapshots, check-ins, door counts, crowd ratings and POS bills.
+- **Thin data is not published.** A bucket resting on fewer than a set minimum of booked guests (starting value 10, tuned on pilot data), or on a night with neither a door count nor a staff crowd rating, is returned as "no data", not as "quiet".
+- **Inputs are first-party records and POS bills** (§14.8): bookings and holds, demand events, occupancy snapshots, check-ins, door counts, crowd ratings and POS bills. Records made through LINE count as first-party on our reading, which LINE has not confirmed (§14.8).
 - **Each club agrees** in its contract to its busyness being shown. Booking counts and spend are a club's commercial information, which is why the feed publishes a relative level and not the numbers.
 - **Versions (§10):** v0 ships in Phase 1 and serves the week-0 method below for the pilot club. v1 ships in Phase 3 with the weekday baseline, door counts and crowd ratings, for every live club.
 - **Sandbox key:** a separate key returns only Velora's levels, marked as test, so the separate app can integrate before real data exists. A sandbox response is computed from Velora's own rows, not from the aggregate area, and never contains a real club. Velora never appears in the production feed (§12.4).
@@ -1088,25 +1100,30 @@ We collect and keep everything. What differs is what each kind of data may **fee
 
 | Origin | Examples | May feed |
 |---|---|---|
-| **First-party records** | Bookings, holds, searches, deposits, check-ins, door counts, crowd ratings, the fields a guest types into our booking form, POS bills | Everything: the club's bot and reports, our cross-club analytics, the busyness feed, marketing |
+| **First-party records** | Bookings, holds, searches, deposits, check-ins, door counts, crowd ratings, the fields a guest types into our booking form. For records made inside LINE this is our reading, which LINE has not confirmed (see below) | Everything: the club's bot and reports, our cross-club analytics, the busyness feed, marketing |
 | **LINE chat and profile** | Message text, LINE user IDs, display names, profile data | That club's own bot, brain and reports. **Not** cross-club products, until LINE gives written permission. LINE's developer terms limit this data to the service it was collected for, and do not allow linking it across services without LINE's approval |
 | **Instagram** | Messages and profile data received through Meta's API | That club only. Meta's platform terms do not allow a provider to use a client's data for its own purposes, **including in aggregated or derived form** |
 | **POS** | Bills, covers, spend | Everything, subject to the club's contract |
 
-This costs the busyness predictor nothing: it runs on first-party records, which are the signals it needs. The reason to respect the channel rules is practical. Breaking them risks losing API access, which would stop the product for every club.
+The busyness predictor is designed to run on first-party records. Door counts, staff crowd ratings, check-ins, dashboard bookings and POS bills never pass through LINE at all.
+
+**One point is unverified:** whether LINE treats bookings, holds, searches and form fields that reach us through button taps and the booking form inside a club's LINE chat as our own data or as LINE user information. Our reading is that they are our own. LINE's policy counts information a developer receives from users inside LINE's services as LINE user information, and LINE has not confirmed how that applies here. We ask LINE in writing before the feed goes to the separate app (§16.1, question 12). Every event carries its `channel`, so records made through LINE or Instagram can be left out of the feed if the answer is no. The feed then runs on the first group alone.
+
+The reason to respect the channel rules is practical. Breaking them risks losing API access, which would stop the product for every club.
 
 ### 14.9 Retention and removal
 
 | Data | Kept for |
 |---|---|
-| Events, booking history, snapshots, door counts, aggregates | The life of the platform |
-| Chat messages and `events.raw` | The life of the club's account |
+| First-party events, booking history, snapshots, door counts, aggregates | The life of the platform |
+| Chat messages, `events.raw`, and events whose origin is LINE chat, LINE profile or Instagram | The life of the club's account. Deleted when the club's account ends. Anonymised counts built from them stay |
 | Payment slips | 1 year |
 | Raw webhook deliveries | 30 days |
 
 - A guest can ask for their data to be removed, through the club or directly through us (a menu item and a keyword).
-- Removal is one job with a checklist: the guest's record is anonymised in place (the database links bookings and messages to it, so it cannot simply be deleted); message text, `events.raw` and slip files are deleted; the identity links are deleted; the IDs that tie the guest's events together are cleared. Aggregates stay, because they are counts.
+- Removal is one job with a checklist: the guest's record is anonymised in place (the database links bookings and messages to it, so it cannot simply be deleted); message text, `events.raw` and slip files are deleted; the identity links are deleted; the IDs that tie the guest's events together are cleared. Stored staff alerts about the guest are deleted too. For that, each alert row is saved with the guest and booking it concerns; today it is saved with neither. Aggregates stay, because they are counts.
 - Chat transcripts used to test or improve the bot are redacted first: images dropped, the guest's known name and phone replaced, then patterns for Thai phone numbers, emails and ID numbers. A redacted transcript improves **that club's** bot only (§14.8).
+- **LINE sets its own deletion rules for LINE-origin data** (LINE user ID, profile, chat text). Its User Data Policy (3.5) requires this data to be deleted when a club stops using LINE through us, and when a guest leaves the service. First-party records and anonymised statistics are not covered. How LINE applies "leaves the service" to an unfollow is not confirmed (§16.1, question 12). LINE-origin fields are therefore stored so they can be cleared for one guest or for one club without losing the booking history.
 
 ### 14.10 Reports
 
@@ -1144,11 +1161,11 @@ No message queue is needed at this volume (roughly 1,000–5,000 events per club
 | Provider link permanently ties the OA to the wrong owner | Club lock-in fears / migration pain | Club-owned provider by default, written into the contract |
 | We can't see staff replies sent from OA Manager | Bot talks over a host | Explicit handoff mode + Mark resolved + timeout |
 | POS vendor won't grant API access | No automated spend sync | Manual entry and report import (L0a and L0b, §11.3). Adapter supports other POS vendors |
-| AI misreads a request | Wrong night or table pre-filled | AI only pre-fills. The guest confirms every value on the review screen. Confidence threshold |
+| AI misreads a request | Wrong night or table pre-filled | AI only pre-fills. The guest confirms every value on the review screen. If the bot cannot tell what the guest wants, it shows the button menu and does not guess (§8.5) |
 | Regulation if we ever touch funds | Licensing burden | Phase 1 money goes guest → club directly. Legal review before any gateway work |
 | Single dependency on LINE | Platform risk | Booking engine and data are ours. The LIFF booking page also works as a normal web link |
 | Hosts keep replying in the LINE app, not our inbox | The brain learns nothing, stats undercount, the "bot gets smarter" promise fails | Make the inbox the easier place to reply (bookings beside the chat, mobile notifications). Agree the rule at onboarding. Show the club the share of its takeovers that had at least one reply through the inbox; the rest were answered in the LINE app or not at all |
-| Channel owners' terms on data use (LINE, Meta) | Loss of API access would stop the product for every club | Tag every event with its origin. Cross-club products run on first-party records only (§14.8). Ask LINE for written permission before using chat-derived data across clubs |
+| Channel owners' terms on data use (LINE, Meta) | Loss of API access would stop the product for every club | Tag every event with its origin. Cross-club products run on first-party records only (§14.8). Ask LINE for written permission before using chat-derived data or LINE-issued IDs across clubs (§14.4) |
 | Meta verification and app review take long or are refused | No Instagram for any club | Start business verification in Phase 1 and submit the review as soon as the inbox runs on a tester account (§10). LINE-only product stands on its own. Instagram is a later addition, not a launch dependency |
 | Bookings are only part of a club's crowd | Busyness predictions are wrong on walk-in-heavy nights | Door clicker, actual party size and staff crowd rating from the pilot (§14.3). Publish "no data" when inputs are thin |
 | Clubs object to being compared with competitors | Clubs refuse the busyness feed, or leave | Feed shows a level relative to the club's own capacity, never counts. Contract term agreed at onboarding |
@@ -1187,21 +1204,26 @@ No message queue is needed at this volume (roughly 1,000–5,000 events per club
 3. Does `liff.sendMessages()` work when the LIFF app's provider differs from the OA's provider (§11.1.1)?
 4. How long does the onboarding call really take? Nothing has been timed yet.
 
+**Must be decided before Phase 1b starts**
+
+Phase 1b builds on each of these (§10). Questions 6 and 7 have a default. The defaults are proposals for the owner to confirm.
+
+5. Where is production hosted, and in which region? A Thailand region keeps guest data in the country. This is the owner's decision. It is needed before the Phase 1b hosting work starts.
+6. How do staff log in? Default for Phase 1b: email and password, with a second factor for founders (matches `users`, §9). Still open: do hosts also get a lower-friction sign-in (LINE Login or a phone code)? It can be added later.
+7. May a founder in a support session send a message to a guest in the club's name? Default for Phase 1b: no. A support session can read, and can change settings after an explicit step up, but cannot send a message to a guest (§12.3).
+
 **To decide**
 
 Questions 9 and 10 must be answered before Phase 1 starts. They decide what the door screen records and how often snapshots are taken (§10, §14.3).
 
-5. Where is production hosted, and in which region? A Thailand region keeps guest data in the country.
-6. The data model assumes staff log in with email and password (§9). Open: do hosts also get a lower-friction sign-in (LINE Login or a phone code)?
-7. Does Velora live on the production system (marked demo) or on its own copy? This spec assumes the production system. Either way the demo needs an internet connection (§12.4). A demo with no connection at all would need a copy on a laptop and would lose the AI answers in steps 3–5. It is not planned.
-8. May a founder in a support session send a message to a guest in the club's name, or only read and fix settings?
+8. Does Velora live on the production system (marked demo) or on its own copy? This spec assumes the production system. Either way the demo needs an internet connection (§12.4). A demo with no connection at all would need a copy on a laptop and would lose the AI answers in steps 3–5. It is not planned.
 9. What does "busy" mean for the separate app: people inside against capacity, tables filled, or the queue at the door? This sets what the door staff are asked to record.
 10. What does the separate app need from the feed: bucket size, how fresh, how far ahead?
 11. Will door staff reliably use the clicker on a busy night? If not, the hourly crowd rating becomes the main measure.
 
 **To ask others**
 
-12. LINE: written permission to use chat-derived data in cross-club products (§14.8).
+12. LINE: written permission or confirmation on four points (§14.4, §14.8, §14.9): (a) using chat-derived data in cross-club products; (b) linking the shared-LIFF user ID across clubs; (c) that fields typed into our booking form, and bookings, holds and searches made by taps in the chat, are our own first-party records, for cross-club identity and for the busyness feed; (d) how the deletion rule applies when a guest unfollows. Send the request in Phase 1b. The answer is needed before the busyness feed goes to the separate app (§10).
 13. LINE MAN Wongnai: partner access to bills, in what form, and who the contact is. Does the CSV report have one row per bill with table and times?
 14. Each club: which POS and plan, and whether its Instagram is run by an agency.
 15. Papaya (sandbox): does a deposit recorded at check-in show as a prepayment on the bill?
@@ -1224,6 +1246,10 @@ Questions 9 and 10 must be answered before Phase 1 starts. They decide what the 
 **To confirm before Phase 1b**
 
 22. Are the club statuses in §12.3 right as written? In particular: during onboarding the bot answers every guest once the webhook is on, and a tester is registered by typing a one-time code from the wizard.
+
+**To ask Meta**
+
+23. Is a booking made in our own form by a guest who arrived from Instagram covered by Meta's platform-data rules (§14.8)?
 
 ---
 
@@ -1250,7 +1276,7 @@ Questions 9 and 10 must be answered before Phase 1 starts. They decide what the 
 
 - [ ] A new club is created, loaded with its tables, prices, rules and baseline FAQs, and connected to its LINE account from the founder console, with **no code change, no environment variable and no deploy**.
 - [ ] The onboarding call for a prepared club takes **≤ 15 minutes** from opening the wizard to the club being live, measured on three clubs.
-- [ ] The wizard needs only the Channel ID and Channel secret. Each manual LINE switch shows as confirmed, and the live test message returns exactly one reply.
+- [ ] The wizard needs only the Channel ID and Channel secret. It confirms the webhook switch and the chat setting by API. Auto-response and the greeting are confirmed by the live test: exactly one greeting on adding the account from a phone that had not added it, and exactly one reply to a message.
 - [ ] Club credentials are never returned by any API or shown on any screen after entry.
 
 **Club brain and inbox**
@@ -1264,11 +1290,11 @@ Questions 9 and 10 must be answered before Phase 1 starts. They decide what the 
 
 **Founder console (P2)**
 
-- [ ] A founder can open any club's dashboard only through a support session with a stated reason. The session ends by itself after 60 minutes and shows a banner throughout.
-- [ ] Every action in a support session appears in the audit log with the founder, the club, the reason and what was viewed or changed.
-- [ ] Changing a club's PromptPay ID or LINE credentials needs a fresh second-factor check and notifies the club's owner.
-- [ ] For any guest message, a founder can see whether it arrived, how it was processed, what was sent back and whether the send succeeded.
-- [ ] Pausing a club's bot stops automatic replies within one message, keeps storing inbound messages and alerts the staff.
+- [ ] A founder can open any club's dashboard only through a support session with a stated reason. The session ends by itself after 60 minutes and shows a banner throughout. (Phase 1b)
+- [ ] Every action in a support session appears in the audit log with the founder, the club, the reason and what was viewed or changed. (Phase 1b)
+- [ ] Changing a club's PromptPay ID or LINE credentials needs a fresh second-factor check and notifies the club's owner. (Phase 1)
+- [ ] For any guest message, a founder can see whether it arrived, how it was processed, what was sent back and whether the send succeeded. (Phase 1b)
+- [ ] Pausing a club's bot stops automatic replies within one message, keeps storing inbound messages and alerts the staff. (Phase 1b)
 
 **Security (§13.1)**
 
@@ -1292,8 +1318,9 @@ Questions 9 and 10 must be answered before Phase 1 starts. They decide what the 
 - [ ] An occupancy snapshot exists for every open club-night at every scheduled time.
 - [ ] The door screen records a count by guest type and the actual party size at check-in.
 - [ ] The busyness feed returns a level for every live club on an open night, returns "no data" when inputs are thin, and contains no guest-level field.
-- [ ] No event with an Instagram or LINE-chat origin is read by any cross-club view or by the feed (automated test).
-- [ ] A guest removal request clears that guest's name, phone, message text and slips, and leaves the aggregates unchanged.
+- [ ] No event with an Instagram, LINE-chat or LINE-profile origin is read by any view that combines more than one club, or by the feed (automated test).
+- [ ] The feed can be rebuilt with every event whose `channel` is `line`, `liff` or `instagram` left out (automated test).
+- [ ] A guest removal request clears that guest's name, phone, message text, stored staff alerts and slips, and leaves the aggregates unchanged.
 
 ---
 
@@ -1308,6 +1335,9 @@ Questions 9 and 10 must be answered before Phase 1 starts. They decide what the 
 | **Flex Message** | A LINE message laid out as a card, with images and buttons |
 | **LIFF** | LINE Front-end Framework: a web page that opens inside LINE (our table map and forms) |
 | **Provider** | The company account in LINE Developers that owns the OA's API channels |
+| **LINE OA Manager** | LINE's own web and phone console where a club runs its account: chats, response settings, message plan |
+| **LINE Developers Console** | LINE's separate site for technical settings, such as the switch that lets the bot join group chats |
+| **LINE Login channel** | The LINE registration a LIFF page needs. Ours is shared by every club (§11.1.1) |
 | **Reply / push message** | Reply = answering a guest message (free). Push = a message we send first (counts against quota) |
 | **PromptPay** | Thailand's national instant transfer system, paid by QR code or phone/ID number |
 | **Slip** | The transfer receipt image from a Thai banking app, with a verifiable QR code |
@@ -1320,7 +1350,9 @@ Questions 9 and 10 must be answered before Phase 1 starts. They decide what the 
 | **Inbox** | The one screen where a club's hosts read and answer chats from every channel. Built on Chatwoot, an open-source inbox we host |
 | **Founder console** | Our own admin area for adding, onboarding, supporting and debugging clubs |
 | **Support session** | A founder's time-limited, logged access to one club's dashboard, opened with a stated reason |
+| **Second factor** | A one-time code from a phone app, asked for on top of the password |
 | **Velora** | Our fictional demo club |
+| **Simulator** | Our browser tool that plays the guest's side of a LINE chat, for tests and demos |
 | **Event** | One recorded fact about something that happened (a search, a hold, a reply), stored permanently |
 | **Data origin** | A tag on each event saying which channel the data came through, which decides what it may feed |
 | **Booking curve** | How a night's bookings build up over the days and hours before it |
@@ -1331,7 +1363,7 @@ Questions 9 and 10 must be answered before Phase 1 starts. They decide what the 
 
 ## 19. Future extensions (backlog, not being built)
 
-Once a club's bookings, chats, guests and spend run through the platform, a long list of further products becomes possible: loyalty, targeted offers, birthday specials, review requests and more. They are kept as a backlog in **[EXTENSIONS.md](EXTENSIONS.md)**: 170 items in 14 themes, each with what it is, what it needs first, a rough effort, a horizon and its main constraint. **Nothing in the backlog is scheduled.** Items are chosen one at a time when clubs ask for them.
+Once a club's bookings, chats, guests and spend run through the platform, a long list of further products becomes possible: loyalty, targeted offers, birthday specials, review requests and more. They are kept as a backlog in **[EXTENSIONS.md](EXTENSIONS.md)**: 170 items in 14 themes, each with what it is, what it needs first, a rough effort, a horizon and its main constraint. **The backlog is not a schedule.** Where a backlog item overlaps a phase in §10 (per-person logins, door counter, gap finder, data removal, Instagram, payment gateway, promoter commission, waitlist, pre-orders), §10 decides when the basic version ships and the backlog row describes the fuller version. Other items are chosen one at a time when clubs ask for them.
 
 | Theme | Items | Examples |
 |---|---|---|
@@ -1364,6 +1396,6 @@ Once a club's bookings, chats, guests and spend run through the platform, a long
 
 - Record every event with the guest, booking and night attached (§14.2).
 - Ask for birthday and occasion in the booking form and store them (§5.2 step 4).
-- Keep one profile per guest per club, with a platform-level identity across clubs (§14.4).
+- Keep one profile per guest per club, with a platform-level identity across clubs (§14.4; the LIFF-ID link waits for LINE's approval).
 - Record which notice each guest saw and whether they opted out of marketing (§5.5).
 - Attach real spend to bookings wherever the POS allows (§11.3).

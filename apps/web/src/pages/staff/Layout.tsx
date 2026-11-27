@@ -93,6 +93,7 @@ export function StaffLayout() {
           <NavLink to="/staff/pos">POS import</NavLink>
           <NavLink to="/staff/calendar">Calendar</NavLink>
           <NavLink to="/staff/report">Report</NavLink>
+          <NavLink to="/staff/stats">Stats</NavLink>
           <NavLink to="/staff/guests">Guests</NavLink>
           <NavLink to="/staff/promoters">Promoters</NavLink>
           <NavLink to="/staff/settings">Setup</NavLink>

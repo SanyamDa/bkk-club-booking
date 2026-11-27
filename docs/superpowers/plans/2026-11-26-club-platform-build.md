@@ -840,6 +840,27 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 
 **Decisions:**
 - Price lint (§8.4): a number next to ฿, บาท, baht or THB, or a number of 100 or more within 30 characters of "minimum spend", "min spend", "deposit", ขั้นต่ำ or มัดจำ, is a `price` issue. Times (`20:00`) and numbers followed by a time unit (hours, days, minutes, ชั่วโมง, วัน, นาที) are not amounts. "available" next to a table, seat or "tonight", "availability", "sold out", "fully booked", โต๊ะว่าง, ยังว่าง, เต็มแล้ว are `availability` issues ("valet parking is available" passes). An `event` note without `validUntil` is `event_needs_end_date`. A failing save throws `BrainLintError { issues }` and writes nothing; the error carries `fix: 'prices'` (the pricing screen).
+#### Task A16 expanded: Club stats page
+
+**Files:** `platform/club-stats.ts` (new), `platform/club-report.ts` (shared range helpers moved out of `buildClubReport`, no behaviour change), `http/staff-report.ts` (`GET /clubs/:slug/stats`, mounted through `staffRoutes` with the report), `apps/web/src/pages/staff/Stats.tsx`, `apps/web/src/main.tsx` and `pages/staff/Layout.tsx` (one route, one nav link), test `test/club-stats.test.ts`. Migration: no.
+
+**Decisions:**
+- Range: `?from=YYYY-MM-DD&to=YYYY-MM-DD`, nights inclusive, at most 366 nights; without them, the last complete week (as `/report`). Chat, takeover and event times run from the first night's `nightEndHour` to the `nightEndHour` after the last night (A16b's window). `owner|manager` only, like `/report`.
+- Shared with A16b through `club-report.ts`: `nightRange`, `testGuestIds`, `bookingFigures` (held bookings, deposits, no-show rate, G1 no-staff-help count) and `chatFigures` (G9 runs, deflection, takeovers by topic). The stats page and the weekly report give the same figure for the same week.
+- Test rows (Global Constraints) excluded for every club not `demo`: `bookings.is_test`, `guests.is_test` (their messages and takeovers), `events.is_test`. A demo club counts its own rows.
+- Bookings: bot = held bookings whose `source` is not manual; manual = `manual|manual_phone|manual_walkin`. Minimum spend booked = sum of held bookings' `min_spend_satang`.
+- G2 median first response: for each inbound guest message, the time to the next outbound bot or staff message to that guest; `unanswered` counts inbound messages with no later outbound one.
+- G8 handoff response: per takeover, `started_at` to the first staff message to that guest at or after it; median; takeovers with no staff reply counted as `waiting`.
+- G5 booking time: per `booking.confirmed` event in range with an `attempt_id`, the time from the earliest event of that attempt (`booking.started`) to the confirmation; median. Manual bookings have no attempt and are left out.
+- Messages by channel: `messages.channel_id` → `channels.kind` (null = `line`), in and out counts.
+- Push quota: `lastKnownQuota` + `quotaView` (A5/A9), the current month, not the range.
+- AI cost: sum of `ai.call` `props.cost_usd_micros` in the range, and in the calendar month (Bangkok) of the range's last night against the cap. Assumption until B16 merges: the cap is `platform_flags['ai-cost-cap:<clubId>'].value.usdMicros`, null when unset (B16 writes or reads the same key).
+- Funnel (§14.10): started `booking.started`, night `night.selected`, pax `pax.selected`, table `table.held`, details `details.submitted`, rules `rules.accepted`, paid `deposit.verified`, confirmed `booking.confirmed`; distinct `attempt_id` per step (event id when the attempt is null), with drop-off to the step before.
+
+**Interfaces (Produces):** `buildClubStats(db: Db, clubId: string, from: string, to: string): Promise<ClubStats>` in `platform/club-stats.ts`; `GET /api/staff/clubs/:slug/stats?from&to` → `{ stats: ClubStats }`.
+
+**Tests (`club-stats.test.ts`):** `figures match a hand-counted seeded Velora week`; `test rows excluded for real clubs`; `club B data never appears in club A stats`; `stats and weekly report agree on the same week`; `GET /stats answers owner and manager with their own club only`; `it.todo` for the B7 Velora history seed.
+
 - Expiry: event and promotion notes are `type: 'event'` and need `validUntil`. Other notes get `reviewBy` = club today + 90 days on create and on every edit. A note whose `validUntil` is before club today (`clubToday`, the night date) leaves the compile at once; the job also sets it `retired` with `frontmatter.retiredReason = 'expired'`. A note past `reviewBy` stays live and is listed for review in the digest (it is not removed).
 - Compile: live, in-date notes, ordered by type (policy, faq, layout, event, learned: the §8.4 source order) then slug; the text is pure (no time stamps), hashed with SHA-256. Tokens are estimated as `ceil(utf8 bytes / 4)` (no tokenizer dependency; Thai counts about 0.75 per character). Warn at 40,000, refuse at 60,000: an over-cap compile writes no snapshot, and an approve that would push the brain over the cap is refused and rolled back. A compile whose hash equals the latest snapshot writes nothing.
 - Folder import (Obsidian round trip) and paste/photo import create **draft** notes only (`source: 'import'`). A file whose slug exists with a different body becomes a draft with `supersedesId` (the approval screen's "replaces note X"); the same body is skipped. Paste splits on markdown headings, else on blank-line paragraphs; a section failing lint is returned as rejected, not saved. Photo import takes an injected `OcrFn`; there is no OCR provider yet (tests use a fake).

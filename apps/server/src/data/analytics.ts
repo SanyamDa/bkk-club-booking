@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 
 /**
- * The views of the `analytics` schema (B14, migration 0006_analytics_views). The same names exist in
+ * The views of the `analytics` schema (B14, migration 0008_analytics_views). The same names exist in
  * `analytics_demo` (demo clubs only). Every view has a `club_id` column.
  */
 export const ANALYTICS_VIEWS = [

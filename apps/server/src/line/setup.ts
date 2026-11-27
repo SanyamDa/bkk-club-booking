@@ -1,5 +1,6 @@
 import { channelAccessToken, HTTPFetchError, liff, messagingApi } from '@line/bot-sdk';
 import { Resvg } from '@resvg/resvg-js';
+import type { TrackedLinks } from '../bot/messages.js';
 import type { Club } from '../db/schema.js';
 import type { LoginChannel } from './credentials.js';
 import type { Message } from './gateway.js';
@@ -25,22 +26,26 @@ interface MenuCell {
   action: messagingApi.Action;
 }
 
-function menuCells(club: Club): MenuCell[] {
+/**
+ * B4: `links` sends the Location cell through the counted `/r/` redirect (`rm_location`). Without it
+ * (the SVG preview) the cell holds the club's map URL.
+ */
+function menuCells(club: Club, links?: TrackedLinks): MenuCell[] {
   return [
-    { x: 0, w: 1000, en: 'Book a table', th: 'จองโต๊ะ', primary: true, action: { type: 'postback', label: 'Book a table', data: 'a=book', displayText: 'Book a table' } },
-    { x: 1000, w: 500, en: 'My booking', th: 'การจองของฉัน', action: { type: 'postback', label: 'My booking', data: 'a=my', displayText: 'My booking' } },
-    { x: 1500, w: 500, en: 'Location', th: 'แผนที่', action: { type: 'uri', label: 'Location', uri: club.settings.mapUrl } },
-    { x: 2000, w: 500, en: 'Talk to a host', th: 'คุยกับพนักงาน', action: { type: 'postback', label: 'Talk to a host', data: 'a=host', displayText: 'Talk to a host' } },
+    { x: 0, w: 1000, en: 'Book a table', th: 'จองโต๊ะ', primary: true, action: { type: 'postback', label: 'Book a table', data: 'a=book&s=rm_book', displayText: 'Book a table' } },
+    { x: 1000, w: 500, en: 'My booking', th: 'การจองของฉัน', action: { type: 'postback', label: 'My booking', data: 'a=my&s=rm_my', displayText: 'My booking' } },
+    { x: 1500, w: 500, en: 'Location', th: 'แผนที่', action: { type: 'uri', label: 'Location', uri: links ? links.tracked(club, 'map', 'rm_location') : club.settings.mapUrl } },
+    { x: 2000, w: 500, en: 'Talk to a host', th: 'คุยกับพนักงาน', action: { type: 'postback', label: 'Talk to a host', data: 'a=host&s=rm_host', displayText: 'Talk to a host' } },
   ];
 }
 
-export function richMenuRequest(club: Club): messagingApi.RichMenuRequest {
+export function richMenuRequest(club: Club, links?: TrackedLinks): messagingApi.RichMenuRequest {
   return {
     size: { width: MENU_W, height: MENU_H },
     selected: true,
     name: `${RICH_MENU_PREFIX}:${club.slug}`.slice(0, 300),
     chatBarText: 'Book a table', // LINE limit: 14 characters
-    areas: menuCells(club).map((c) => ({
+    areas: menuCells(club, links).map((c) => ({
       bounds: { x: c.x, y: 0, width: c.w, height: MENU_H },
       action: c.action,
     })),
@@ -260,6 +265,8 @@ export async function runLineSetup(opts: {
   publicUrl: string;
   sampleMessages: Message[];
   refreshRichMenu?: boolean;
+  /** B4: counted links for the rich menu's Location cell (`Links`); the app's callers always pass it. */
+  links?: TrackedLinks;
   /** With `refreshRichMenu`: keep the menus already there (the old default is kept for rollback). */
   keepOldRichMenu?: boolean;
   webhookRetries?: number;
@@ -328,7 +335,7 @@ export async function runLineSetup(opts: {
     } else {
       const previousRichMenuId = await currentDefaultRichMenuId(clients);
       if (!opts.keepOldRichMenu) for (const m of ours) await clients.api.deleteRichMenu(m.richMenuId);
-      const { richMenuId } = await clients.api.createRichMenu(richMenuRequest(club));
+      const { richMenuId } = await clients.api.createRichMenu(richMenuRequest(club, opts.links));
       const png = renderRichMenuPng(club);
       await clients.blob.setRichMenuImage(richMenuId, new Blob([new Uint8Array(png)], { type: 'image/png' }));
       await clients.api.setDefaultRichMenu(richMenuId);

@@ -54,4 +54,37 @@ export class Links {
   pass(booking: Pick<Booking, 'refCode'>) {
     return `${this.base()}/media/pass/${booking.refCode}.png?s=${sign(this.secret, 'pass', booking.refCode)}`;
   }
+
+  /** B4: the data notice page linked from the notice line (spec §5.5). */
+  privacy() {
+    return `${this.base()}/privacy`;
+  }
+
+  /**
+   * B4: a link LINE opens without telling us, sent through `GET /r/:code` so the tap is counted
+   * (`link.opened`). The target comes from the club's settings, never from the link, so the
+   * redirect cannot be pointed elsewhere; the signature stops forged counts.
+   */
+  tracked(club: Pick<Club, 'slug'>, kind: TrackedLinkKind, entry: string) {
+    return `${this.base()}/r/${trackedLinkCode(this.secret, club.slug, kind, entry)}`;
+  }
+}
+
+/** B4: the link kinds `GET /r/:code` serves; each maps to a club setting in `http/redirect.ts`. */
+export const TRACKED_LINK_KINDS = ['map', 'drinks'] as const;
+export type TrackedLinkKind = (typeof TRACKED_LINK_KINDS)[number];
+
+/** `<kind>.<slug>.<entry>.<signature>`; slugs and entry tags never contain a dot. */
+export function trackedLinkCode(secret: string, slug: string, kind: TrackedLinkKind, entry: string): string {
+  const body = `${kind}.${slug}.${entry}`;
+  return `${body}.${sign(secret, 'redirect', body)}`;
+}
+
+export function parseTrackedLinkCode(secret: string, code: string): { kind: TrackedLinkKind; slug: string; entry: string } | null {
+  const parts = code.split('.');
+  if (parts.length !== 4) return null;
+  const [kind, slug, entry, sig] = parts as [string, string, string, string];
+  if (!(TRACKED_LINK_KINDS as readonly string[]).includes(kind) || !/^[a-z0-9_]{1,32}$/.test(entry)) return null;
+  if (!verifySignature(secret, 'redirect', `${kind}.${slug}.${entry}`, sig)) return null;
+  return { kind: kind as TrackedLinkKind, slug, entry };
 }

@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { errorText, markRawError, markRawProcessed, rawBody, recordRawWebhook } from '../data/raw-webhooks.js';
 import { clubs } from '../db/schema.js';
+import { applyCallback, checkCallback } from '../integrations/chatwoot/callback.js';
 import { instagramState, recordInstagramMessage, verifyInstagramToken } from '../integrations/chatwoot/instagram.js';
 import { applyLiveBill, loadPosAdapter } from '../integrations/pos/live.js';
 import { PAPAYA_SIGNATURE_HEADER } from '../integrations/pos/papaya.js';
@@ -37,6 +38,38 @@ export function integrationRoutes(app: AppContext) {
   const r = new Hono();
   const db = app.deps.db;
   const badSignatures = minuteCounter();
+
+  // A14: the LINE API inbox webhook. Staff replies typed in Chatwoot and its resolve button come
+  // back here. The token set by the bridge (`ensureBridgeWebhook`) is the proof of origin; a
+  // delivery whose account or conversation is not this club's is refused before anything is written.
+  r.post('/chatwoot/:clubId/callback', bodyLimit({ maxSize: 256 * 1024, onError: (c) => c.json({ error: 'too_large' }, 413) }), async (c) => {
+    const club = await db.query.clubs.findFirst({ where: eq(clubs.id, c.req.param('clubId')) });
+    if (!club) return c.json({ error: 'not_found' }, 404);
+    const now = app.deps.now();
+    const { body, parsed } = rawBody(await c.req.text());
+    const checked = await checkCallback(db, club, c.req.query('token'), parsed);
+    if (!checked.ok) {
+      if (checked.status === 401) {
+        if (badSignatures(`${club.id}|${clientIp(c) ?? 'unknown'}`, now) > BAD_SIGNATURE_LIMIT_PER_IP) return c.json({ error: 'rate_limited' }, 429);
+        if (badSignatures(club.id, now) > BAD_SIGNATURE_LIMIT_PER_CLUB) return c.json({ error: 'rate_limited' }, 429);
+      }
+      return c.json({ error: checked.error }, checked.status);
+    }
+    if (checked.kind === 'ignored') return c.json({ ok: true, applied: 'ignored' });
+    const rawId = await recordRawWebhook(db, { clubId: club.id, channel: 'chatwoot:callback', receivedAt: now, body, signatureOk: true });
+    try {
+      const applied = await applyCallback(db, checked, { outbox: app.deps.outbox, gateways: app.gateways }, now);
+      await markRawProcessed(db, rawId, now);
+      return c.json({ ok: true, applied });
+    } catch (err) {
+      await markRawError(db, rawId, errorText(err));
+      throw err;
+    }
+  });
+
+  // A14: the Agent Bot's outgoing URL (A13). The bot runs from the LINE webhook, so Chatwoot's
+  // agent-bot events need no action; answering 200 keeps Chatwoot from logging failures.
+  r.post('/chatwoot/:clubId/bot', (c) => c.json({ ok: true, applied: 'ignored' }));
 
   // A18: Chatwoot account webhook (message_created) for the club's Instagram inbox. The per-club
   // token in the query string is the only proof of origin (Chatwoot does not sign these).

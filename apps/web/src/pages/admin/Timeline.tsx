@@ -34,7 +34,7 @@ export function Timeline({ kind }: { kind: 'conversations' | 'bookings' }) {
         <div className="stack" style={{ gap: 6 }}>
           {items.map((it, i) => {
             const label = it.kind ?? it.type ?? 'item';
-            const text = it.payload?.text ?? it.text ?? (it.to ? `${it.from ?? '—'} → ${it.to}` : it.type ?? '');
+            const text = it.payload?.text ?? it.payload?.message?.text ?? it.text ?? (it.to ? `${it.from ?? '—'} → ${it.to}` : it.type ?? '');
             const who = [it.direction, it.authorType ?? it.actorType, it.sentVia].filter(Boolean).join(' · ');
             return (
               <div key={i} className="card" style={{ padding: 10 }}>

@@ -1,5 +1,6 @@
+import { sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { events, eventsDeadLetter } from '../db/schema.js';
+import { events, eventsDeadLetter, identityMap } from '../db/schema.js';
 import { newId } from '../lib/util.js';
 import { eventDeclaration, type EventType } from './event-types.js';
 
@@ -103,8 +104,19 @@ export async function emit(tx: Db, e: EventInput, opts?: { strict?: boolean }): 
       actorId: e.actorId ?? null,
       channel: e.channel ?? null,
       dataOrigin: e.dataOrigin,
-      source: e.source ?? null,
+      // B4: every event of a booking attempt carries the attempt's entry tag. A booking event with an
+      // `attemptId` and no `source` takes it from the booking's tagged hold event (`events_booking` index).
+      source:
+        e.source ??
+        (e.attemptId && e.bookingId
+          ? sql`(select ${events.source} from ${events} where ${events.bookingId} = ${e.bookingId} and ${events.clubId} = ${e.clubId} and ${events.attemptId} = ${e.attemptId} and ${events.source} is not null order by ${events.occurredAt} limit 1)`
+          : null),
       guestId: e.guestId ?? null,
+      // The guest's platform person (B20, §14.4); Instagram data stays with its club (§14.8).
+      personId:
+        e.guestId && e.dataOrigin !== 'instagram'
+          ? sql`(select ${identityMap.personId} from ${identityMap} where ${identityMap.clubId} = ${e.clubId} and ${identityMap.guestId} = ${e.guestId})`
+          : null,
       conversationId: e.conversationId ?? null,
       bookingId: e.bookingId ?? null,
       tableId: e.tableId ?? null,

@@ -188,7 +188,66 @@ const strings = {
     en: 'You won’t get promotional messages from us any more. Messages about your own bookings still arrive.',
     th: 'คุณจะไม่ได้รับข้อความโปรโมชันจากเราอีกค่ะ ข้อความเกี่ยวกับการจองของคุณยังส่งถึงตามปกติค่ะ',
   },
+
+  // B4: the data notice (spec §5.5), shown once on first contact. Its version is DATA_NOTICE_VERSION;
+  // change the text, change the version.
+  dataNotice: {
+    en: 'Chats and bookings with {club} are stored and used to run the service, improve answers, and for analytics and marketing by {club} and by us. More: {url}',
+    th: 'แชทและการจองกับ {club} จะถูกจัดเก็บและใช้เพื่อให้บริการ ปรับปรุงคำตอบ และเพื่อการวิเคราะห์และการตลาดโดย {club} และโดยเรา ดูเพิ่มเติม: {url}',
+  },
+
+  // B22: waitlist and bottle pre-orders.
+  joinWaitlist: { en: 'Join waitlist', th: 'ลงชื่อรอคิว' },
+  nightSoldOut: {
+    en: '{night} is fully booked. Tell us your party size and you can join the waitlist.',
+    th: 'คืน {night} เต็มแล้วค่ะ บอกจำนวนท่านเพื่อลงชื่อรอคิวได้ค่ะ',
+  },
+  waitlistJoined: {
+    en: 'You’re on the waitlist for {night} ({pax} guests). We’ll message you here if a table frees up.',
+    th: 'ลงชื่อรอคิวคืน {night} ({pax} ท่าน) แล้วค่ะ หากมีโต๊ะว่างจะแจ้งในแชทนี้ค่ะ',
+  },
+  waitlistAlready: {
+    en: 'You’re already on the waitlist for {night} ({pax} guests).',
+    th: 'คุณลงชื่อรอคิวคืน {night} ({pax} ท่าน) ไว้แล้วค่ะ',
+  },
+  waitlistUnavailable: {
+    en: 'Sorry, we can’t take a waitlist for {night}.',
+    th: 'ขออภัย ไม่สามารถลงชื่อรอคิวคืน {night} ได้ค่ะ',
+  },
+  waitlistOffer: {
+    en: 'Good news: a table for {night} ({pax} guests) just opened up. The first guest to book gets it; this offer is yours for {minutes} minutes.',
+    th: 'ข่าวดีค่ะ มีโต๊ะว่างคืน {night} ({pax} ท่าน) แล้ว ใครจองก่อนได้ก่อน ข้อเสนอนี้สำหรับคุณภายใน {minutes} นาทีค่ะ',
+  },
+  waitlistBook: { en: 'Book now', th: 'จองเลย' },
+  waitlistLeave: { en: 'Leave waitlist', th: 'ยกเลิกรอคิว' },
+  waitlistLeft: { en: 'You’re off the waitlist.', th: 'ยกเลิกการรอคิวแล้วค่ะ' },
+  preorderPrompt: {
+    en: 'Want bottles waiting at your table? Pre-order them now; you pay at the club.',
+    th: 'ต้องการให้เตรียมขวดไว้ที่โต๊ะไหมคะ? สั่งล่วงหน้าได้เลย ชำระที่ร้านค่ะ',
+  },
+  preorderBottles: { en: 'Pre-order bottles', th: 'สั่งขวดล่วงหน้า' },
+  preorderAdd: { en: 'Add 1', th: 'เพิ่ม 1' },
+  preorderSummary: {
+    en: 'Your pre-order for {code}, {night}:\n{lines}\nTotal {total} (paid at the club)',
+    th: 'รายการสั่งล่วงหน้า โต๊ะ {code} คืน {night}:\n{lines}\nรวม {total} (ชำระที่ร้าน)',
+  },
+  preorderEmpty: { en: 'Your pre-order is empty.', th: 'ยังไม่มีรายการสั่งล่วงหน้าค่ะ' },
+  preorderAddMore: { en: 'Add more', th: 'เพิ่มอีก' },
+  preorderClear: { en: 'Clear', th: 'ล้างรายการ' },
+  preorderDone: { en: 'Done', th: 'เสร็จแล้ว' },
+  preorderSent: { en: 'Thanks, the bar has your pre-order.', th: 'ขอบคุณค่ะ ส่งรายการให้บาร์แล้วค่ะ' },
+  preorderClosed: {
+    en: 'This booking can’t take a pre-order any more. A host can help.',
+    th: 'การจองนี้ไม่สามารถสั่งล่วงหน้าได้แล้วค่ะ พนักงานยินดีช่วยค่ะ',
+  },
+  preorderLimit: {
+    en: 'That’s the most we can take as a pre-order. A host can help with more.',
+    th: 'ถึงจำนวนสูงสุดของการสั่งล่วงหน้าแล้วค่ะ หากต้องการเพิ่ม พนักงานยินดีช่วยค่ะ',
+  },
 } satisfies Record<string, Record<Lang, string>>;
+
+/** B4: version id of the `dataNotice` text, written to `notices.text_version` (spec §5.5). */
+export const DATA_NOTICE_VERSION = 'data-v1';
 
 export type StringKey = keyof typeof strings;
 

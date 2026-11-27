@@ -392,8 +392,10 @@ describe('founder console API (A5)', () => {
     const { items } = (await res.json()) as { items: { kind: string; result?: string; direction?: string; deliveryStatus?: string }[] };
     expect(items.find((i) => i.kind === 'raw_webhook')).toMatchObject({ result: 'processed' });
     const msgs = items.filter((i) => i.kind === 'message');
-    expect(msgs.map((m) => m.direction)).toEqual(['in', 'out']);
+    // B4: the first reply carries the one-time data notice line, then the menu.
+    expect(msgs.map((m) => m.direction)).toEqual(['in', 'out', 'out']);
     expect(msgs[1]).toMatchObject({ deliveryStatus: 'sent' });
+    expect(msgs[2]).toMatchObject({ deliveryStatus: 'sent' });
   });
 
   it("failed send shows in the message log with LINE's error", async () => {

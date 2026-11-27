@@ -3,6 +3,7 @@ import { and, asc, eq, gte, isNull, lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { buildBotDeps } from '../bot/deps.js';
 import { processEvent } from '../bot/flow.js';
+import { alertBotError } from '../bot/alerts.js';
 import { recordOps } from '../data/ops.js';
 import { errorText, markRawError, markRawProcessed, rawBody, recordRawWebhook } from '../data/raw-webhooks.js';
 import type { Db } from '../db/client.js';
@@ -147,6 +148,8 @@ export async function processDelivery(ctx: AppContext, rawId: string, opts: { dr
       const error = errorText(err);
       errors.push(error);
       await recordOps(db, club.id, 'bot_error', { rawWebhookId: rawId, webhookEventId: event.webhookEventId, error }, ctx.deps.now());
+      // B19b: urgent (§6.4), one open per club; an alert failure must not hide the recorded error.
+      await alertBotError(db, club.id, ctx.deps.now()).catch((e) => ctx.deps.log(`bot_error alert failed for club ${club.id}`, e));
     }
   }
   if (errors.length) await markRawError(db, rawId, errors.join('; '));

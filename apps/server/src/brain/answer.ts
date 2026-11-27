@@ -5,7 +5,7 @@ import { brainNotes, events, platformFlags, tables, zones, type Club, type Conve
 import { emit } from '../data/events.js';
 import { isTestContext } from '../data/test-flag.js';
 import { bangkokParts, weekdayOf } from '../lib/time.js';
-import { raiseAlert } from '../platform/alerts.js';
+import { alertCostCap } from '../bot/alerts.js';
 import { clubToday } from '../platform/club-settings.js';
 import { aiCostCapKey } from '../platform/club-stats.js';
 import { latestSnapshot } from './compile.js';
@@ -134,36 +134,16 @@ export async function aiSpendThisMonth(db: Db, clubId: string, now: Date): Promi
   return Number(row?.total ?? 0);
 }
 
-/** Raises one alert per club, month and level (claimed in `platform_flags`, the A16b pattern). */
+/**
+ * Raises one alert per club, month and level (claimed in `platform_flags`, the A16b pattern).
+ * B19b: both the warning and the cap are urgent `ai_cost_cap` alerts (`alertCostCap`).
+ */
 async function costAlertOnce(db: Db, club: Club, now: Date, which: 'warn' | 'cap', spent: number, cap: number) {
   const p = bangkokParts(now);
   const key = `ai-cost-alert:${club.id}:${p.year}-${String(p.month).padStart(2, '0')}:${which}`;
   const claimed = await db.insert(platformFlags).values({ key, value: { spent, cap }, updatedAt: now }).onConflictDoNothing().returning();
   if (claimed.length === 0) return;
-  const usd = (n: number) => `US$${(n / 1_000_000).toFixed(2)}`;
-  await raiseAlert(
-    db,
-    which === 'warn'
-      ? {
-          clubId: club.id,
-          level: 'needs_input',
-          kind: 'ai_cost_warning',
-          text: {
-            en: `AI answers have used ${usd(spent)} of the ${usd(cap)} monthly cap. At the cap, guest questions go to a host.`,
-            th: `ระบบตอบอัตโนมัติใช้ไปแล้ว ${usd(spent)} จากเพดาน ${usd(cap)} ต่อเดือน เมื่อถึงเพดาน คำถามของลูกค้าจะส่งให้พนักงาน`,
-          },
-        }
-      : {
-          clubId: club.id,
-          level: 'urgent',
-          kind: 'ai_cost_cap',
-          text: {
-            en: `AI answers reached the ${usd(cap)} monthly cap. Guest questions now go to a host until next month.`,
-            th: `ระบบตอบอัตโนมัติถึงเพดาน ${usd(cap)} ต่อเดือนแล้ว คำถามของลูกค้าจะส่งให้พนักงานจนถึงเดือนหน้า`,
-          },
-        },
-    now,
-  );
+  await alertCostCap(db, club.id, { spentUsdMicros: spent, capUsdMicros: cap, reached: which === 'cap' }, now);
 }
 
 export const AI_INSTRUCTIONS = `You are the LINE assistant of one nightclub in Bangkok. You answer guests in Thai or English.

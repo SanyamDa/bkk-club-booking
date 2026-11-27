@@ -42,11 +42,13 @@ Every event the platform records, written with `emit()` into the `events` table 
 | `availability.searched` | 1 | `night_date` (none), `pax_range` (none), `result_count` (none), `tables_shown` (none) | — | Table search, including zero results. |
 | `night.sold_out_shown` | 1 | `pax_range` (none) | — | Guest was shown a full night. |
 | `waitlist.joined` | 1 | `pax_range` (none) | — | Guest joined the waitlist for a night. |
+| `waitlist.offered` | 1 | `pax_range` (none) | — | A freed table was offered to a waitlisted guest (B22). |
 
 ## Booking
 
 | Event | v | Props (privacy) | Raw | Description |
 |---|---|---|---|---|
+| `preorder.placed` | 1 | `item_count` (none), `total_satang` (none) | — | Guest or staff set a bottle pre-order on a booking (B22). |
 | `table.held` | 1 | `hold_minutes` (none) | — | Table held for the guest. |
 | `table.hold_lost_race` | 1 | — | — | Another guest took the table first. |
 | `hold.expired` | 1 | `reason_code` (none) | — | Hold ran out before payment. |

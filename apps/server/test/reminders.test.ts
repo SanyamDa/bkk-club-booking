@@ -2,7 +2,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { cancelBooking, createManualBooking, markArrived } from '../src/bookings/service.js';
-import { auditLog, bookings, bookingStatusHistory, clubs, events, guests, messages, type Club } from '../src/db/schema.js';
+import { alerts, auditLog, bookings, bookingStatusHistory, clubs, events, guests, messages, type Club } from '../src/db/schema.js';
 import { buildScheduler } from '../src/jobs/index.js';
 import { releaseAt, releaseNow } from '../src/jobs/no-show.js';
 import { reminderDueAt, remindNow } from '../src/jobs/reminders.js';
@@ -69,6 +69,8 @@ const historyOf = (id: string) =>
 const guestOut = (guestId: string) =>
   db().select().from(messages).where(and(eq(messages.guestId, guestId), eq(messages.direction, 'out'))).orderBy(asc(messages.createdAt));
 const staffOut = () => db().select().from(messages).where(eq(messages.target, 'staff')).orderBy(asc(messages.createdAt));
+/** B19b: B10's staff notices are `raiseAlert` alerts. */
+const alertsOf = (bookingId: string, kind: string) => db().select().from(alerts).where(and(eq(alerts.bookingId, bookingId), eq(alerts.kind, kind)));
 const lastOut = async (guestId: string) => {
   const out = await guestOut(guestId);
   return out[out.length - 1]!.payload as any;
@@ -161,7 +163,11 @@ describe('guest actions (B10)', () => {
     expect(ev[0]!.actorType).toBe('guest');
     const audits = await db().select().from(auditLog).where(and(eq(auditLog.entityId, b.id), eq(auditLog.action, 'running_late')));
     expect(audits).toHaveLength(1);
-    expect((await staffOut()).some((m) => JSON.stringify(m.payload).includes('running 30 min late'))).toBe(true);
+    const late = await alertsOf(b.id, 'running_late');
+    expect(late).toHaveLength(1);
+    expect(late[0]).toMatchObject({ level: 'info' });
+    expect(late[0]!.textEn).toContain('Running late: 30 min, release at 00:30');
+    expect(late[0]!.conversationId).not.toBeNull();
 
     // An invalid number of minutes changes nothing.
     await sim('late1', { type: 'postback', data: `a=late&b=${b.id}&m=999` });
@@ -186,7 +192,10 @@ describe('guest actions (B10)', () => {
     expect(ev).toHaveLength(1);
     expect(ev[0]!.props).toEqual({ reason_code: 'guest_cancelled' });
     expect((await lastOut(b.guestId)).text).toContain('cancelled');
-    expect((await staffOut()).some((m) => JSON.stringify(m.payload).includes('Guest cancelled'))).toBe(true);
+    const cancelled = await alertsOf(b.id, 'cancellation');
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0]).toMatchObject({ level: 'info' });
+    expect(cancelled[0]!.textEn).toContain('Booking cancelled');
 
     // Another guest cannot cancel it, and a second tap is harmless.
     const other = await confirmedFor('c2', 'table_demo_B2');
@@ -223,7 +232,11 @@ describe('no-show job (B10)', () => {
     expect([last.fromStatus, last.toStatus, last.actorType, last.reasonCode]).toEqual(['confirmed', 'no_show', 'system', 'released']);
     expect(await eventsOf(b.id, 'booking.no_show')).toHaveLength(1);
     expect(await eventsOf(b.id, 'table.released')).toHaveLength(1);
-    expect((await staffOut()).some((m) => JSON.stringify(m.payload).includes('B1 not arrived'))).toBe(true);
+    const noArrival = await alertsOf(b.id, 'no_arrival');
+    expect(noArrival).toHaveLength(1);
+    expect(noArrival[0]).toMatchObject({ level: 'urgent' });
+    // Urgent: the staff group gets it in the same call.
+    expect((await staffOut()).some((m) => JSON.stringify(m.payload).includes('Not arrived at release time'))).toBe(true);
 
     // The table is free again for the same night.
     const again = await createManualBooking(db(), club, { tableId: 'table_demo_B1', nightDate: FRIDAY, pax: 4, name: 'Bo', depositPaid: false }, STAFF, release);

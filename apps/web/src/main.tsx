@@ -20,6 +20,7 @@ import { Report } from './pages/staff/Report';
 import { Stats } from './pages/staff/Stats';
 import { Guests } from './pages/staff/Guests';
 import { Promoters } from './pages/staff/Promoters';
+import { Extras } from './pages/staff/Extras';
 import { AdminLayout } from './pages/admin/AdminLayout';
 import { ClubDetail } from './pages/admin/ClubDetail';
 import { Clubs } from './pages/admin/Clubs';
@@ -62,6 +63,7 @@ createRoot(document.getElementById('root')!).render(
           <Route path="guests" element={<Guests />} />
           <Route path="promoters" element={<Promoters />} />
           <Route path="brain" element={<Brain />} />
+          <Route path="extras" element={<Extras />} />
         </Route>
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<Clubs />} />

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { recordRawWebhook } from '../src/data/raw-webhooks.js';
 import type { Db } from '../src/db/client.js';
-import { bookings, clubs, conversations, events, messages, opsEvents, platformFlags, rawWebhooks, type Club } from '../src/db/schema.js';
+import { alerts, bookings, clubs, conversations, events, guests, messages, opsEvents, platformFlags, rawWebhooks, type Club } from '../src/db/schema.js';
 import { BAD_SIGNATURE_LIMIT_PER_IP } from '../src/http/integrations.js';
 import { processDelivery, REPLAY_MAX_AGE_MS, replayUnprocessed } from '../src/http/webhook.js';
 import { startBackground } from '../src/jobs/index.js';
@@ -96,7 +96,11 @@ async function post(body: unknown, signature?: string) {
 
 const raws = () => db.select().from(rawWebhooks).where(eq(rawWebhooks.clubId, club.id));
 const inbound = () => db.select().from(messages).where(and(eq(messages.clubId, club.id), eq(messages.direction, 'in')));
-const guestOut = () => db.select().from(messages).where(and(eq(messages.clubId, club.id), eq(messages.direction, 'out'), isNull(messages.target)));
+/** The turn's own replies: B4's one-time data notice line (asserted in chat-capture.test.ts) is left out. */
+const guestOut = async () =>
+  (await db.select().from(messages).where(and(eq(messages.clubId, club.id), eq(messages.direction, 'out'), isNull(messages.target)))).filter(
+    (m) => !String((m.payload as { text?: string }).text ?? '').startsWith('Chats and bookings with'),
+  );
 const staffOut = () => db.select().from(messages).where(and(eq(messages.clubId, club.id), eq(messages.target, 'staff')));
 const ops = (kind: (typeof opsEvents.$inferSelect)['kind']) => db.select().from(opsEvents).where(eq(opsEvents.kind, kind));
 const ago = (ms: number) => new Date(clock.getTime() - ms);
@@ -251,7 +255,8 @@ describe('durable webhook pipeline (B3)', () => {
     expect(out).toMatchObject({ deliveryStatus: 'failed', sentVia: 'push' });
     expect(out!.error).toContain('429 monthly quota reached');
     const [op] = await ops('send_failed');
-    expect(op).toMatchObject({ clubId: club.id, detail: { target: 'guest', messageIds: [out!.id] } });
+    // The batch also holds B4's data notice line, sent with the reply.
+    expect(op).toMatchObject({ clubId: club.id, detail: { target: 'guest', messageIds: expect.arrayContaining([out!.id]) } });
 
     // A successful send says sent, with how it went out.
     useGateway(fakeGateway());
@@ -294,6 +299,21 @@ describe('durable webhook pipeline (B3)', () => {
     expect(await staffOut()).toHaveLength(4);
     expect(await guestOut()).toHaveLength(0);
     expect(await inbound()).toHaveLength(7);
+
+    // B19b: each of those staff messages is one urgent `bot_paused` alert, carrying its conversation.
+    const convOf = async (lineUserId: string) => {
+      const [row] = await db
+        .select({ id: conversations.id })
+        .from(conversations)
+        .innerJoin(guests, eq(guests.id, conversations.guestId))
+        .where(and(eq(conversations.clubId, club.id), eq(guests.lineUserId, lineUserId)));
+      return row!.id;
+    };
+    const paused = await db.select().from(alerts).where(and(eq(alerts.clubId, club.id), eq(alerts.kind, 'bot_paused')));
+    expect(paused).toHaveLength(4);
+    for (const a of paused) expect(a.level).toBe('urgent');
+    const [c1, c2] = [await convOf('Upa1'), await convOf('Upa2')];
+    expect(paused.map((a) => a.conversationId).sort()).toEqual([c1, c1, c1, c2].sort());
   });
 
   it('dry run replay sends nothing and writes nothing', async () => {

@@ -2,6 +2,7 @@ import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { expireHold } from '../bookings/service.js';
 import type { Db } from '../db/client.js';
 import {
+  bookingPreorders,
   bookings,
   bookingStatusHistory,
   clubs,
@@ -20,6 +21,7 @@ import {
   posBills,
   promoterAttributions,
   removalRequests,
+  waitlistEntries,
   type Booking,
   type Club,
 } from '../db/schema.js';
@@ -94,6 +96,9 @@ export async function resetDemoClub(db: Db, clubId: string, now: Date): Promise<
       await tx.delete(posBills).where(and(eq(posBills.clubId, clubId), inArray(posBills.bookingId, doomedBookings)));
       await tx.delete(promoterAttributions).where(and(eq(promoterAttributions.clubId, clubId), inArray(promoterAttributions.bookingId, doomedBookings)));
     }
+    // B22: pre-orders and waitlist entries are activity rows (none is seeded history).
+    await tx.delete(bookingPreorders).where(eq(bookingPreorders.clubId, clubId));
+    await tx.delete(waitlistEntries).where(eq(waitlistEntries.clubId, clubId));
     if (doomedMsgs.length) await tx.delete(messages).where(and(eq(messages.clubId, clubId), inArray(messages.id, doomedMsgs)));
     if (doomedConvs.length) await tx.delete(conversations).where(and(eq(conversations.clubId, clubId), inArray(conversations.id, doomedConvs)));
     if (doomedBookings.length) await tx.delete(bookings).where(and(eq(bookings.clubId, clubId), inArray(bookings.id, doomedBookings)));

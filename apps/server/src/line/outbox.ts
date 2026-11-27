@@ -1,12 +1,14 @@
-import { inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
+import type { Actor } from '../bookings/service.js';
 import { recordOps } from '../data/ops.js';
 import type { Db } from '../db/client.js';
-import { messages, type Club, type Guest } from '../db/schema.js';
+import { channels, messages, type Club, type Guest } from '../db/schema.js';
 import { newId } from '../lib/util.js';
 import type { LineGateway, Message } from './gateway.js';
 import { describeLineError } from './setup.js';
 
 const MAX_PER_CALL = 5; // LINE limit per reply/push request
+const BOT: Actor = { type: 'bot' };
 
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -26,8 +28,23 @@ export class Outbox {
     private now: () => Date = () => new Date(),
   ) {}
 
-  async toGuest(gateway: LineGateway, club: Club, guest: Guest, msgs: Message[], replyToken?: string) {
+  /**
+   * B4: who wrote an outbound row (`author_type`, `author_id`), its channel (the club's `kind = 'line'`
+   * row) and when it was sent. A platform admin under a support grant is stored as staff.
+   */
+  private async stamp(club: Club, author: Actor) {
+    const [channel] = await this.db
+      .select({ id: channels.id })
+      .from(channels)
+      .where(and(eq(channels.clubId, club.id), eq(channels.kind, 'line')))
+      .limit(1);
+    const authorType = author.type === 'platform' ? 'staff' : author.type;
+    return { authorType, authorId: author.id ?? null, channelId: channel?.id ?? null, occurredAt: this.now() };
+  }
+
+  async toGuest(gateway: LineGateway, club: Club, guest: Guest, msgs: Message[], replyToken?: string, author: Actor = BOT) {
     if (msgs.length === 0) return;
+    const stamp = await this.stamp(club, author);
     const rows = msgs.map((m) => ({
       id: newId(),
       clubId: club.id,
@@ -35,6 +52,7 @@ export class Outbox {
       direction: 'out' as const,
       kind: m.type,
       payload: m,
+      ...stamp,
     }));
     await this.db.insert(messages).values(rows);
     const ids = rows.map((r) => r.id);
@@ -81,8 +99,9 @@ export class Outbox {
   }
 
   /** Staff alerts go to the club's linked LINE group. Always logged so the dashboard can show them. */
-  async toStaff(gateway: LineGateway, club: Club, msgs: Message[]) {
+  async toStaff(gateway: LineGateway, club: Club, msgs: Message[], author: Actor = BOT) {
     if (msgs.length === 0) return;
+    const stamp = await this.stamp(club, author);
     const rows = msgs.map((m) => ({
       id: newId(),
       clubId: club.id,
@@ -90,6 +109,7 @@ export class Outbox {
       direction: 'out' as const,
       kind: m.type,
       payload: m,
+      ...stamp,
     }));
     await this.db.insert(messages).values(rows);
     const ids = rows.map((r) => r.id);

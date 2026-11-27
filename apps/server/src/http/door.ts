@@ -9,6 +9,7 @@ import { isTestContext } from '../data/test-flag.js';
 import { openPosBillAtCheckIn } from '../integrations/pos/live.js';
 import { currentNightDate } from '../lib/time.js';
 import { newId } from '../lib/util.js';
+import { CrowdRatingError, recordCrowdRating } from '../jobs/snapshots.js';
 import { requireClubRole, type AuthEnv } from './auth.js';
 import type { AppContext } from './context.js';
 import { actorOf } from './staff-settings.js';
@@ -165,6 +166,34 @@ export function doorRoutes(app: AppContext) {
     });
     if (outcome === 'below_zero') return c.json({ error: 'below_zero', message: 'The count for this guest type is already 0' }, 409);
     return c.json({ ok: true, counts: await doorCounts(db, club.id, nightDate) });
+  });
+
+  return r;
+}
+
+/**
+ * B12: the staff crowd rating ("how full now?" 1–5, spec §6.2 door mode, §14.3), under
+ * `/api/staff/clubs/:slug/door/crowd-rating`. Mounted at `/api/staff` next to `doorRoutes`.
+ */
+export function crowdRatingRoutes(app: AppContext) {
+  const r = new Hono<AuthEnv>();
+  const staff = requireClubRole(app, 'owner', 'manager', 'host', 'door');
+
+  r.post('/clubs/:slug/door/crowd-rating', staff, async (c) => {
+    const body = z.object({ level: z.number().int() }).safeParse(await c.req.json().catch(() => null));
+    if (!body.success) return c.json({ error: 'bad_request' }, 400);
+    try {
+      const row = await recordCrowdRating(
+        app.deps.db,
+        c.var.club,
+        { level: body.data.level, userId: c.var.user.id, actorType: c.var.supportGrant ? 'platform' : 'staff' },
+        app.deps.now(),
+      );
+      return c.json({ rating: { id: row.id, nightDate: row.nightDate, level: row.level, at: row.at.toISOString() } }, 201);
+    } catch (err) {
+      if (err instanceof CrowdRatingError) return c.json({ error: err.code }, 400);
+      throw err;
+    }
   });
 
   return r;

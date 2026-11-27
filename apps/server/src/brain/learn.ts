@@ -289,7 +289,9 @@ export interface EpisodeTranscript {
 }
 
 function payloadText(payload: unknown, kind: string): string {
-  const p = payload as { text?: unknown; altText?: unknown } | null;
+  // B4: an inbound row stores the whole LINE event (text at `message.text`); outbound rows are messages.
+  const p = payload as { text?: unknown; altText?: unknown; message?: { text?: unknown } } | null;
+  if (p && typeof p.message?.text === 'string') return p.message.text;
   if (p && typeof p.text === 'string') return p.text;
   if (p && typeof p.altText === 'string') return p.altText;
   return `[${kind}]`;

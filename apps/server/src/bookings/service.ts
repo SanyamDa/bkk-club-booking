@@ -13,6 +13,7 @@ import {
   tables,
   zones,
   type Booking,
+  type BookingSource,
   type BookingStatus,
   type Club,
   type Deposit,
@@ -315,6 +316,8 @@ interface StatusChange {
   arrivedPax?: number | null;
   /** `table.held`. */
   holdMinutes?: number;
+  /** B4: `events.source` (the attempt's entry tag) on this change's events. */
+  eventSource?: string;
   /** `booking.abandoned`: the last step reached (default: the status the booking left). */
   lastStep?: string;
 }
@@ -393,7 +396,7 @@ async function changeStatus(
     after: { status: to },
     at: now,
   });
-  const base = bookingEventBase(after, actor, now);
+  const base = { ...bookingEventBase(after, actor, now), ...(extra.eventSource ? { source: extra.eventSource } : {}) };
   const text = reasonText(reason);
   await emit(tx, {
     ...base,
@@ -485,7 +488,18 @@ export async function releaseTable(tx: Db, booking: Booking, actor: Actor, now: 
 export async function holdTable(
   db: Db,
   club: Club,
-  input: { guestId: string; tableId: string; nightDate: string; pax: number },
+  input: {
+    guestId: string;
+    tableId: string;
+    nightDate: string;
+    pax: number;
+    /** B4: the bot's booking attempt, kept in `bookings.attempt_id` and on every event of the booking. */
+    attemptId?: string;
+    /** B4: the attempt's entry tag, written to `events.source` of the hold's events. */
+    entry?: string;
+    /** B4: `promoter` when the guest came through a promoter link (default `line`). */
+    source?: BookingSource;
+  },
   now: Date,
 ): Promise<Booking> {
   if (!(await isNightOpen(db, club, input.nightDate, now))) throw new BookingError('night_not_bookable');
@@ -520,14 +534,19 @@ export async function holdTable(
             nightDate: input.nightDate,
             pax: input.pax,
             status: 'held',
-            source: 'line',
+            source: input.source ?? 'line',
             holdExpiresAt: new Date(now.getTime() + club.settings.holdMinutes * 60_000),
             minSpendSatang: option.minSpendSatang,
             depositSatang: option.depositSatang,
+            attemptId: input.attemptId ?? null,
             isTest,
           })
           .returning();
-        return changeStatus(tx, row!, 'held', GUEST, undefined, now, { created: true, holdMinutes: club.settings.holdMinutes });
+        return changeStatus(tx, row!, 'held', GUEST, undefined, now, {
+          created: true,
+          holdMinutes: club.settings.holdMinutes,
+          eventSource: input.entry,
+        });
       });
     } catch (err) {
       if (isUniqueViolation(err)) {

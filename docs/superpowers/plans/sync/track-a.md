@@ -1000,3 +1000,32 @@ export function fakePaymentGateway(secret?: string): PaymentGateway & { sign(bod
 - **Assumptions in place of a human decision:** provider is Opn Payments (Omise), the plan's stated option; the PromptPay slip flow stays the default and the gateway runs only with `OPN_*` keys set and the club's `payment_gateway` switch on; the return URL is `https://line.me/R/`.
 - **Unverified against a real service:** Opn charge creation, webhook signature header and event shape are from its public docs; tests use `fakePaymentGateway` and a stubbed `fetch` only. No real Opn account or charge was used.
 - **Web:** the Controls panel gains the `payment_gateway` label. The browser walk (switch on, guest pays by link, booking confirms) is still to be done by a human.
+
+## 2026-11-27 · A14: LINE ↔ Chatwoot bridge, built by Session A on track-a
+
+Published in `apps/server/src/integrations/chatwoot/`:
+
+```ts
+// client.ts
+export function chatwootAccount(cw: ChatwootClient, accountId: number, token: string) // createContact, searchContact, createContactInbox, createConversation, createMessage, toggleStatus, setInboxWebhook
+// bridge.ts
+export const bridgeFlagKey = (clubId: string) => `chatwoot:${clubId}:bridge`;
+export async function bridgeState(db: Db, clubId: string): Promise<BridgeState | null>
+export function verifyBridgeToken(state: BridgeState | null, token: string | undefined | null): boolean
+export async function ensureBridgeWebhook(db: Db, cw: ChatwootClient, key: Buffer, clubId: string, publicUrl: string, now: Date): Promise<BridgeState>
+export function mirrorContent(kind: string, payload: unknown): string
+export async function mirrorClub(db: Db, cw: ChatwootClient, key: Buffer, club: Club, opts: { now: Date; publicUrl: string; batch?: number; settleMs?: number; log? }): Promise<{ mirrored: number; pending: boolean; error?: string }>
+export async function mirrorAll(ctx: AppContext, now: Date): Promise<void>
+// callback.ts
+export async function checkCallback(db: Db, club: Club, token: string | undefined, body: unknown): Promise<CallbackCheck>
+export async function applyCallback(db: Db, checked, send: StaffReplySend, now: Date): Promise<'recorded' | 'resolved' | 'echo' | 'ignored'>
+```
+
+- Routes: `POST /integrations/chatwoot/:clubId/callback?token=` (API inbox webhook; 401 bad token, 403 account mismatch, 404 conversation not this club's, nothing written on a reject; accepted deliveries go to `raw_webhooks` channel `chatwoot:callback`), `POST /integrations/chatwoot/:clubId/bot` (no-op 200).
+- Job `chatwoot-mirror` every 5 s in `jobs/index.ts` (one line). Reads `messages` of LINE guests (`guests.line_user_id` set) after a `(created_at, id)` cursor, rows older than 2 s by DB clock; stops at the first Chatwoot failure (rows wait). First run mirrors the whole history (assumption).
+- Writes `conversations.external_ref = cw:<accountId>:<conversationId>`; inserts a default `conversations` row for a guest that has messages but none (conflict ignored).
+- Staff reply from Chatwoot → `recordStaffReply` with `channel: 'chatwoot'`, `externalId: 'cw:<accountId>:<messageId>'`, `userId` from the A13 mapping or `chatwoot:<chatwootUserId>`. Support-grant Chatwoot users are ignored. Chatwoot `resolved` → `endOpenEpisode` with `resolverUserId: 'chatwoot'`.
+- Status: human mode → Chatwoot `open`, bot mode → `pending`.
+- **For B:** every guest, bot and staff message must stay a `messages` row (mirroring contract). A staff row whose `external_id` starts `cw:` is treated as already in Chatwoot and is not posted back.
+- Chatwoot API shapes (contact create response, `toggle_status`, inbox PATCH `channel.webhook_url`, webhook payload `conversation.display_id`, `sender.type`) are not checked against a live install.
+- **Assumptions in place of a human decision:** first run mirrors the whole message history; mirror polls every 5 s; Chatwoot account and token come from A13's stored credentials. Tests use a fake Chatwoot client; no real Chatwoot call. No web page in this task.

@@ -90,7 +90,8 @@ async function tapConfirm(club: Club, lineUserId: string, bookingId: string) {
   const before = new Set((await db.select({ id: messages.id }).from(messages)).map((m) => m.id));
   await handleEvent(app.ctx.deps, club, new DevLineGateway(), event);
   const out = await db.select().from(messages).where(and(eq(messages.clubId, club.id), eq(messages.direction, 'out')));
-  const sent = out.filter((m) => !before.has(m.id));
+  // B4's one-time data notice line (chat-capture.test.ts) rides on the guest's first reply; left out here.
+  const sent = out.filter((m) => !before.has(m.id) && !String((m.payload as { text?: string }).text ?? '').startsWith('Chats and bookings with'));
   expect(sent).toHaveLength(1);
   return sent[0]!.payload as any;
 }

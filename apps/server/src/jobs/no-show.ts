@@ -1,5 +1,6 @@
 import { and, eq, gte, lte } from 'drizzle-orm';
-import { BookingError, releaseNoShow, type Actor } from '../bookings/service.js';
+import { BookingError, getBookingView, releaseNoShow, type Actor } from '../bookings/service.js';
+import { alertNoArrival } from '../bot/alerts.js';
 import { bookings, clubs, type Booking, type Club } from '../db/schema.js';
 import type { AppContext } from '../http/context.js';
 import { addDays, bangkokParts, toDateString } from '../lib/time.js';
@@ -40,7 +41,7 @@ function bangkokDate(at: Date): string {
 /**
  * The `no-show` job (B10): every confirmed booking past its release time, in a club with
  * `autoNoShow` (default on), becomes `no_show` and its table is released (`releaseNoShow`, one
- * transaction), then the staff group is told. With `only`, that one booking is released now
+ * transaction), then an urgent `no_arrival` alert is raised. With `only`, that one booking is released now
  * whatever its time (demo fast-forward). Returns the number released.
  */
 export async function releaseNoShows(ctx: AppContext, now: Date, only?: { clubId: string; bookingId: string }): Promise<number> {
@@ -61,7 +62,9 @@ export async function releaseNoShows(ctx: AppContext, now: Date, only?: { clubId
       throw err;
     }
     released++;
-    await ctx.notifier.noShowReleased(after);
+    // B19b: urgent `no_arrival` through raiseAlert (inbox feed and staff group, §6.4).
+    const view = await getBookingView(db, { clubId: club.id, id: after.id });
+    if (view) await alertNoArrival(db, view, now);
   }
   return released;
 }

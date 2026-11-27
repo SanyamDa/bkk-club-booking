@@ -163,6 +163,20 @@ describe('greeting and rich menu migration (A10)', () => {
     expect(line.menus).toHaveLength(1);
   });
 
-  // B4 adds &s=rm_book, &s=rm_my and &s=rm_host to menuCells; the migrated menu carries them once B4 merges.
-  it.todo('the replaced rich menu carries B4 s=rm_* tags');
+  it('the replaced rich menu carries B4 s=rm_* tags', async () => {
+    const s = await setup();
+    const line = fakeLineState();
+    const clients = fakeSetupClients('fake-token', null, line);
+    const created: string[][] = [];
+    const create = clients.api.createRichMenu.bind(clients.api);
+    clients.api.createRichMenu = async (req) => {
+      created.push((req.areas ?? []).filter((a) => a.action?.type === 'postback').map((a) => (a.action as { data: string }).data));
+      return create(req);
+    };
+    const base = { club: s.clubA, clients, publicUrl: 'https://club.test', sampleMessages: [], webhookRetries: 1, retryDelayMs: 0 };
+    await runLineSetup({ ...base, refreshRichMenu: true });
+    await runLineSetup({ ...base, refreshRichMenu: true, keepOldRichMenu: true });
+    expect(created).toHaveLength(2);
+    expect(created.at(-1)).toEqual(['a=book&s=rm_book', 'a=my&s=rm_my', 'a=host&s=rm_host']);
+  });
 });

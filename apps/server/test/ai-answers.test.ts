@@ -125,6 +125,9 @@ describe('B16 AI answers', () => {
     expect((await staffTexts()).join('\n')).toContain('AI cost cap reached');
     const capAlerts = await ctx.db.select().from(alerts).where(eq(alerts.kind, 'ai_cost_cap'));
     expect(capAlerts).toHaveLength(1);
+    // B19b: the cap alert is urgent and names the cap.
+    expect(capAlerts[0]).toMatchObject({ level: 'urgent' });
+    expect(capAlerts[0]!.textEn).toContain('reached the US$0.00 monthly cap');
   });
 
   it('warning raised before cost cap reached', async () => {
@@ -133,10 +136,14 @@ describe('B16 AI answers', () => {
     respond = () => ({ ...reply({ answer: 'Smart casual.', topic: 'dress_code' }), usage: { inputTokens: 1_000, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 } });
     await say('g1', 'what should i wear');
     expect((await lastOut('g1')).text).toBe('Smart casual.');
-    expect(await ctx.db.select().from(alerts).where(eq(alerts.kind, 'ai_cost_warning'))).toHaveLength(1);
-    expect(await ctx.db.select().from(alerts).where(eq(alerts.kind, 'ai_cost_cap'))).toHaveLength(0);
+    // B19b: the warning is an urgent `ai_cost_cap` alert (spend shown against the cap), not the cap itself.
+    const warnings = await ctx.db.select().from(alerts).where(eq(alerts.kind, 'ai_cost_cap'));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ level: 'urgent' });
+    expect(warnings[0]!.textEn).toContain('have used US$0.01 of the US$0.01 monthly cap');
+    expect(warnings[0]!.textEn).not.toContain('reached');
     await say('g1', 'and shoes?');
-    expect(await ctx.db.select().from(alerts).where(eq(alerts.kind, 'ai_cost_warning'))).toHaveLength(1); // once a month
+    expect(await ctx.db.select().from(alerts).where(eq(alerts.kind, 'ai_cost_cap'))).toHaveLength(1); // once a month
   });
 
   it('Anthropic API down -> hand to host', async () => {
@@ -166,7 +173,7 @@ describe('B16 AI answers', () => {
   it("'โต๊ะ 6 คน เสาร์นี้' pre-fills date and pax", async () => {
     await say('g1', 'โต๊ะ 6 คน เสาร์นี้');
     expect(model.calls).toHaveLength(0); // deterministic pass, no tokens spent
-    expect((await convOf('g1')).state).toEqual({ nightDate: SATURDAY, paxRange: '5-8' });
+    expect((await convOf('g1')).state).toEqual({ nightDate: SATURDAY, paxRange: '5-8', entry: 'text_intent', attemptId: expect.any(String) }); // B4: a typed request is an attempt
     expect((await lastOut('g1')).type).toBe('flex'); // straight to the table carousel
     expect(extractBookingDetails('โต๊ะ 6 คน เสาร์นี้ ใกล้ดีเจ', { today: '2026-11-27', tableCodes: [], zones: [] })).toEqual({ date: SATURDAY, pax: 6 });
   });
@@ -196,7 +203,7 @@ describe('B16 AI answers', () => {
     await say('g1', 'got space for my crew this weekend?');
     const conv = await convOf('g1');
     expect(conv.clubId).toBe(ctx.club.id);
-    expect(conv.state).toEqual({ nightDate: SATURDAY, paxRange: '5-8' });
+    expect(conv.state).toEqual({ nightDate: SATURDAY, paxRange: '5-8', entry: 'text_intent', attemptId: expect.any(String) }); // B4: a typed request is an attempt
     const carousel = JSON.stringify(await lastOut('g1'));
     expect(carousel).toContain('table_demo_B1'); // the session club's tables
   });

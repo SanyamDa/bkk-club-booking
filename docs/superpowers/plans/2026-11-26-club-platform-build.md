@@ -609,7 +609,7 @@ Gate (spec §10, §17.1): a second club is created from the console and takes a 
 | `booking.completed`, `pos.bill_opened`, `pos.bill_updated`, `pos.bill_closed`, `pos.bill_matched` | `integrations/pos/**` | A11, A19 |
 | `ai.answered`, `ai.call`, `faq.missed` | `brain/answer.ts` | B16 |
 | `brain.note_drafted`, `brain.note_approved`, `brain.note_rejected` | `brain/learn.ts`, `http/brain.ts` | B18, B19 |
-| `waitlist.joined` | expand at phase start | B22 |
+| `waitlist.joined`, `waitlist.offered`, `preorder.placed` | `bookings/waitlist.ts`, `bookings/preorders.ts` | B22 |
 
 **Interfaces:** Consumes `emit` (B1), the `changeStatus` events (B2), entry tags and `attempt_id` (B4). Produces no new function. B14's funnel board and A16 read these events.
 
@@ -837,7 +837,7 @@ Expand with superpowers:writing-plans at the start of the phase.
 
 **Spec:** §14.5, §14.6, §14.8, §14.10 funnel.
 
-**Files:** Create `apps/server/drizzle/0006_analytics_views.sql` (custom, `--name analytics_views`), `apps/server/src/data/analytics.ts`, `infra/metabase/{README.md,init-role.sh,provision.mjs}`, `infra/metabase/dashboards/*.json` (six boards). Modify `docker-compose.yml` (append the `metabase-init` and `metabase` services, profile `metabase`). Test: `apps/server/test/analytics.test.ts`; `instagram.test.ts` (A18's Metabase todo turned real).
+**Files:** Create `apps/server/drizzle/0008_analytics_views.sql` (renumbered from 0006 at the wave-4 merge; custom, `--name analytics_views`), `apps/server/src/data/analytics.ts`, `infra/metabase/{README.md,init-role.sh,provision.mjs}`, `infra/metabase/dashboards/*.json` (six boards). Modify `docker-compose.yml` (append the `metabase-init` and `metabase` services, profile `metabase`). Test: `apps/server/test/analytics.test.ts`; `instagram.test.ts` (A18's Metabase todo turned real).
 
 **Decisions:**
 - Three schemas. `analytics_src` (never granted) holds base views with a `demo` column (club `status = 'demo'`); it drops real clubs' test rows (`events.is_test`, `bookings.is_test`, the booking's `guests.is_test`), keeps only events with `data_origin` in (`first_party`, `pos`) and `channel` not `instagram`, and drops bookings with `source = 'instagram'` (§14.8, no Meta data). `analytics` = the same views `WHERE NOT demo` (real clubs); `analytics_demo` = `WHERE demo` (Velora). No view has `raw`, `is_test`, names, phones or free text.
@@ -929,6 +929,36 @@ Expand with superpowers:writing-plans at the start of the phase.
 
 **Migration:** no (`door_counts` comes from W0).
 
+#### Task B12: Occupancy snapshots and crowd rating (expanded)
+
+**Spec:** §14.3 "The booking curve", "People actually inside", "Every night, open or closed"; §17.1 Data.
+
+**Files:** Create `apps/server/src/jobs/snapshots.ts`, `apps/server/src/http/door.ts` (the crowd-rating route only; B11 adds the door-screen routes to the same file). Modify `jobs/index.ts` (register `snapshots` and `crowd-prompt`), `bot/notify.ts` (`crowdPrompt`), `app.ts` (one mount line), `test/helpers/track-b.ts` (comment only: the rating route has no param beyond `:slug`). Test: `apps/server/test/snapshots.test.ts`.
+
+**Decisions:**
+- Lead buckets per night date `D` (Bangkok): `d14`, `d7`, `d3`, `d1` at 12:00 on `D-14`, `D-7`, `D-3`, `D-1`; `d0_1200` and `d0_1800` at 12:00 and 18:00 on `D`; then `live_HHMM` every 30 minutes from doors (`settings.nightStartHour` on `D`) to close (`settings.nightEndHour` on `D+1`, inclusive). A live slot at the same instant as an earlier bucket is dropped (18:00 doors = `d0_1800`). Assumption: doors and close are the night's start and end hours; no separate doors setting exists yet.
+- A bucket is due from its time until the next bucket's time, capped at 2 hours. A missed window is not caught up later (a late reading would misstate the curve). `taken_at` is the capture time; one row per `(club, night, lead_bucket)`, checked before insert.
+- The `snapshots` job runs every 5 minutes over every club and every `nights` row from the current night to `D+14` whose `status` is not `closed`. A closed night gets no snapshot, so its missing rows are explained by its `nights` row.
+- Counts: tables active = `tables.active` and the night inside `valid_from`/`valid_to`; held = distinct tables with a `held`/`awaiting_payment` booking whose hold has not run out, or `payment_review`; confirmed = `confirmed`; arrived = `arrived` or `completed`; pax, minimum spend and verified deposits summed over those bookings. A real club counts only `is_test = false` bookings; a demo club (all rows test) counts its own.
+- Crowd rating: `recordCrowdRating` takes an integer 1–5 (else `CrowdRatingError('bad_level')`), writes a `crowd_ratings` row for the current night with the user id and emits `crowd.rated { rating }` in one transaction (actor staff, or platform under a support grant).
+- Route `POST /api/staff/clubs/:slug/door/crowd-rating` `{ level }`, roles `owner|manager|host|door`, answers 201 `{ rating: { id, nightDate, level, at } }`; 400 on a bad level.
+- "How full now?" prompt: the `crowd-prompt` job (every 5 minutes) pushes one bilingual staff-group message (`Notifier.crowdPrompt`) in the first 15 minutes of each prompt hour, on a night that is not closed. Prompt hours default to 22, 23, 0 and 1 (`settings.crowdPromptHours` overrides per club; optional key read with a default, no schema change). Sent once per club and hour through a `platform_flags` row `crowd_prompt:<clubId>` holding the last slot.
+
+**Interfaces (Produces):** `leadBuckets(club: Club, nightDate: string): { bucket: string; at: Date }[]`, `dueBucket(club, nightDate, now): string | null`, `takeSnapshot(db, club, nightDate, bucket, now): Promise<boolean>` (false when the bucket exists), `runSnapshots(db, now): Promise<number>`, `recordCrowdRating(db, club, input: { level: number; userId: string; actorType?: 'staff' | 'platform' }, now): Promise<CrowdRating>`, `crowdPromptHours(club): number[]`, `runCrowdPrompts(db, now, send: (club: Club, nightDate: string) => Promise<void>): Promise<number>` in `jobs/snapshots.ts`; `Notifier.crowdPrompt(club: Club, nightDate: string)` in `bot/notify.ts`; `crowdRatingRoutes(ctx)` in `http/door.ts`.
+
+**Tests (`snapshots.test.ts`):**
+- `lead buckets are 14, 7, 3, 1 days before, 12:00 and 18:00 on the day, then every 30 minutes from doors to close`.
+- `a snapshot exists for every club-night not closed at every scheduled lead bucket, and none for a closed night` (runs the job at every bucket time across two weeks).
+- `snapshot counts held, confirmed and arrived tables, pax, min spend and verified deposits; test bookings do not count at a real club`.
+- `a repeat run in the same bucket writes nothing; a missed window is not caught up`.
+- `crowd rating 1-5 is stored with the user and emits crowd.rated; 0 and 6 are refused`.
+- `door role can rate through the route; another club's slug is 403`.
+- `how full now is pushed once per prompt hour to the staff group, not on a closed night`.
+- `snapshots and crowd-prompt jobs are registered on the scheduler`.
+- `isolation.test.ts` passes with the rating route (no new fixture: no param beyond `:slug`).
+
+**Migration:** no.
+
 ---
 
 ## Phase 2: Brain and inbox
@@ -980,6 +1010,27 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 **Tests (`club-stats.test.ts`):** `figures match a hand-counted seeded Velora week`; `test rows excluded for real clubs`; `club B data never appears in club A stats`; `stats and weekly report agree on the same week`; `GET /stats answers owner and manager with their own club only`; `it.todo` for the B7 Velora history seed.
 
 **Migration (Track A, Phase 2):** A14 no (`conversations.external_ref` and `messages.external_id` come from W0). A15: decide where alerts are stored in the phase-start writing-plans pass; a new table means yes. Others no.
+
+#### Task A14 expanded (LINE ↔ Chatwoot bridge)
+
+**Files:** `integrations/chatwoot/client.ts`, `integrations/chatwoot/bridge.ts`, `integrations/chatwoot/callback.ts`, `http/integrations.ts` (callback and bot routes), `jobs/index.ts` (one `register` line), `test/chatwoot-bridge.test.ts`. `http/staff.ts` resolve and reply already call `endOpenEpisode` and `recordStaffReply` (B14b moved them). Migration: no.
+
+**Decisions:**
+- Mirroring is a job, never on the LINE path: `chatwoot-mirror` (every 5 s) reads each provisioned club's guest `messages` rows (LINE guests only: `guest.line_user_id` set; Instagram is native in Chatwoot) in `(created_at, id)` order after the club's cursor, and posts each into the club's API inbox. The cursor advances after each posted row, so a Chatwoot outage stops the run at the first failure and the rows wait (the bot never waits on Chatwoot). Rows newer than 2 s (database clock) are left for the next run, so a transaction that commits late is not skipped. The first run starts from the club's first message (whole history; assumption). State: `platform_flags['chatwoot:<clubId>:bridge']` `{ cursorAt, cursorId, episodesAt, tokenHash, webhookSet }`.
+- Chatwoot conversation per guest: contact `identifier = guest.id`, conversation `source_id = guest.id`, `conversations.external_ref = chatwootConversationRef(accountId, conversationId)`. A guest with messages but no `conversations` row gets one (insert, conflict ignored, default mode). Duplicate identifier (422): search the contact and add its contact inbox.
+- Who posts: guest rows as `incoming` with the club's admin token; bot and system rows as `outgoing` with the Agent Bot token (shown as the bot); dashboard staff replies as `outgoing` with the admin token; staff rows whose `external_id` starts `cw:` came from Chatwoot and are not posted back. Content: text, else the flex/template `altText`, else `[<kind>]`; a postback shows as `[tap] <data>`.
+- Status: human mode sets the Chatwoot conversation `open`, bot mode `pending`. Set at creation and after every episode start or end since the last run (`handoff_episodes` `started_at`/`ended_at` after `episodesAt`).
+- Callback auth: the bridge sets the API inbox `webhook_url` once to `chatwootCallbackUrl(...)?token=<32 random bytes>`; only the SHA-256 is stored. A missing or wrong token is 401 (rate limited like A18). The payload `account.id` must be the club's account (else 403) and the conversation must be this club's by `external_ref` (else 404); a rejected delivery writes nothing, not even `raw_webhooks`. An accepted delivery is written to `raw_webhooks` (channel `chatwoot:callback`) before it is applied.
+- `message_created`, `outgoing`, not private, with text, from a Chatwoot user other than our platform admin user → `recordStaffReply(..., channel 'chatwoot', externalId 'cw:<accountId>:<messageId>')`, so a redelivery sends once. Agent Bot messages and our own posts are echoes and ignored. The sender maps to our user through the A13 mapping (`chatwoot:<clubId>:user:<userId>`); an unmapped Chatwoot user is recorded as `chatwoot:<chatwootUserId>`; a support-grant login is ignored (support never messages guests, A5). Attachments-only replies are ignored (assumption: text only until media relay is built).
+- `conversation_status_changed` to `resolved` → `endOpenEpisode` (resolver = `chatwoot`), so Chatwoot's resolve button also hands the chat back to the bot.
+- `/integrations/chatwoot/<clubId>/bot` (Agent Bot outgoing URL) answers 200 and does nothing: the bot runs from the LINE webhook.
+
+**Interfaces:**
+- `client.ts`: `chatwootAccount(cw, accountId, token)` → `{ createContact, searchContact, createContactInbox, createConversation, createMessage, toggleStatus, setInboxWebhook }`.
+- `bridge.ts`: `bridgeState(db, clubId)`, `ensureBridgeWebhook(db, cw, key, clubId, publicUrl, now)`, `mirrorClub(db, cw, key, club, { now, publicUrl, batch?, settleMs?, log? }): Promise<{ mirrored: number; pending: boolean; error?: string }>`, `mirrorAll(ctx, now)`, `verifyBridgeToken(state, token)`.
+- `callback.ts`: `checkCallback(db, club, token, body)` → `{ ok: false, status, error } | { ok: true, ... }`, `applyCallback(db, checked, send, now)`.
+
+**Tests (`test/chatwoot-bridge.test.ts`):** `guest message appears in Chatwoot`; `bot messages shown as bot`; `staff reply reaches the guest once (callback redelivery deduped)`; `inbox down: bot still answers and messages queue for mirroring`; `dashboard resolve closes the open episode`; `Chatwoot resolve closes the open episode`; `a message_created callback carrying club A's Chatwoot account token and a club B conversation id is rejected and writes nothing`; `echoes of our own posts are ignored`.
 
 ### Track B, Phase 2
 
@@ -1044,7 +1095,7 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 - Tools are terminal (no second model turn): `reply` (the §8.5 fixed result: answer, lang, notes_used, topic, needs_handoff, unclear, summary), `check_availability` and `start_booking` (jump into the button flow with the validated details), `get_booking` (My booking), `request_handoff` (topic + 2-line summary). Only declared fields are read; a `club_id` or `guest_id` in model output is never read; club and guest come from the session.
 - Extraction: a deterministic Thai/English pass (`extractBookingDetails`) runs first and costs no tokens. With the `book` intent, a date or table code pre-fills; on other free text, only a table code or a night plus a party size does ("I lost my phone on Saturday" goes to the AI). Model details pass `normalizeDetails` (unknown table codes and past dates dropped). `prefillBooking` jumps to the first unanswered step; a named table that fits the party is held at once with the guest's pax.
 - Guard: B15's `lintNote` price and availability detector plus the club's table codes; any amount, table code or availability claim not produced by the booking system in the same turn fails (the live path has no booking result in the turn, so all fail). A failing answer on a price/booking topic goes to the button flow; otherwise to a host with `faq.missed`.
-- Cost: `cost_usd_micros` from list prices (haiku 0.10/0.50, sonnet 2/10 $/MTok; cache read 0.1x, write 1.25x). Month spend = sum of the club's `ai.call` events this Bangkok calendar month (test rows included). Cap `platform_flags['ai-cost-cap:<clubId>'].value.usdMicros`, default US$100 when unset. At 80 % a `needs_input` alert `ai_cost_warning`, at the cap an `urgent` alert `ai_cost_cap` (each once per club per month, claimed in `platform_flags` `ai-cost-alert:<clubId>:<YYYY-MM>:<warn|cap>`), through A15's `raiseAlert`. At or over the cap no model call is made and the chat goes to a host.
+- Cost: `cost_usd_micros` from list prices (haiku 0.10/0.50, sonnet 2/10 $/MTok; cache read 0.1x, write 1.25x). Month spend = sum of the club's `ai.call` events this Bangkok calendar month (test rows included). Cap `platform_flags['ai-cost-cap:<clubId>'].value.usdMicros`, default US$100 when unset. At 80 % and at the cap an `urgent` alert `ai_cost_cap` (B19b `alertCostCap`; before the wave-4 merge the 80 % one was `needs_input` `ai_cost_warning`) (each once per club per month, claimed in `platform_flags` `ai-cost-alert:<clubId>:<YYYY-MM>:<warn|cap>`), through A15's `raiseAlert`. At or over the cap no model call is made and the chat goes to a host.
 - Events: `ai.call` (props model, input_tokens incl. cache, output_tokens, latency_ms, cost_usd_micros), `ai.answered` (props notes_used = count, topic; raw `{ noteIds, snapshotVersion, question, answer }`), `faq.missed` (props topic; raw `{ text }`, read by B19 gaps), `bot.fallback_menu` when the model cannot tell what the guest wants.
 - Handoff: `chat/episodes.ts` (B14b) is not on this branch, so `requestHandoff` (today's path) is used; the reason text carries the 2-line summary and `opts.topic` is passed for B14b's `startEpisode({ topic })`.
 
@@ -1102,6 +1153,23 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 - Weekly lint `brain-lint` (every 15 min, acts Monday from 10:00 Bangkok, once per club per week, `platform_flags['brain-lint:<clubId>:<monday>']`): B15 price/availability lint, personal data, duplicate bodies, and the model's contradiction/duplicate/price/personal-data list (unknown slugs dropped). Notes with issues get `frontmatter.lintIssues` and `reviewBy` = today; one `info` alert `brain_lint`.
 **Interfaces:** `brain/learn.ts`: `LEARN_MODEL`, `interface LearnClient { draft(reqs: DraftRequest[]): Promise<LearnResult[]>; check(req: CheckRequest): Promise<LearnResult> }`, `anthropicLearnClient(apiKey)`, `runLearning({ db, client, log }, now): Promise<LearnRunResult>`, `episodeTranscript(db, episode)`, `redactText(text, names)`, `containsPersonalData(text)`, `flagNotesBeforeTakeover(db, club, episode, now)`, `expireUnreviewedDrafts(db, now)`. `jobs/brain-draft.ts`: `runBrainDraft(deps, now)`. `jobs/brain-lint.ts`: `lintClubBrain(deps, club, now)`, `runBrainLint(deps, now)`. `bot/deps.ts`: `fakeLearnClient(draft, check?)`.
 **Tests (`learning-loop.test.ts`):** `approved note answers the same question next time`; `draft with a phone number is discarded`; `price, one-off and personal-data flags discard the draft`; `the transcript is redacted before the model sees it`; `a timed-out takeover, or one without a host reply, drafts nothing`; `a failed model call is retried on the next run`; `a takeover within 10 minutes of a bot answer flags the notes that answer used, and one after 11 minutes does not`; `an approved note adds its question to the club test set`; `a draft unreviewed for 4 weeks expires`; `drafting cost is an ai.call event at the claude-opus-5-5 price`; `a draft on an open gap topic closes the gap once approved`; `weekly lint flags a leaked phone number and a contradiction the model finds`. `brain-ui.test.ts › approve in one tap` and `› queue ranks drafts by takeovers` use real B18 drafts.
+**Migration:** no.
+
+
+#### Task B19b expanded (Alert call sites)
+
+**Files:** `bot/alerts.ts` (new: alert texts, word list, the B-side `raiseAlert` helpers), `bot/flow.ts`, `bot/notify.ts`, `http/webhook.ts` (bot error), `db/schema/core.ts` (`ClubSettings.urgentWords?`, JSON field, no migration), `http/staff-settings.ts` (`urgentWords` in `PATCH /settings`), `test/alert-calls.test.ts`, `test/webhook-durability.test.ts` (pause test reads the alert).
+
+**Decisions:**
+- Levels follow §6.4. Urgent (`raiseAlert` sends to the group): `guest_wants_human` (handoff triggers `guest_request`, `large_group`), `bot_unanswered` (any other handoff trigger, e.g. B16's), `complaint`, `payment_review` (slip waiting for review; trigger `paid_after_expiry` too, one alert, not two), `no_arrival`, `bot_error`, `bot_paused`. Needs input: `brain_draft_waiting`, `gap_waiting`. Info (feed; group only when the club switched info to LINE): `booking_confirmed` (flow and `Notifier.confirmed`; §6.4 classes it as information, so its direct `toStaff` goes), `running_late`, `cancellation`. B16's cost-cap warning: `ai_cost_cap`, urgent.
+- Every alert carries `conversationId` and/or `bookingId` when there is one. The booking text keeps the §6.1 fields (table, night, pax, name, nationality, phone, min spend, deposit, ref, request).
+- Pause: one `bot_paused` alert per conversation per pause (B3's `pauseAlertedFor` key unchanged).
+- Bot error: `processDelivery`'s catch raises `bot_error`, at most one open per club (an open one is not repeated until resolved); the `ops_events` row stays.
+- Complaint or safety word: matched (case-insensitive substring; Thai has no word breaks) before intent detection, against `club.settings.urgentWords` when set, else `DEFAULT_URGENT_WORDS` (Thai and English, in `bot/alerts.ts`). A hit starts a handoff with trigger `complaint` (the conversation goes to a host) and raises `complaint`. Not checked while the conversation is already with a host. Editable per club through `PATCH /settings` `urgentWords` (field code `words`).
+- Not built here (their tasks are on `track-c`): the B10 no-show job, running late and cancellation, B16 cost cap and B18 brain drafts. They call `alertNoArrival`, `alertRunningLate`, `alertCancellation`, `alertCostCap` and `alertBrainWaiting` from `bot/alerts.ts`; `alertBrainWaiting` keeps one open alert per kind per club. Wired at the wave-4 merge into `track-c` (see `sync/track-b.md`); gap waiting is not raised yet.
+
+**Tests (`test/alert-calls.test.ts`):** `urgent alert reaches inbox and staff group within 5 s`; `a paused club raises one alert per conversation per pause through raiseAlert`; `a complaint word raises urgent`; `a club's own word list replaces the default`; `a slip waiting for review raises urgent payment_review`; `a confirmed booking raises info and sends no LINE push by default`; `a bot error raises one urgent alert while it stays open`; `a release time passed with no arrival raises urgent`; `a waiting draft raises needs-input`.
+
 **Migration:** no.
 
 ---
@@ -1162,7 +1230,56 @@ export function fakePaymentGateway(secret?: string): PaymentGateway & { sign(bod
 |---|---|---|---|
 | B20 Cross-club identity map | §14.4: `person_id` across clubs, built on the `identity_map` pairs stored since Phase 1b (the shared LIFF is A4b, the first-use `sub` pair is B5, and the `liff.sendMessages()` device check is in the Phase 1b gate). Adds the phone-hash link and fills `events.person_id` | `data/identity.ts` | same LINE person at two clubs gets one `person_id`; the same phone hash at two clubs links to one `person_id`; removal (B10b) deletes the links |
 | B21 Busyness feed v1 | §14.7: `GET /data/v1/busyness`, 5-step level per club per 30-min bucket relative to capacity, "no data" when inputs are thin, staged model (booking heat → weekday baseline × pace) | `data/busyness.ts`, `http/data.ts` (API key auth for the separate app) | level for every live club on a night whose `nights.status` is not `closed`; demo club never appears; no guest-level field; reads only `first_party` and `pos` origins |
-| B22 Waitlist, bottle pre-orders | §10 Phase 3 | expand at phase start | expand at phase start |
+| B22 Waitlist, bottle pre-orders | §10 Phase 3, §5.2 steps 1 and 3 | `bookings/{waitlist,preorders}.ts`, `http/staff-extras.ts` (expanded below) | `test/waitlist.test.ts`, `test/preorders.test.ts` (expanded below) |
+
+#### Task B20: Cross-club identity map (expanded)
+
+**Spec:** §14.4, §11.1.1, §9 (`identity_map`), §14.8 (Instagram stays per club), §14.9 (removal deletes links).
+
+**Files:** Modify `data/identity.ts`, `data/events.ts` (`emit` fills `person_id`), `http/liff.ts` (calls `linkPhone` after a form submit). Test: `apps/server/test/identity.test.ts`. No migration (`identity_map.phone_hash` and `events.person_id` are W0 columns).
+
+**Decisions:**
+- Owner decision: the platform is the data controller and cross-club linking is allowed, so **both links are on**: the LIFF `sub` link (B5 already reuses `person_id` across clubs by sub) and the phone link. The two stay in separate columns, so either can later be dropped by clearing that column and re-running the merge. No runtime switch is built.
+- Phone link: only the phone the guest types in our booking form (`POST /api/liff/booking/details`), never a staff-entered phone. A test guest (`guests.is_test`) is not linked. `normalizePhone` strips spaces, dashes and brackets and returns E.164: a Thai local number `0XXXXXXXXX` (9 or 10 digits after the 0) becomes `+66XXXXXXXXX`, `66…` without a plus is read as Thai, `+…` and `00…` keep their country code; anything with fewer than 8 digits is `null` (no link). `phone_hash` is base64url HMAC-SHA256 of the normalised number with a key derived by HKDF-SHA256 from `CREDENTIALS_KEY` (info `identity_map.phone_hash`), so the hash is keyed, held outside the database, and the raw number is never stored in `identity_map`.
+- One row per (club, guest), as B5. `linkPhone` writes `phone_hash` on the guest's row (insert or overwrite; a changed phone replaces the hash, the `person_id` stays). If another row (any club, or the same club) holds the same hash under a different `person_id`, the two persons **merge**: the person with the earliest `first_linked_at` keeps its id; every `identity_map` row and every `events` row of the other person is repointed. `linkLiffSub` does the same when a phone-only row gets its sub filled and the sub already belongs to another person.
+- `events.person_id`: `emit` fills it in the same insert from the guest's `identity_map` row (sub-select on `club_id`, `guest_id`) when the event has a `guestId` and its `dataOrigin` is not `instagram`. When a link is made, the guest's earlier events in that club (again not `instagram`) are backfilled. Instagram events never get a `person_id` (§14.8).
+- Removal: B10b's `removeGuest` already deletes the guest's `identity_map` row and clears `events.person_id`; the other club's row and its `person_id` stay. B20 adds no extra delete.
+- `linkLiffSub` keeps its published signature and results. Its writes are idempotent, so the root `db` callers (the LIFF routes) need no transaction.
+
+**Interfaces (Produces, `data/identity.ts`):** `normalizePhone(phone: string): string | null`; `phoneHashKey(credentialsKey: Buffer): Buffer`; `hashPhone(key: Buffer, phone: string): string | null`; `linkPhone(tx: Db, input: { clubId: string; guestId: string; phone: string }, key: Buffer, now: Date): Promise<{ personId: string } | null>` (null when the number does not normalise); `personIdOf(db: Db, clubId: string, guestId: string): Promise<string | null>`. Unchanged: `linkLiffSub`.
+
+**Consumes:** `linkLiffSub` rows (B5), `removeGuest` (B10b), `emit` (B1).
+
+**Tests** (`test/identity.test.ts`): `same LINE person at two clubs gets one person_id`; `the same phone hash at two clubs links to one person_id`; `phone numbers are normalised before hashing and the raw number is never stored`; `a phone link and a sub link of two persons merge into the earlier person, events included`; `events of a linked guest carry person_id, past and future; Instagram events never do`; `submitting the booking form stores the phone link; a test guest is not linked`; `removal (B10b) deletes the links and leaves the other club's link`.
+
+**Migration:** no.
+
+#### Task B22: Waitlist and bottle pre-orders (expanded)
+
+**Spec:** §5.2 step 1 ("closed or fully booked nights … [Join waitlist]") and step 3 ("no suitable tables: [Join waitlist]"), §10 Phase 3 ("waitlist, bottle pre-orders"), §14.2 `waitlist.joined`, §14.3 (waitlist joins are a demand signal), §9 (`is_test` only on guests, bookings, events; every row club-scoped). EXTENSIONS "Pre-order packages and add-ons" is the fuller version; this is the basic one.
+
+**Files:** Create `bookings/waitlist.ts`, `bookings/preorders.ts`, `http/staff-extras.ts` (mounted in `http/staff.ts`), `apps/web/src/pages/staff/Extras.tsx`. Modify `db/schema/core.ts` (three tables), `jobs/index.ts` (job `waitlist`), `bot/flow.ts` (small edits: postbacks and the sold-out branch), `bot/messages.ts`, `bot/i18n.ts`, `bot/notify.ts` (`waitlistOffer`, pre-order prompt on confirmation), `data/event-types.ts` (+`waitlist.offered`, `preorder.placed`), `test/helpers/track-b.ts` (isolation fixtures). Tests: `test/waitlist.test.ts`, `test/preorders.test.ts`.
+
+**Decisions:**
+- Waitlist entry = one guest, one night, one party-size range (`2-4`, `5-8`, `9-12`; `13+` already goes to a host). One open entry (`waiting` or `offered`) per guest per night (partial unique index); joining again returns the open one and emits nothing.
+- Where the guest joins: the "no tables" reply gets **[Join waitlist]** (`a=waitlist&d=<date>&r=<range>`). A **sold-out** night picked from the list says "fully booked" and still asks the party size, so the entry has one (the next step shows no tables and the button). Closed nights get no waitlist (nothing will free up).
+- Offer, not hold: a freed table is **offered** to waiting guests in join order; the guest taps **[Book now]** (`a=waitlist_book&w=<id>`) and goes through the normal table step; first to hold wins. Assumption (no human decision given): an offer is open **15 minutes** (`WAITLIST_OFFER_MINUTES`), then the entry is `expired` and the next guest is offered. Holding the table for the guest was rejected: `holdTable` writes a `guest` actor, which would be false for a system hold, and its signature is frozen.
+- Trigger: the `waitlist` job (every minute, B2 scheduler) runs `runWaitlist(db, now)`. Free tables come from `availableTables` (the entry guest's side, B6), so every way a table frees up counts: cancel, expiry, abandon, reject, no-show and the B8b `sold_out` → `open` flip; a B2 `releaseTable` frees it once its booking leaves an active status. Per night and side, open offers never exceed free tables; an entry is offered only when a free table fits its range.
+- Entry statuses: `waiting` → `offered` → `booked` (the guest has an active booking that night; `booking_id` set; booking time is not compared, as `bookings.created_at` is the database clock) or `expired` (offer ran out, or the night passed); `cancelled` by the guest (`a=waitlist_leave&w=`) or by staff. The job also marks a `waiting` entry `booked` when the guest booked anyway.
+- Pre-orders: the club's **bottle menu** is `menu_items` (name EN/TH, `price_satang`, `active`, `sort`), managed by owner or manager. A pre-order line copies the **unit price from the menu at order time** (`unit_price_satang`), so a later price change never alters a placed order. Quantity 1–20 per line, at most 20 lines per booking. A pre-order can change while the booking is `held`, `awaiting_payment`, `payment_review` or `confirmed` and its night has not passed. It is a note for the bar: not charged, not part of the deposit, not counted toward minimum spend (the POS bill is the record of spend).
+- Guest flow: when the club has an active menu, the confirmation (bot `confirm`, auto-verified slip, staff approve through `Notifier.confirmed`) and "My booking" for a confirmed booking add a **[Pre-order bottles]** prompt (`a=bottles&b=<id>`): a carousel of up to 10 bottles with **[Add 1]** (`a=bottle_add&b&i`), then a summary with [Add more] [Clear] [Done]. [Done] (`a=bottle_done&b`) sends the staff group "Pre-order · table · night · lines · total".
+- Staff view (owner, manager, host; menu changes owner, manager): `GET/POST /clubs/:slug/menu`, `PATCH /clubs/:slug/menu/:itemId`, `GET /clubs/:slug/preorders?date=`, `GET/PUT /clubs/:slug/bookings/:id/preorder`, `GET /clubs/:slug/waitlist?date=`, `DELETE /clubs/:slug/waitlist/:entryId`. Test rows hidden for a live club (§9 rule 2). Web page `/staff/:slug/extras`: menu editor, the night's pre-orders and waitlist.
+- Events: `waitlist.joined` (props `pax_range`), `waitlist.offered` (props `pax_range`), `preorder.placed` (props `item_count`, `total_satang`), with guest, night and (pre-order) booking columns and the guest's `is_test`.
+
+**Interfaces (Produces):**
+- `bookings/waitlist.ts`: `WAITLIST_OFFER_MINUTES = 15`; `joinWaitlist(db: Db, club: Club, input: { guestId: string; nightDate: string; paxRange: PaxRangeKey }, now: Date): Promise<{ entry: WaitlistEntry; created: boolean }>`; `leaveWaitlist(db, clubId, entryId, actor: Actor, now): Promise<WaitlistEntry | undefined>`; `runWaitlist(db: Db, now: Date): Promise<WaitlistOffer[]>` (`{ entry, club, guest }` to notify); `listWaitlist(db, club, nightDate)`.
+- `bookings/preorders.ts`: `listMenu(db, clubId, opts?: { activeOnly?: boolean })`; `createMenuItem(db, clubId, input, now)`; `updateMenuItem(db, clubId, id, patch)`; `setPreorder(db, club, bookingId, lines: { menuItemId: string; qty: number }[], actor: Actor, now): Promise<PreorderSummary>`; `addPreorderItem(db, club, bookingId, menuItemId, qty, actor, now)`; `getPreorder(db, clubId, bookingId): Promise<PreorderSummary>`; `preordersForNight(db, club, nightDate)`; `PreorderError` codes `not_found | invalid_state | bad_item | too_many`.
+- `Notifier.waitlistOffer(offer)`.
+
+**Tests** (`test/waitlist.test.ts`): `joining twice keeps one open entry and one waitlist.joined event`; `no-tables reply offers Join waitlist and the tap stores the entry`; `a sold-out night says fully booked and still asks the party size`; `a cancelled booking frees a table and the first waiting guest is offered`; `open offers never exceed free tables and skip entries no free table fits`; `an offer runs out after 15 minutes and the next guest is offered`; `a guest who books after joining is marked booked`; `test guests are offered only test-side tables`; `leave and staff delete cancel the entry; another club's entry is 404`; `past nights expire`.
+**Tests** (`test/preorders.test.ts`): `pre-order prices come from the menu and do not change with it`; `items of another club or inactive items are rejected`; `quantity and line limits`; `pre-order closes when the booking is finished or the night passed`; `guest adds bottles in LINE and staff get the summary on Done`; `confirmation offers Pre-order bottles only when the club has a menu`; `staff list the night's pre-orders; host cannot edit the menu (403)`; `test rows hidden for a live club`; isolation passes (fixtures `menu/:itemId`, `waitlist/:entryId`).
+
+**Migration:** yes, `b22_waitlist_preorders` (`menu_items`, `booking_preorders`, `waitlist_entries` in `db/schema/core.ts`).
 
 **Migration (Phase 3, both tracks):** none planned (`identity_map` and `channels` come from W0). B21's route is outside `/api/staff` and `/api/admin` (API-key auth), so the isolation walk does not reach it; its own acceptance tests are the control. Confirm in the phase-start writing-plans pass.
 

@@ -65,6 +65,8 @@ export const EVENT_DECLARATIONS = {
   'availability.searched': { v: 1, area: 'Demand', description: 'Table search, including zero results.', props: { night_date: N, pax_range: N, result_count: N, tables_shown: N } },
   'night.sold_out_shown': { v: 1, area: 'Demand', description: 'Guest was shown a full night.', props: { pax_range: N } },
   'waitlist.joined': { v: 1, area: 'Demand', description: 'Guest joined the waitlist for a night.', props: { pax_range: N } },
+  'waitlist.offered': { v: 1, area: 'Demand', description: 'A freed table was offered to a waitlisted guest (B22).', props: { pax_range: N } },
+  'preorder.placed': { v: 1, area: 'Booking', description: 'Guest or staff set a bottle pre-order on a booking (B22).', props: { item_count: N, total_satang: N } },
 
   // Booking
   'table.held': { v: 1, area: 'Booking', description: 'Table held for the guest.', props: { hold_minutes: N } },

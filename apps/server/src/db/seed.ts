@@ -39,8 +39,8 @@ const demoSettings: ClubSettings = {
     ],
   },
   greeting: {
-    en: 'Welcome to Velour (Demo). Book a table in under a minute, right here in LINE.',
-    th: 'ยินดีต้อนรับสู่ Velour (Demo) จองโต๊ะได้ในไม่ถึงหนึ่งนาที ผ่าน LINE นี้เลย',
+    en: 'Welcome to Velora (Demo). Book a table in under a minute, right here in LINE.',
+    th: 'ยินดีต้อนรับสู่ Velora (Demo) จองโต๊ะได้ในไม่ถึงหนึ่งนาที ผ่าน LINE นี้เลย',
   },
   address: 'Demo address, Thonglor, Bangkok',
   mapUrl: 'https://maps.google.com/?q=Thonglor+Bangkok',
@@ -65,7 +65,7 @@ export async function seedDemoClub(db: Db, env: NodeJS.ProcessEnv = process.env)
   await db.insert(clubs).values({
     id: DEMO_CLUB_ID,
     slug: DEMO_CLUB_SLUG,
-    name: 'Velour (Demo)',
+    name: 'Velora (Demo)',
     settings: demoSettings,
     lineChannelSecretEnv: 'DEMO_LINE_CHANNEL_SECRET',
     lineAccessTokenEnv: 'DEMO_LINE_ACCESS_TOKEN',
@@ -73,7 +73,7 @@ export async function seedDemoClub(db: Db, env: NodeJS.ProcessEnv = process.env)
     lineLoginChannelSecretEnv: 'DEMO_LINE_LOGIN_CHANNEL_SECRET',
     liffId: env.DEMO_LIFF_ID || null,
     promptpayId: env.DEMO_PROMPTPAY_ID || null,
-    promptpayName: 'Velour Demo Co., Ltd.',
+    promptpayName: 'Velora Demo Co., Ltd.',
     staffLinkCode: newLinkCode(),
   });
 

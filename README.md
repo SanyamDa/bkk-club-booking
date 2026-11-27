@@ -2,7 +2,7 @@
 
 Automates table bookings inside a club's **own LINE Official Account**: night → party size → table → guest details → house rules → PromptPay deposit → confirmation with a door QR. Staff get a live dashboard and LINE group alerts. Product spec: **[clubs/SPEC.md](clubs/SPEC.md)**.
 
-**Status:** Phase 0 (demo) and Phase 1a (live on LINE) are built, running on a fictional club, *Velour (Demo)*. Phase 1a has not been run against a real LINE account yet. First pilot client: House of Savoy.
+**Status:** Phase 0 (demo) and Phase 1a (live on LINE) are built, running on a fictional club, *Velora (Demo)*. Phase 1a has not been run against a real LINE account yet. First pilot client: House of Savoy.
 
 ## Quick start (no LINE account needed)
 

@@ -39,7 +39,7 @@ function fakeClients(overrides: Partial<SetupClients['api']> = {}) {
   const calls = { webhook: '', menu: null as messagingApi.RichMenuRequest | null, image: 0, defaultMenu: '', validated: 0, liff: '' };
   const clients: SetupClients = {
     api: {
-      getBotInfo: async () => ({ userId: 'Ubot', basicId: '@velourdemo', displayName: 'Velour (Demo)', chatMode: 'chat', markAsReadMode: 'auto' }),
+      getBotInfo: async () => ({ userId: 'Ubot', basicId: '@velorademo', displayName: 'Velora (Demo)', chatMode: 'chat', markAsReadMode: 'auto' }),
       setWebhookEndpoint: async (req) => {
         calls.webhook = req.endpoint;
         return {};
@@ -93,7 +93,7 @@ describe('LINE setup', () => {
     expect(calls.defaultMenu).toBe('richmenu-1');
     expect(calls.liff).toBe('https://demo-tunnel.example.com/liff/details');
     expect(calls.validated).toBe(Math.ceil(msgs.length / 5));
-    expect(report.bot?.addFriendUrl).toBe('https://line.me/R/ti/p/%40velourdemo');
+    expect(report.bot?.addFriendUrl).toBe('https://line.me/R/ti/p/%40velorademo');
   });
 
   it('refuses a non-HTTPS public URL before touching the webhook', async () => {

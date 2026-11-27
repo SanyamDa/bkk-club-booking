@@ -68,7 +68,7 @@ describe('guest booking flow over LINE', () => {
   it('goes from "book a table" to a confirmed booking', async () => {
     const u = 'guest1';
     await sim(u, { type: 'follow' });
-    expect((await lastOut(u)).text).toContain('Welcome to Velour');
+    expect((await lastOut(u)).text).toContain('Welcome to Velora');
 
     await sim(u, { type: 'text', text: 'hi I want to book a table' });
     const ask = await lastOut(u);

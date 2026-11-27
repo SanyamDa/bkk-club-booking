@@ -19,7 +19,7 @@ npm run live
 
 You can run the same setup from the dashboard: **Setup → Run LINE setup**.
 
-> Use a **fictional club name** for the test account (e.g. "Velour (Demo)"). Only use a real club's name or logo with that club's written permission.
+> Use a **fictional club name** for the test account (e.g. "Velora (Demo)"). Only use a real club's name or logo with that club's written permission.
 
 LINE's console screens change from time to time. If a label below doesn't match exactly, look for the closest one.
 
@@ -98,7 +98,7 @@ npm run live
 Add `-- --refresh-menu` to rebuild the button menu after changing it, or `-- --no-tunnel` when `PUBLIC_URL` is already a public HTTPS server.
 
 ### Staff alerts group
-1. Create a LINE group (e.g. "Velour staff") and invite the bot.
+1. Create a LINE group (e.g. "Velora staff") and invite the bot.
 2. The bot explains what to do. Type `link CODE` in the group. The code is on the dashboard's **Setup** page.
 
 ---

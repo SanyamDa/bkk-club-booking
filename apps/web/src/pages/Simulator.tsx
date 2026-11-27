@@ -74,7 +74,7 @@ export function Simulator() {
     <div className="staff">
       <header className="topbar">
         <div>
-          <div className="brand">Chat simulator <span>·</span> Velour (Demo)</div>
+          <div className="brand">Chat simulator <span>·</span> Velora (Demo)</div>
           <div className="faint">Runs the real bot locally. Nothing is sent to LINE.</div>
         </div>
         <div className="row wrap">
@@ -92,7 +92,7 @@ export function Simulator() {
       <div className="split">
         <div className="main" style={{ maxWidth: 460 }}>
           <div style={{ border: '1px solid var(--line)', borderRadius: 28, overflow: 'hidden', background: '#8aa1c1' }}>
-            <div style={{ background: '#1f2a37', color: '#fff', padding: '14px 16px', fontWeight: 600 }}>Velour (Demo)</div>
+            <div style={{ background: '#1f2a37', color: '#fff', padding: '14px 16px', fontWeight: 600 }}>Velora (Demo)</div>
             <div style={{ height: 560, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 8, background: '#7c93b3' }}>
               {messages.length === 0 && (
                 <div style={{ textAlign: 'center', color: '#fff', marginTop: 40 }}>

@@ -5,6 +5,7 @@ import { loadConfig } from './config.js';
 import { openDb } from './db/client.js';
 import { DEMO_CLUB_SLUG, seedDemoClub } from './db/seed.js';
 import { startBackground } from './jobs/index.js';
+import { logLine } from './lib/log.js';
 
 const config = loadConfig();
 const { db, close } = await openDb({ url: config.DATABASE_URL, dataDir: config.DATA_DIR });
@@ -14,14 +15,17 @@ const { app, ctx } = createApp(config, db);
 const stopBackground = await startBackground(ctx, () => new Date());
 
 const server = serve({ fetch: app.fetch, port: config.API_PORT }, (info) => {
-  const demo = `${config.PUBLIC_URL.replace(/\/$/, '')}`;
-  console.log(`\nClub booking server on http://localhost:${info.port}`);
-  console.log(`  Dashboard:  ${demo}/staff`);
-  if (config.DEV_SIMULATOR) console.log(`  Simulator:  ${demo}/dev/simulator`);
-  console.log(`  Webhook:    ${demo}/line/webhook/${DEMO_CLUB_SLUG}\n`);
+  const base = `${config.PUBLIC_URL.replace(/\/$/, '')}`;
+  logLine('info', 'server started', {
+    port: info.port,
+    dashboard: `${base}/staff`,
+    simulator: config.DEV_SIMULATOR ? `${base}/dev/simulator` : null,
+    webhook: `${base}/line/webhook/${DEMO_CLUB_SLUG}`,
+  });
 });
 
 async function shutdown() {
+  logLine('info', 'server stopping');
   await stopBackground();
   server.close();
   await close();

@@ -121,25 +121,71 @@ export interface SetupClients {
   blob: Pick<messagingApi.MessagingApiBlobClient, 'setRichMenuImage'>;
   /** Updates the LIFF app's endpoint URL using the LINE Login channel. */
   updateLiffEndpoint?: (liffId: string, url: string) => Promise<void>;
+  /** True when the club uses the platform's shared login channel and LIFF app (A4b). */
+  loginShared?: boolean;
 }
+
+/** Points a LIFF app at `url`, using a short-lived token of the LINE Login channel that owns it. */
+export type LiffEndpointUpdater = (login: { channelId: string; channelSecret: string }, liffId: string, url: string) => Promise<void>;
+
+export const realLiffEndpointUpdater: LiffEndpointUpdater = async (login, liffId, url) => {
+  const tokens = new channelAccessToken.ChannelAccessTokenClient({});
+  const { access_token } = await tokens.issueChannelToken('client_credentials', login.channelId, login.channelSecret);
+  await new liff.LiffClient({ channelAccessToken: access_token }).updateLIFFApp(liffId, { view: { type: 'tall', url } });
+};
+
+/** Local fake LINE (config.LINE_FAKE) and tests: no network. */
+export const fakeLiffEndpointUpdater: LiffEndpointUpdater = async () => {};
+
+/** The URL every LIFF app (per club or shared) must open. */
+export const liffEndpointUrl = (publicUrl: string) => `${publicUrl.replace(/\/$/, '')}/liff/details`;
 
 export function realSetupClients(accessToken: string, login: LoginChannel | null): SetupClients {
   return {
     api: new messagingApi.MessagingApiClient({ channelAccessToken: accessToken }),
     blob: new messagingApi.MessagingApiBlobClient({ channelAccessToken: accessToken }),
-    updateLiffEndpoint: login
-      ? async (liffId, url) => {
-          const tokens = new channelAccessToken.ChannelAccessTokenClient({});
-          const { access_token } = await tokens.issueChannelToken('client_credentials', login.channelId, login.channelSecret);
-          await new liff.LiffClient({ channelAccessToken: access_token }).updateLIFFApp(liffId, { view: { type: 'tall', url } });
-        }
-      : undefined,
+    loginShared: Boolean(login?.shared),
+    // The shared LIFF app's endpoint is set once, when the platform channel is saved
+    // (setPlatformLoginChannel), never per club.
+    updateLiffEndpoint: login && !login.shared ? (liffId, url) => realLiffEndpointUpdater(login, liffId, url) : undefined,
+  };
+}
+
+/**
+ * Local fake LINE (config.LINE_FAKE): same shape as `realSetupClients`, no network, and every
+ * setup step reports green, so the console wizard can be walked with made-up credentials.
+ */
+export function fakeSetupClients(_accessToken: string, login: LoginChannel | null): SetupClients {
+  let endpoint = '';
+  const ok = async () => ({});
+  return {
+    api: {
+      getBotInfo: async () => ({ userId: 'Ufake', basicId: '@fake-club', displayName: 'Fake LINE account', chatMode: 'bot', markAsReadMode: 'auto' }),
+      setWebhookEndpoint: async (req: { endpoint: string }) => {
+        endpoint = req.endpoint;
+        return {};
+      },
+      getWebhookEndpoint: async () => ({ endpoint, active: true }),
+      testWebhookEndpoint: async () => ({ success: true, timestamp: new Date().toISOString(), statusCode: 200, reason: 'OK', detail: '200' }),
+      getRichMenuList: async () => ({ richmenus: [] }),
+      deleteRichMenu: ok,
+      createRichMenu: async () => ({ richMenuId: 'richmenu-fake' }),
+      setDefaultRichMenu: ok,
+      validateReply: ok,
+      getMessageQuota: async () => ({ type: 'none' }),
+      getMessageQuotaConsumption: async () => ({ totalUsage: 0 }),
+    } as unknown as SetupClients['api'],
+    blob: { setRichMenuImage: ok } as unknown as SetupClients['blob'],
+    loginShared: Boolean(login?.shared),
+    updateLiffEndpoint: login && !login.shared ? async () => {} : undefined,
   };
 }
 
 export async function runLineSetup(opts: {
   club: Club;
   clients: SetupClients;
+  /** The club's login channel; when `shared`, the per-club LIFF endpoint step is skipped. */
+  login?: LoginChannel | null;
   publicUrl: string;
   sampleMessages: Message[];
   refreshRichMenu?: boolean;
@@ -219,8 +265,11 @@ export async function runLineSetup(opts: {
   }
 
   // 4. LIFF (the booking form inside LINE) must point at the current URL.
-  const liffUrl = `${base}/liff/details`;
-  if (!club.liffId) {
+  const liffUrl = liffEndpointUrl(opts.publicUrl);
+  const sharedLogin = opts.login ? opts.login.shared : Boolean(clients.loginShared);
+  if (sharedLogin) {
+    step('Booking form (LIFF)', true, `Shared booking form${club.liffId ? ` (LIFF ${club.liffId})` : ''}: its endpoint is set once for every club, when the platform login channel is saved.`);
+  } else if (!club.liffId) {
     step('Booking form (LIFF)', true, 'No LIFF ID set: the form opens in the phone browser. Optional, see docs/LINE-SETUP.md step 6.');
   } else if (!clients.updateLiffEndpoint) {
     step('Booking form (LIFF)', true, `Set the LIFF endpoint to ${liffUrl} in LINE Developers (or add the LINE Login channel ID/secret to .env and this is automatic).`);

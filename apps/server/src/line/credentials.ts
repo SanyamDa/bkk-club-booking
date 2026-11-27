@@ -1,4 +1,8 @@
+import type { Db } from '../db/client.js';
 import type { Club } from '../db/schema.js';
+import { readClubCredential } from '../platform/credentials.js';
+import { platformLoginChannel } from '../platform/login-channel.js';
+import { LineTokenCache, type LineTokenIssuer } from './tokens.js';
 
 export interface ClubLineCredentials {
   channelSecret: string;
@@ -33,5 +37,45 @@ export function envCredentialStore(env: NodeJS.ProcessEnv = process.env): Creden
       const channelSecret = read(club.lineLoginChannelSecretEnv);
       return channelId && channelSecret ? { channelId, channelSecret, liffId: club.liffId ?? null, shared: false } : null;
     },
+  };
+}
+
+/**
+ * Secrets from `club_credentials`, encrypted with CREDENTIALS_KEY (A4). The access token is never
+ * stored: `line()` issues a stateless token through the 10-minute cache in `line/tokens.ts`.
+ * `fallback` answers for a club with no stored row (the env store, for the dev demo club).
+ */
+export function dbCredentialStore(db: Db, key: Buffer, tokens: LineTokenIssuer, fallback?: CredentialStore): CredentialStore {
+  const cache = new LineTokenCache(tokens);
+  const messaging = (club: Club) => readClubCredential<{ channelId: string; channelSecret: string }>(db, key, club.id, 'line_messaging');
+  return {
+    async channelSecret(club) {
+      const own = await messaging(club);
+      if (own) return own.channelSecret;
+      return fallback ? fallback.channelSecret(club) : null;
+    },
+    async line(club) {
+      const own = await messaging(club);
+      if (own) return { channelSecret: own.channelSecret, accessToken: await cache.token(club.id, own.channelId, own.channelSecret) };
+      return fallback ? fallback.line(club) : null;
+    },
+    /** A4b order: the club's own login channel, else the platform's shared one, else the fallback. */
+    async login(club) {
+      const own = await readClubCredential<{ channelId: string; channelSecret: string; liffId?: string }>(db, key, club.id, 'line_login');
+      if (own) return { channelId: own.channelId, channelSecret: own.channelSecret, liffId: club.liffId ?? own.liffId ?? null, shared: false };
+      const platform = await platformLoginChannel(db, key);
+      if (platform) return platform;
+      return fallback ? fallback.login(club) : null;
+    },
+  };
+}
+
+/** Wraps a store so it answers only for demo clubs (status 'demo'); every other club gets null. */
+export function onlyDemoClubs(store: CredentialStore): CredentialStore {
+  const demo = (club: Club) => club.status === 'demo';
+  return {
+    channelSecret: async (club) => (demo(club) ? store.channelSecret(club) : null),
+    line: async (club) => (demo(club) ? store.line(club) : null),
+    login: async (club) => (demo(club) ? store.login(club) : null),
   };
 }

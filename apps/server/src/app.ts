@@ -7,18 +7,29 @@ import { Hono } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
 import { buildBotDeps, type BotDepOptions } from './bot/deps.js';
 import { Notifier } from './bot/notify.js';
-import type { Config } from './config.js';
+import { isDevOrTest, type Config } from './config.js';
 import type { Db } from './db/client.js';
+import { jsonLog } from './lib/log.js';
+import { authRoutes } from './http/auth.js';
 import { devRoutes } from './http/dev.js';
 import type { AppContext } from './http/context.js';
 import { liffRoutes } from './http/liff.js';
 import { mediaRoutes } from './http/media.js';
 import { staffRoutes } from './http/staff.js';
 import { webhookRoutes } from './http/webhook.js';
-import { envCredentialStore } from './line/credentials.js';
+import { dbCredentialStore, envCredentialStore, onlyDemoClubs } from './line/credentials.js';
 import { GatewayRegistry } from './line/gateway.js';
 import { lineIdTokenVerifier } from './line/idtoken.js';
-import { realSetupClients } from './line/setup.js';
+import { fakeLiffEndpointUpdater, fakeSetupClients, realLiffEndpointUpdater, realSetupClients } from './line/setup.js';
+import { fakeLineTokenIssuer, realLineTokenIssuer } from './line/tokens.js';
+
+/** What `opts.onResponse` sees for every JSON response (test hook: secret-leak checks). */
+export interface ResponseRecord {
+  method: string;
+  path: string;
+  status: number;
+  body: unknown;
+}
 
 export function createApp(
   config: Config,
@@ -28,12 +39,26 @@ export function createApp(
     credentials?: AppContext['credentials'];
     lineSetupClients?: AppContext['lineSetupClients'];
     verifyIdToken?: AppContext['verifyIdToken'];
+    updateLiffEndpoint?: AppContext['updateLiffEndpoint'];
+    /** Test hook: called with every JSON response body. */
+    onResponse?: (r: ResponseRecord) => void;
   } = {},
 ) {
-  const deps = buildBotDeps(config, db, opts.bot);
+  // Structured JSON log lines on stdout (A7) unless the caller (tests) passes its own logger.
+  const deps = buildBotDeps(config, db, { ...opts.bot, log: opts.bot?.log ?? jsonLog });
   const log = deps.log;
   const pending = new Set<Promise<unknown>>();
-  const credentials = opts.credentials ?? envCredentialStore();
+  // Club secrets live encrypted in the database (A4). The env store is only a development
+  // fallback for the demo club. LINE_FAKE (development/test only) swaps in a local fake LINE.
+  const devOrTest = isDevOrTest(config.NODE_ENV);
+  const credentials =
+    opts.credentials ??
+    dbCredentialStore(
+      db,
+      config.CREDENTIALS_KEY,
+      config.LINE_FAKE ? fakeLineTokenIssuer() : realLineTokenIssuer(),
+      devOrTest ? onlyDemoClubs(envCredentialStore()) : undefined,
+    );
   const gateways = new GatewayRegistry(credentials);
   const ctx: AppContext = {
     config,
@@ -45,16 +70,27 @@ export function createApp(
       pending.add(p);
       void p.catch((err) => log('Background task failed', err)).finally(() => pending.delete(p));
     },
-    lineSetupClients: opts.lineSetupClients ?? realSetupClients,
+    lineSetupClients: opts.lineSetupClients ?? (config.LINE_FAKE ? fakeSetupClients : realSetupClients),
     verifyIdToken: opts.verifyIdToken ?? lineIdTokenVerifier(),
+    updateLiffEndpoint: opts.updateLiffEndpoint ?? (config.LINE_FAKE ? fakeLiffEndpointUpdater : realLiffEndpointUpdater),
   };
 
   const app = new Hono();
+  const onResponse = opts.onResponse;
+  if (onResponse) {
+    app.use('*', async (c, next) => {
+      await next();
+      if (!c.res.headers.get('content-type')?.includes('application/json')) return;
+      const body = await c.res.clone().json().catch(() => undefined);
+      onResponse({ method: c.req.method, path: c.req.path, status: c.res.status, body });
+    });
+  }
   app.use('*', secureHeaders({ crossOriginResourcePolicy: false, xFrameOptions: false }));
   app.get('/health', (c) => c.json({ ok: true }));
   app.route('/line/webhook', webhookRoutes(ctx));
   app.route('/media', mediaRoutes(ctx));
   app.route('/api/liff', liffRoutes(ctx));
+  app.route('/api/auth', authRoutes(ctx));
   app.route('/api/staff', staffRoutes(ctx));
   if (config.DEV_SIMULATOR) app.route('/api/dev', devRoutes(ctx));
   app.onError((err, c) => {

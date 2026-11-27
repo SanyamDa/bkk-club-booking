@@ -135,6 +135,14 @@ async function main() {
   if (!env.DEMO_LINE_CHANNEL_SECRET || !env.DEMO_LINE_ACCESS_TOKEN) {
     fail('DEMO_LINE_CHANNEL_SECRET and DEMO_LINE_ACCESS_TOKEN are empty in apps/server/.env.\n  Follow docs/LINE-SETUP.md steps 1–3 to get them.');
   }
+  if (!env.LIVE_EMAIL || !env.LIVE_PASSWORD) {
+    fail(
+      'LIVE_EMAIL and LIVE_PASSWORD are empty in apps/server/.env. They sign this script in as an owner of the demo club.\n' +
+        '  Create that owner once, with the app stopped:\n' +
+        '    npm run admin:create -w @club/server -- --email you@example.com --name "You" --club demo --role owner\n' +
+        '  Then put that email and the printed password in LIVE_EMAIL and LIVE_PASSWORD.',
+    );
+  }
   if (await reachable(`${API}/health`)) {
     fail('The app is already running. Stop it first (it must restart to pick up the new public URL).');
   }
@@ -163,12 +171,12 @@ async function main() {
   await waitFor(`${publicUrl}/health`, 'Tunnel', 60);
 
   console.log(dim('Connecting LINE…'));
-  const login = await fetch(`${API}/api/staff/login`, {
+  const login = await fetch(`${API}/api/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ password: env.STAFF_PASSWORD }),
+    body: JSON.stringify({ email: env.LIVE_EMAIL, password: env.LIVE_PASSWORD }),
   });
-  if (!login.ok) fail('Could not sign in with STAFF_PASSWORD from .env.');
+  if (!login.ok) fail('Could not sign in with LIVE_EMAIL and LIVE_PASSWORD from apps/server/.env. Check both values.');
   const cookie = login.headers.get('set-cookie')?.split(';')[0] ?? '';
   const res = await fetch(`${API}/api/staff/clubs/demo/line-setup`, {
     method: 'POST',

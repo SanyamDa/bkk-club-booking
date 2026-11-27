@@ -16,16 +16,19 @@ npm install
 cp apps/server/.env.example apps/server/.env
 ```
 
-Edit `apps/server/.env`: set `APP_SECRET` to a long random string and `STAFF_PASSWORD` to anything. Then:
+Edit `apps/server/.env`: set `APP_SECRET` to a long random string. Then create your own staff account for the demo club (it prints a password once; run it while the app is stopped, because the embedded database allows one process at a time):
 
 ```bash
+npm run admin:create -w @club/server -- --email you@example.com --name "You" --club demo --role owner
 npm run dev
 ```
+
+Leave out `--club` and `--role` to create a platform admin instead: it also prints a TOTP `otpauth://` link (and QR) for your authenticator app, and sign-in asks for the 6-digit code.
 
 | Open | What it is |
 |---|---|
 | http://localhost:5173/dev/simulator | Chat with the bot as a guest. Uses the real bot code; nothing is sent to LINE |
-| http://localhost:5173/staff | Staff dashboard (password = `STAFF_PASSWORD`) |
+| http://localhost:5173/staff | Staff dashboard (sign in with the email and password from `npm run admin:create`) |
 
 The database is an embedded Postgres (PGlite) stored in `apps/server/.data/`. Delete that folder to start fresh.
 
@@ -38,6 +41,7 @@ To use a real LINE account on your phone: do the one-time setup in **[docs/LINE-
 | `npm run dev` | API server (port 8787) + web app (port 5173, proxies to the API) |
 | `npm test` | Booking engine + full LINE flow tests (in-memory database) |
 | `npm run typecheck` | TypeScript checks for both apps |
+| `npm run admin:create -w @club/server -- --email … --name …` | Create a platform admin (password + TOTP link, shown once); add `--club <slug> --role <role>` for a club member |
 | `npm run build` then `npm start` | Production build; the server also serves the web app |
 | `npm run db:generate` | Create a migration after changing `apps/server/src/db/schema.ts` |
 | `npm run live` | Go live on a real LINE account: tunnel + webhook + rich menu + LIFF + message check, then prints an add-friend QR ([docs/LINE-SETUP.md](docs/LINE-SETUP.md)) |

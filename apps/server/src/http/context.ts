@@ -4,7 +4,7 @@ import type { Config } from '../config.js';
 import type { GatewayRegistry } from '../line/gateway.js';
 import type { IdTokenVerifier } from '../line/idtoken.js';
 import type { CredentialStore, LoginChannel } from '../line/credentials.js';
-import type { SetupClients } from '../line/setup.js';
+import type { LiffEndpointUpdater, SetupClients } from '../line/setup.js';
 
 export interface AppContext {
   config: Config;
@@ -18,4 +18,6 @@ export interface AppContext {
   /** LINE API clients for setup/status. Replaced by fakes in tests. */
   lineSetupClients: (accessToken: string, login: LoginChannel | null) => SetupClients;
   verifyIdToken: IdTokenVerifier;
+  /** Sets the shared LIFF app's endpoint when the platform login channel is saved (A4b). Fake with LINE_FAKE. */
+  updateLiffEndpoint: LiffEndpointUpdater;
 }

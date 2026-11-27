@@ -165,7 +165,7 @@ describe('guest booking flow over LINE', () => {
 describe('security', () => {
   it('rejects the dashboard API without a session', async () => {
     expect((await req(staffUrl('demo', '/night'))).status).toBe(401);
-    expect((await req('/api/staff/login', json({ password: 'nope' }))).status).toBe(401);
+    expect((await req('/api/auth/login', json({ email: 'nobody@test.local', password: 'nope' }))).status).toBe(401);
   });
 
   it('verifies the LINE webhook signature', async () => {

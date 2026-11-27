@@ -3,8 +3,8 @@ import { stat } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
-import { Hono, type MiddlewareHandler } from 'hono';
-import { deleteCookie, getSignedCookie, setSignedCookie } from 'hono/cookie';
+import { Hono } from 'hono';
+import { deleteCookie, getCookie } from 'hono/cookie';
 import { z } from 'zod';
 import {
   ACTIVE_BOOKING_STATUSES,
@@ -36,72 +36,61 @@ import { sampleMessages } from '../line/samples.js';
 import { describeLineError, runLineSetup } from '../line/setup.js';
 import { currentNightDate, formatNight } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
+import { revokeSession, SESSION_COOKIE } from '../platform/sessions.js';
+import { checkClubAccess, clubsOfUser, requireClubRole, requireUser, type AuthEnv, type Role } from './auth.js';
 import type { AppContext } from './context.js';
 
-const COOKIE = 'club_staff';
-const SESSION_HOURS = 12;
+/** Roles per route (plan A2 Decisions). */
+const STAFF_ROLES: Role[] = ['owner', 'manager', 'host', 'door'];
+const MANAGER_ROLES: Role[] = ['owner', 'manager'];
 
 /**
- * Staff dashboard API. Phase 0 uses one shared password from STAFF_PASSWORD; per-user accounts
- * with roles and 2FA come in Phase 1 (spec §4, §13).
+ * Staff dashboard API. Sign-in is per person at /api/auth (http/auth.ts, spec §4, §13); every
+ * route here needs a live session and access to the club it touches: `/clubs/:slug/*` through
+ * `requireClubRole`, id-addressed routes through `checkClubAccess` on the row's club. A2 moves the
+ * id routes under `/clubs/:slug` and switches the lookups to the club-scoped W0 helpers only.
  */
 export function staffRoutes(app: AppContext) {
-  const r = new Hono();
+  const r = new Hono<AuthEnv>();
   const { db } = app.deps;
-  const secret = app.config.APP_SECRET;
-  const secure = app.config.PUBLIC_URL.startsWith('https://');
-  const attempts = new Map<string, { count: number; resetAt: number }>();
 
-  r.post('/login', async (c) => {
-    const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? 'local';
-    const now = Date.now();
-    const a = attempts.get(ip);
-    if (a && a.resetAt > now && a.count >= 5) return c.json({ error: 'too_many_attempts' }, 429);
-    const { password } = (await c.req.json().catch(() => ({}))) as { password?: string };
-    if (password !== app.config.STAFF_PASSWORD) {
-      attempts.set(ip, { count: (a && a.resetAt > now ? a.count : 0) + 1, resetAt: a && a.resetAt > now ? a.resetAt : now + 60_000 });
-      return c.json({ error: 'wrong_password' }, 401);
-    }
-    attempts.delete(ip);
-    const expires = Date.now() + SESSION_HOURS * 3_600_000;
-    await setSignedCookie(c, COOKIE, `staff.${expires}`, secret, {
-      httpOnly: true,
-      sameSite: 'Lax',
-      secure,
-      path: '/',
-      maxAge: SESSION_HOURS * 3600,
-    });
-    return c.json({ ok: true });
-  });
-
-  r.post('/logout', (c) => {
-    deleteCookie(c, COOKIE, { path: '/' });
-    return c.json({ ok: true });
-  });
-
-  const requireStaff: MiddlewareHandler = async (c, next) => {
-    const v = await getSignedCookie(c, secret, COOKIE);
-    const expires = typeof v === 'string' ? Number(v.split('.')[1]) : 0;
-    if (!expires || expires < Date.now()) return c.json({ error: 'unauthorized' }, 401);
-    await next();
-  };
-  r.use('/clubs/*', requireStaff);
+  const requireStaff = requireUser(app);
+  const managerOnly = requireClubRole(app, ...MANAGER_ROLES);
+  r.use('/clubs/:slug/settings', managerOnly);
+  r.use('/clubs/:slug/line-setup', managerOnly);
+  r.use('/clubs/:slug/line-status', managerOnly);
+  r.use('/clubs/:slug/*', requireClubRole(app, ...STAFF_ROLES));
   r.use('/bookings/*', requireStaff);
   r.use('/conversations/*', requireStaff);
   r.use('/deposits/*', requireStaff);
   r.use('/me', requireStaff);
 
-  r.get('/me', async (c) => {
-    const list = await db.select({ slug: clubs.slug, name: clubs.name }).from(clubs).orderBy(asc(clubs.name));
-    return c.json({ clubs: list });
+  /** The row's club when the signed-in user may use it with one of `roles`, else the refusal. */
+  async function accessible(
+    userId: string,
+    clubId: string | undefined,
+    roles: Role[] = STAFF_ROLES,
+  ): Promise<{ clubId: string } | { refused: 'not_found' | 'forbidden' }> {
+    if (!clubId) return { refused: 'not_found' };
+    const result = await checkClubAccess(app, userId, clubId, roles);
+    return result === 'ok' ? { clubId } : { refused: result };
+  }
+
+  // The web dashboard still calls these two; they match /api/auth/me and /api/auth/logout.
+  r.get('/me', async (c) => c.json({ clubs: await clubsOfUser(db, c.var.user.id) }));
+  r.post('/logout', async (c) => {
+    const sid = getCookie(c, SESSION_COOKIE);
+    if (sid) await revokeSession(db, sid, app.deps.now());
+    deleteCookie(c, SESSION_COOKIE, { path: '/' });
+    return c.json({ ok: true });
   });
 
   async function clubBySlug(slug: string): Promise<Club | undefined> {
     return db.query.clubs.findFirst({ where: eq(clubs.slug, slug) });
   }
 
-  // W0: the shared staff password covers every club and these URLs carry no club yet, so the
-  // club comes from the row itself. A2 moves these routes under /clubs/:slug and checks access.
+  // These URLs carry no club yet, so the club comes from the row itself and `accessible` checks
+  // the user's membership there. A2 moves these routes under /clubs/:slug.
   async function clubIdOfBooking(id: string): Promise<string | undefined> {
     const [row] = await db.select({ clubId: bookings.clubId }).from(bookings).where(eq(bookings.id, id)).limit(1);
     return row?.clubId;
@@ -194,8 +183,9 @@ export function staffRoutes(app: AppContext) {
   // ----- Booking detail + actions -----
   r.get('/bookings/:id', async (c) => {
     const id = c.req.param('id');
-    const clubId = await clubIdOfBooking(id);
-    const view = clubId ? await getBookingView(db, { clubId, id }) : undefined;
+    const access = await accessible(c.var.user.id, await clubIdOfBooking(id));
+    if ('refused' in access) return c.json({ error: access.refused }, access.refused === 'forbidden' ? 403 : 404);
+    const view = await getBookingView(db, { clubId: access.clubId, id });
     if (!view) return c.json({ error: 'not_found' }, 404);
     const recent = await db
       .select()
@@ -222,14 +212,18 @@ export function staffRoutes(app: AppContext) {
   });
 
   const actionSchema = z.object({ reason: z.string().trim().max(200).optional() });
-  const act = (name: string, fn: (clubId: string, id: string, reason: string | undefined) => Promise<unknown>) =>
+  const act = (name: string, roles: Role[], fn: (clubId: string, id: string, reason: string | undefined) => Promise<unknown>) =>
     r.post(`/bookings/:id/${name}`, async (c) => {
       const { reason } = actionSchema.parse(await c.req.json().catch(() => ({})));
       const id = c.req.param('id');
-      const clubId = await clubIdOfBooking(id);
-      if (!clubId) return c.json({ error: 'not_found', message: 'not_found' }, 409);
+      const access = await accessible(c.var.user.id, await clubIdOfBooking(id), roles);
+      if ('refused' in access) {
+        return access.refused === 'forbidden'
+          ? c.json({ error: 'forbidden' }, 403)
+          : c.json({ error: 'not_found', message: 'not_found' }, 409);
+      }
       try {
-        await fn(clubId, id, reason);
+        await fn(access.clubId, id, reason);
         return c.json({ ok: true });
       } catch (err) {
         if (err instanceof BookingError) return c.json({ error: err.code, message: err.message }, 409);
@@ -237,20 +231,20 @@ export function staffRoutes(app: AppContext) {
       }
     });
 
-  act('approve', async (clubId, id) => {
+  act('approve', MANAGER_ROLES, async (clubId, id) => {
     await approveDeposit(db, clubId, id, STAFF, app.deps.now());
     await app.notifier.confirmed(clubId, id);
   });
-  act('reject', async (clubId, id, reason) => {
+  act('reject', MANAGER_ROLES, async (clubId, id, reason) => {
     await rejectDeposit(db, clubId, id, STAFF, { code: 'payment_not_verified', text: reason ?? 'Payment could not be verified' }, app.deps.now());
     await app.notifier.rejected(clubId, id);
   });
-  act('cancel', async (clubId, id, reason) => {
+  act('cancel', STAFF_ROLES, async (clubId, id, reason) => {
     await cancelBooking(db, clubId, id, STAFF, { code: 'club_cancelled', text: reason ?? 'Cancelled by the club' }, app.deps.now());
     await app.notifier.cancelled(clubId, id, reason ?? '');
   });
-  act('arrived', (clubId, id) => markArrived(db, clubId, id, STAFF, app.deps.now()));
-  act('no-show', (clubId, id) => markNoShow(db, clubId, id, STAFF, app.deps.now()));
+  act('arrived', STAFF_ROLES, (clubId, id) => markArrived(db, clubId, id, STAFF, app.deps.now()));
+  act('no-show', STAFF_ROLES, (clubId, id) => markNoShow(db, clubId, id, STAFF, app.deps.now()));
 
   // ----- Manual booking -----
   const manualSchema = z.object({
@@ -307,8 +301,9 @@ export function staffRoutes(app: AppContext) {
 
   r.post('/conversations/:id/resolve', async (c) => {
     const id = c.req.param('id');
-    const clubId = await clubIdOfConversation(id);
-    const conv = clubId ? await getConversationForClub(db, clubId, id) : undefined;
+    const access = await accessible(c.var.user.id, await clubIdOfConversation(id));
+    if ('refused' in access) return c.json({ error: access.refused }, access.refused === 'forbidden' ? 403 : 404);
+    const conv = await getConversationForClub(db, access.clubId, id);
     if (!conv) return c.json({ ok: true });
     await db
       .update(conversations)
@@ -320,8 +315,9 @@ export function staffRoutes(app: AppContext) {
   r.post('/conversations/:id/reply', async (c) => {
     const { text } = z.object({ text: z.string().trim().min(1).max(1000) }).parse(await c.req.json().catch(() => ({})));
     const id = c.req.param('id');
-    const clubId = await clubIdOfConversation(id);
-    const conv = clubId ? await getConversationForClub(db, clubId, id) : undefined;
+    const access = await accessible(c.var.user.id, await clubIdOfConversation(id));
+    if ('refused' in access) return c.json({ error: access.refused }, access.refused === 'forbidden' ? 403 : 404);
+    const conv = await getConversationForClub(db, access.clubId, id);
     if (!conv) return c.json({ error: 'not_found' }, 404);
     await app.notifier.hostReply(conv.clubId, conv.guestId, text, STAFF);
     return c.json({ ok: true });
@@ -406,8 +402,9 @@ export function staffRoutes(app: AppContext) {
   // ----- Slip images (private) -----
   r.get('/deposits/:id/slip', async (c) => {
     const id = c.req.param('id');
-    const clubId = await clubIdOfDeposit(id);
-    const d = clubId ? await getDepositForClub(db, clubId, id) : undefined;
+    const access = await accessible(c.var.user.id, await clubIdOfDeposit(id));
+    if ('refused' in access) return access.refused === 'forbidden' ? c.text('Forbidden', 403) : c.text('Not found', 404);
+    const d = await getDepositForClub(db, access.clubId, id);
     if (!d?.slipPath) return c.text('Not found', 404);
     const root = resolve(app.deps.uploadsDir);
     const file = resolve(root, d.slipPath);

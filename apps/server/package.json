@@ -5,11 +5,12 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/main.js",
+    "start": "NODE_ENV=production node dist/main.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
-    "live": "tsx src/scripts/live.ts"
+    "live": "tsx src/scripts/live.ts",
+    "admin:create": "tsx src/scripts/create-admin.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.6.0",

@@ -82,6 +82,15 @@ Leave it empty to stay in demo mode: no real QR is sent, and any image counts as
 
 ---
 
+### 8. Give `npm run live` a staff account
+`npm run live` signs in as an owner of the demo club. Create one once, with the app stopped:
+
+```bash
+npm run admin:create -w @club/server -- --email you@example.com --name "You" --club demo --role owner
+```
+
+Put that email in `LIVE_EMAIL` and the printed password in `LIVE_PASSWORD` in `apps/server/.env`. The same email and password sign you in to the staff dashboard.
+
 ## Every time
 
 1. Stop `npm run dev` if it's running.

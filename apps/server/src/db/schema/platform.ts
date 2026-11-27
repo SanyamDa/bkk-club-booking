@@ -141,6 +141,40 @@ export const platformFlags = pgTable('platform_flags', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+export type AlertLevel = 'urgent' | 'needs_input' | 'info';
+
+/**
+ * Manager alerts (spec §6.4, plan A15). Urgent ones also go to the staff LINE group; info ones
+ * only when the club switches it on (`club_alert_settings.info_to_line`). `sent_line_at` is set
+ * when the staff-group send was made.
+ */
+export const alerts = pgTable(
+  'alerts',
+  {
+    id: text('id').primaryKey(),
+    clubId: text('club_id').notNull().references(() => clubs.id),
+    level: text('level').$type<AlertLevel>().notNull(),
+    kind: text('kind').notNull(),
+    conversationId: text('conversation_id'),
+    bookingId: text('booking_id'),
+    textEn: text('text_en').notNull(),
+    textTh: text('text_th').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    sentLineAt: timestamp('sent_line_at', { withTimezone: true }),
+  },
+  (t) => [index('alerts_club_created').on(t.clubId, t.createdAt), index('alerts_club_kind_open').on(t.clubId, t.kind, t.resolvedAt)],
+);
+
+/** Per-club alert switches (spec §6.4: "LINE alert only if the club switches it on"). No row = defaults. */
+export const clubAlertSettings = pgTable('club_alert_settings', {
+  clubId: text('club_id').primaryKey().references(() => clubs.id),
+  infoToLine: boolean('info_to_line').notNull().default(false),
+  updatedBy: text('updated_by'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type Alert = typeof alerts.$inferSelect;
 export type User = typeof users.$inferSelect;
 export type ClubMembership = typeof clubMemberships.$inferSelect;
 export type Session = typeof sessions.$inferSelect;

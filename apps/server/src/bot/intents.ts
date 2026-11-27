@@ -9,6 +9,8 @@ export type Intent =
   | { kind: 'book' }
   | { kind: 'location' }
   | { kind: 'staff_link'; code: string }
+  | { kind: 'remove_data' }
+  | { kind: 'stop_marketing' }
   | { kind: 'unknown' };
 
 const DETAILS_SENT = /(?:Details sent|ส่งข้อมูลแล้ว)\s*·\s*([A-Z0-9]{2,4}-[A-Z0-9]{4})/;
@@ -19,12 +21,18 @@ const BOOK = /\b(book|booking|reserve|reservation|table|tables)\b|จอง|โ�
 const LOCATION = /\b(location|address|where are you|map|directions)\b|แผนที่|ที่อยู่|อยู่ที่ไหน|ไปยังไง/i;
 /** `link <code>`: the 8-character code from the dashboard's "Issue link code" button (bot/staff-link.ts). */
 const STAFF_LINK = /^\s*link\s+([A-Z0-9]{8})\s*$/i;
+/** B10b: removal request (spec §14.9). The bot asks for one confirm tap before writing it. */
+const REMOVE_DATA = /\b(delete|remove|erase)\s+(all\s+)?my\s+(data|details|information|info)\b|\bforget\s+me\b|ลบข้อมูล/i;
+/** B10b: stop marketing (spec §5.5). English only as the whole message, so "can't stop" is not an opt-out. */
+const STOP_MARKETING = /^\s*(stop|unsubscribe|stop promotions|stop marketing)\s*[.!]*\s*$|ยกเลิกรับข่าวสาร|ไม่รับข่าวสาร|หยุดส่ง|^\s*หยุด\s*$/i;
 
 export function detectIntent(text: string): Intent {
   const details = text.match(DETAILS_SENT);
   if (details) return { kind: 'details_sent', ref: details[1]! };
   const link = text.match(STAFF_LINK);
   if (link) return { kind: 'staff_link', code: link[1]!.toUpperCase() };
+  if (REMOVE_DATA.test(text)) return { kind: 'remove_data' };
+  if (STOP_MARKETING.test(text)) return { kind: 'stop_marketing' };
   if (HANDOFF.test(text)) return { kind: 'handoff' };
   if (MY_BOOKING.test(text)) return { kind: 'my_booking' };
   if (BOOK.test(text)) return { kind: 'book' };

@@ -258,7 +258,8 @@ export const deposits = pgTable(
     clubId: text('club_id').notNull().references(() => clubs.id),
     bookingId: text('booking_id').notNull().references(() => bookings.id),
     amountSatang: integer('amount_satang').notNull(),
-    method: text('method').$type<'promptpay_slip' | 'cash' | 'waived' | 'manual'>().notNull(),
+    // 'gateway' (A20b): paid through a payment gateway; `slip_trans_ref` holds '<provider>:<chargeId>'.
+    method: text('method').$type<'promptpay_slip' | 'cash' | 'waived' | 'manual' | 'gateway'>().notNull(),
     status: text('status').$type<'pending' | 'review' | 'verified' | 'rejected'>().notNull(),
     slipPath: text('slip_path'),
     slipReceivedAt: timestamp('slip_received_at', { withTimezone: true }),
@@ -278,6 +279,8 @@ export const deposits = pgTable(
 export interface ConversationState {
   nightDate?: string;
   paxRange?: string;
+  /** B3: the pause (`club:<bot_paused_at>` or `global:<updated_at>`) the staff group was last alerted about. */
+  pauseAlertedFor?: string;
 }
 
 export const conversations = pgTable(

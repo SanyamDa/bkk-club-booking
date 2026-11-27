@@ -31,6 +31,7 @@ import {
   type Reason,
 } from '../bookings/service.js';
 import { getConversationForClub } from '../chat/conversations.js';
+import { endOpenEpisode, recordStaffReply } from '../chat/episodes.js';
 import { emit, type EventInput } from '../data/events.js';
 import { sampleMessages } from '../line/samples.js';
 import { describeLineError, runLineSetup } from '../line/setup.js';
@@ -320,25 +321,14 @@ export function staffRoutes(app: AppContext) {
     return c.json({ handoffs: out });
   });
 
-  // handoff.resolved is emitted here until A14/B14b moves this route to endEpisode.
+  // B14b: [Mark resolved] ends the open handoff episode (chat/episodes.ts emits handoff.resolved).
   r.post('/clubs/:slug/conversations/:id/resolve', staff, async (c) => {
     const club = c.var.club;
     const conv = await getConversationForClub(db, club.id, c.req.param('id'));
     if (!conv) return c.json({ error: 'not_found' }, 404);
-    if (conv.mode !== 'human') return c.json({ ok: true });
+    const actor = actorOf(c);
     const now = app.deps.now();
-    await db
-      .update(conversations)
-      .set({ mode: 'bot', handoffRequestedAt: null, handoffReason: null, updatedAt: now })
-      .where(and(eq(conversations.id, conv.id), eq(conversations.clubId, club.id)));
-    await staffEvent(c, {
-      type: 'handoff.resolved',
-      conversationId: conv.id,
-      guestId: conv.guestId,
-      props: {
-        durationSec: conv.handoffRequestedAt ? Math.max(0, Math.round((now.getTime() - conv.handoffRequestedAt.getTime()) / 1000)) : null,
-      },
-    });
+    await db.transaction((tx) => endOpenEpisode(tx, { clubId: club.id, conversationId: conv.id, resolverUserId: c.var.user.id, actor, now }));
     return c.json({ ok: true });
   });
 
@@ -351,7 +341,12 @@ export function staffRoutes(app: AppContext) {
     if (!conv) return c.json({ error: 'not_found' }, 404);
     const parsed = z.object({ text: z.string().trim().min(1).max(1000) }).safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
-    await app.notifier.hostReply(club.id, conv.guestId, parsed.data.text, actorOf(c));
+    // B14b: stored with author_type='staff', recorded on the takeover episode, then sent.
+    await recordStaffReply(
+      db,
+      { clubId: club.id, conversationId: conv.id, userId: c.var.user.id, text: parsed.data.text, channel: 'dashboard', occurredAt: app.deps.now(), externalId: null },
+      { outbox: app.deps.outbox, gateways: app.gateways },
+    );
     return c.json({ ok: true });
   });
 

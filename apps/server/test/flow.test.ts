@@ -1,9 +1,11 @@
 import { createHmac } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { detectIntent } from '../src/bot/intents.js';
-import { bookings } from '../src/db/schema.js';
+import { FakeSlipVerifier } from '../src/bookings/slip-verify.js';
+import { bookings, clubs, conversations, events, notices, removalRequests } from '../src/db/schema.js';
+import { hasMarketingOptOut } from '../src/data/removal.js';
 import { FRIDAY, FRIDAY_AFTERNOON, setupDb } from './helpers.js';
 import { adminCookie, staffCookie as loginStaff, staffUrl, testConfig } from './helpers/track-a.js';
 
@@ -169,6 +171,69 @@ describe('guest booking flow over LINE', () => {
   });
 });
 
+describe('automatic slip verification in the bot (B9)', () => {
+  let verifier: FakeSlipVerifier;
+  beforeEach(async () => {
+    await ctx.db.update(clubs).set({ promptpayId: '0812345678' }).where(eq(clubs.id, ctx.club.id));
+    verifier = new FakeSlipVerifier(new Error('unset'));
+    app = createApp(config, ctx.db, { bot: { now: () => clock, log: () => {}, slipVerifier: verifier } });
+  });
+
+  async function toAwaitingPayment(u: string) {
+    await sim(u, { type: 'text', text: 'book a table' });
+    await sim(u, { type: 'postback', data: `a=night&d=${FRIDAY}` });
+    await sim(u, { type: 'postback', data: 'a=pax&r=5-8' });
+    await sim(u, { type: 'postback', data: `a=table&t=table_demo_B1&d=${FRIDAY}` });
+    const uri: string = (await lastOut(u)).contents.footer.contents[0].action.uri;
+    const url = new URL(uri);
+    const ref = url.searchParams.get('ref')!;
+    const t = url.searchParams.get('t')!;
+    const ok = await req('/api/liff/booking/details', json({ ref, t, name: 'Ari', phone: '0812345678', nationality: 'Thai', pax: 6, acceptRules: true, viaChat: false }));
+    expect(ok.status).toBe(200);
+    await app.settle();
+    const booking = (await ctx.db.query.bookings.findFirst({ where: eq(bookings.refCode, ref) }))!;
+    await sim(u, { type: 'postback', data: `a=confirm&b=${booking.id}` });
+    return booking;
+  }
+
+  it('a slip that passes every check confirms the booking and sends the confirmation card', async () => {
+    const booking = await toAwaitingPayment('auto1');
+    verifier.result = {
+      transRef: 'FLOW-1',
+      amountSatang: booking.depositSatang,
+      receiver: { proxy: 'xxx-xxx-5678' },
+      transferredAt: clock,
+    };
+    await sim('auto1', { type: 'image', imageBase64: FAKE_JPEG });
+    expect(verifier.calls).toBe(1);
+    expect((await ctx.db.query.bookings.findFirst({ where: eq(bookings.id, booking.id) }))!.status).toBe('confirmed');
+    expect((await lastOut('auto1')).altText).toContain('You’re booked');
+  });
+
+  it('a failed check leaves the booking in payment_review with the usual reply', async () => {
+    const booking = await toAwaitingPayment('auto2');
+    verifier.result = { transRef: 'FLOW-2', amountSatang: 1, receiver: { proxy: 'xxx-xxx-5678' }, transferredAt: clock };
+    await sim('auto2', { type: 'image', imageBase64: FAKE_JPEG });
+    expect((await ctx.db.query.bookings.findFirst({ where: eq(bookings.id, booking.id) }))!.status).toBe('payment_review');
+    expect((await lastOut('auto2')).text).toContain('checking your payment');
+  });
+
+  it('a passing slip after the hold ran out goes to review as late_slip, before the expiry sweep ran', async () => {
+    const booking = await toAwaitingPayment('auto3');
+    const paidAt = clock;
+    const held = (await ctx.db.query.bookings.findFirst({ where: eq(bookings.id, booking.id) }))!;
+    expect(held.status).toBe('awaiting_payment');
+    // Past the hold, but no hold-expiry sweep has run: the booking is still awaiting_payment.
+    clock = new Date(held.holdExpiresAt!.getTime() + 60_000);
+    verifier.result = { transRef: 'FLOW-3', amountSatang: booking.depositSatang, receiver: { proxy: 'xxx-xxx-5678' }, transferredAt: paidAt };
+    await sim('auto3', { type: 'image', imageBase64: FAKE_JPEG });
+    expect(verifier.calls).toBe(1);
+    expect((await ctx.db.query.bookings.findFirst({ where: eq(bookings.id, booking.id) }))!.status).toBe('payment_review');
+    const review = await ctx.db.select().from(events).where(and(eq(events.bookingId, booking.id), eq(events.type, 'slip.review')));
+    expect(review.map((e) => (e.props as { code: string }).code)).toEqual(['late_slip']);
+  });
+});
+
 describe('security', () => {
   it('rejects the dashboard API without a session', async () => {
     expect((await req(staffUrl('demo', '/night'))).status).toBe(401);
@@ -203,7 +268,82 @@ describe('intents', () => {
     ['link A1B2C3D4', 'staff_link'],
     ['link A1B2C3', 'unknown'], // B5: the old 6-character code no longer links
     ['🔥🔥', 'unknown'],
+    ['please delete my data', 'remove_data'], // B10b
+    ['ขอลบข้อมูลของฉัน', 'remove_data'],
+    ['STOP', 'stop_marketing'],
+    ['ยกเลิกรับข่าวสาร', 'stop_marketing'],
+    ['I can’t stop dancing, book a table', 'book'],
   ])('%s → %s', (text, kind) => {
     expect(detectIntent(text).kind).toBe(kind);
+  });
+});
+
+describe('guest data removal and marketing opt-out (B10b)', () => {
+  const labels = (msg: any): string[] => msg.quickReply.items.map((i: any) => i.action.data ?? i.action.uri);
+  const pendingRemovals = () => ctx.db.select().from(removalRequests).where(eq(removalRequests.clubId, ctx.club.id));
+  const eventsOf = (type: string) => ctx.db.select().from(events).where(eq(events.type, type));
+
+  it('removal keyword and menu item create a removal request', async () => {
+    // Keyword: one confirm prompt, and nothing is written until the tap.
+    await sim('rm1', { type: 'text', text: 'please delete my data' });
+    expect(labels(await lastOut('rm1'))).toEqual(['a=remove_confirm']);
+    expect(await pendingRemovals()).toHaveLength(0);
+    await sim('rm1', { type: 'postback', data: 'a=remove_confirm' });
+    expect((await lastOut('rm1')).text).toContain('removed within a day');
+    expect(await pendingRemovals()).toHaveLength(1);
+
+    // Menu item: "My data" on the main menu, then "Remove my data", then the same confirm tap.
+    await sim('rm2', { type: 'text', text: 'hello' });
+    expect(labels(await lastOut('rm2'))).toContain('a=privacy');
+    await sim('rm2', { type: 'postback', data: 'a=privacy' });
+    expect(labels(await lastOut('rm2'))).toEqual(['a=stop', 'a=remove']);
+    await sim('rm2', { type: 'postback', data: 'a=remove' });
+    expect(labels(await lastOut('rm2'))).toEqual(['a=remove_confirm']);
+    await sim('rm2', { type: 'postback', data: 'a=remove_confirm' });
+    await sim('rm2', { type: 'postback', data: 'a=remove_confirm' }); // a second tap adds no row
+
+    const rows = await pendingRemovals();
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((r) => r.guestId)).size).toBe(2);
+    expect(rows.every((r) => r.channel === 'line' && r.completedAt === null)).toBe(true);
+    expect(await eventsOf('guest.removal_requested')).toHaveLength(2);
+  });
+
+  it('stop keyword records the opt-out and emits marketing.opted_out', async () => {
+    await sim('st1', { type: 'text', text: 'stop' });
+    expect((await lastOut('st1')).text).toContain('won’t get promotional messages');
+    const rows = await ctx.db.select().from(notices).where(eq(notices.clubId, ctx.club.id));
+    const optOut = rows.filter((r) => r.purpose === 'marketing');
+    expect(optOut).toHaveLength(1);
+    expect(optOut[0]).toMatchObject({ purpose: 'marketing', channel: 'line' });
+    expect(optOut[0]!.withdrawnAt).toEqual(clock);
+    const guestId = optOut[0]!.guestId;
+    expect(await hasMarketingOptOut(ctx.db, ctx.club.id, guestId)).toBe(true);
+    const evs = await eventsOf('marketing.opted_out');
+    expect(evs).toHaveLength(1);
+    expect(evs[0]!.guestId).toBe(guestId);
+
+    // Typed again, or from the menu: no second row or event.
+    await sim('st1', { type: 'text', text: 'STOP' });
+    await sim('st1', { type: 'postback', data: 'a=stop' });
+    expect(await eventsOf('marketing.opted_out')).toHaveLength(1);
+    // Another guest is not opted out.
+    await sim('st2', { type: 'text', text: 'hello' });
+    const other = (await eventsOf('guest.first_seen')).find((e) => e.guestId !== guestId)!;
+    expect(await hasMarketingOptOut(ctx.db, ctx.club.id, other.guestId!)).toBe(false);
+  });
+
+  it('during a human handoff a typed stop still opts out at once, and the bot stays quiet', async () => {
+    await sim('st3', { type: 'text', text: 'can i talk to a person' });
+    const conv = (await ctx.db.query.conversations.findFirst({ where: eq(conversations.clubId, ctx.club.id) }))!;
+    expect(conv.mode).toBe('human');
+    const outBefore = (await transcript('st3')).filter((m) => m.direction === 'out').length;
+    await sim('st3', { type: 'text', text: 'stop' });
+    expect((await transcript('st3')).filter((m) => m.direction === 'out').length).toBe(outBefore);
+    expect(await hasMarketingOptOut(ctx.db, ctx.club.id, conv.guestId)).toBe(true);
+    expect(await eventsOf('marketing.opted_out')).toHaveLength(1);
+    // A tap on the bot's remove-confirm button still files the request.
+    await sim('st3', { type: 'postback', data: 'a=remove_confirm' });
+    expect(await pendingRemovals()).toHaveLength(1);
   });
 });

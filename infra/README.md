@@ -180,13 +180,13 @@ ORDER BY n DESC;
 
 Alert when any club has 5 or more rows in 15 minutes. A burst of `webhook_bad_signature` for one club after a console change usually means a wrong channel secret.
 
-`infra/check-webhook-errors.sh` runs this check. It alerts when a club has `THRESHOLD` (default 5) or more errors in `WINDOW_MIN` (default 15) minutes, or when errors exceed `MAX_RATE_PCT` (default 5%) of that club's inbound messages in the window (only when the club had at least `MIN_INBOUND`, default 20, inbound messages). It reads the compose database through `docker compose exec`, or `DATABASE_URL` when set. Exit code 0 is ok, 1 is an alert, 2 means the check could not run (that alerts too). It calls `ALERT_URL` on an alert and `OK_URL` on success, so a heartbeat monitor also catches a check that stopped running:
+`infra/check-webhook-errors.sh` runs this check. It alerts when a club has `THRESHOLD` (default 5) or more errors in `WINDOW_MIN` (default 15) minutes, or when errors exceed `MAX_RATE_PCT` (default 5%) of that club's LINE webhook deliveries in the window (only when the club had at least `MIN_INBOUND`, default 20, deliveries). It reads the compose database through `docker compose exec`, or `DATABASE_URL` when set. Exit code 0 is ok, 1 is an alert, 2 means the check could not run (that alerts too). It calls `ALERT_URL` on an alert and `OK_URL` on success, so a heartbeat monitor also catches a check that stopped running:
 
 ```sh
 */5 * * * * cd /srv/club && ALERT_URL=https://hc-ping.com/<uuid>/fail OK_URL=https://hc-ping.com/<uuid> infra/check-webhook-errors.sh >> /var/log/club-webhook-check.log 2>&1
 ```
 
-Until B3 adds `raw_webhooks`, the denominator is inbound rows in `messages`. A signature failure writes no message, so the absolute threshold is what catches a wrong channel secret.
+The denominator is the club's LINE deliveries in `raw_webhooks` (B3), which include deliveries that failed the signature check, so a wrong channel secret shows as a high rate as well as through the absolute threshold.
 
 ### Peak-load test (spec §13 Peak load)
 

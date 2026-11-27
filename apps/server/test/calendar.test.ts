@@ -1,9 +1,11 @@
 import { and, eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Db } from '../src/db/client.js';
-import { calendarDays } from '../src/db/schema.js';
+import { calendarDays, nights } from '../src/db/schema.js';
 import { CALENDAR_SEED } from '../src/data/calendar-seed.js';
 import { alcoholBanDates, CalendarDayError, seedCalendarDays, upsertCalendarDay } from '../src/data/calendar.js';
+import { runNightsJob } from '../src/jobs/nights.js';
+import { FIXTURE_CLUB_ID } from './fixtures/club.js';
 import { setupDb } from './helpers.js';
 
 let db: Db;
@@ -72,6 +74,19 @@ describe('calendar days (plan B13)', () => {
     expect(ban!.notes).toBe('checked by hand');
   });
 
-  // Needs B8b's nights job (jobs/nights.ts ensureNights), not landed yet. B8b reads alcoholBanDates.
-  it.todo('the next nights job run closes a new alcohol-ban day on rows nobody edited');
+  it('the next nights job run closes a new alcohol-ban day on rows nobody edited', async () => {
+    const at = new Date('2026-11-27T08:00:00Z'); // Friday 15:00 Bangkok; the fixture club opens Wed-Sat
+    const night = (date: string) =>
+      db.query.nights.findFirst({ where: and(eq(nights.clubId, FIXTURE_CLUB_ID), eq(nights.date, date)) });
+    await runNightsJob(db, at);
+    expect(await night('2026-12-02')).toMatchObject({ status: 'open', closedReason: null });
+    expect(await night('2026-12-03')).toMatchObject({ status: 'open' });
+    // A person edited Thursday's row (A9 calendar): the job leaves it alone.
+    await db.update(nights).set({ eventName: 'Guest DJ', editedBy: 'user_staff' }).where(and(eq(nights.clubId, FIXTURE_CLUB_ID), eq(nights.date, '2026-12-03')));
+    await upsertCalendarDay(db, { date: '2026-12-02', kind: 'alcohol_ban', name: 'Election' });
+    await upsertCalendarDay(db, { date: '2026-12-03', kind: 'alcohol_ban', name: 'Election' });
+    await runNightsJob(db, at);
+    expect(await night('2026-12-02')).toMatchObject({ status: 'closed', closedReason: 'alcohol_ban' });
+    expect(await night('2026-12-03')).toMatchObject({ status: 'open', eventName: 'Guest DJ' });
+  });
 });

@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Db } from '../src/db/client.js';
-import { messages, opsEvents, type Club } from '../src/db/schema.js';
+import { recordRawWebhook } from '../src/data/raw-webhooks.js';
+import { opsEvents, type Club } from '../src/db/schema.js';
 import { newId } from '../src/lib/util.js';
 import { setupTwoClubs } from './helpers.js';
 
@@ -57,9 +58,11 @@ async function seed(errors: number, inbound: number) {
   // An error outside the window and a non-error kind are not counted.
   await db.insert(opsEvents).values({ id: newId(), clubId: clubA.id, kind: 'send_failed', detail: {}, at: new Date(Date.now() - 60 * 60_000) });
   await db.insert(opsEvents).values({ id: newId(), clubId: clubA.id, kind: 'line_setup', detail: {}, at });
+  // The denominator is LINE deliveries in raw_webhooks (B3); other channels are not counted.
   for (let i = 0; i < inbound; i++) {
-    await db.insert(messages).values({ id: newId(), clubId: clubA.id, direction: 'in', kind: 'text', payload: { text: 'hi' }, createdAt: at });
+    await recordRawWebhook(db, { clubId: clubA.id, channel: 'line', body: { events: [] }, signatureOk: true, receivedAt: at });
   }
+  await recordRawWebhook(db, { clubId: clubA.id, channel: 'pos:papaya', body: {}, signatureOk: true, receivedAt: at });
 }
 
 /** Runs the script's SQL on PGlite and prints rows the way `psql -AtF '|'` does. */
@@ -83,7 +86,7 @@ async function runScript(out: string, env: Record<string, string> = {}): Promise
 }
 
 describe('webhook error-rate alert (plan A12, infra/check-webhook-errors.sh)', () => {
-  it('the query counts errors in the window and inbound messages per club', async () => {
+  it('the query counts errors in the window and LINE deliveries per club', async () => {
     await seed(3, 40);
     expect(await psqlOutput()).toBe(`${clubA.id}|3|40|7.5|send_failed`);
   });

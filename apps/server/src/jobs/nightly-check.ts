@@ -1,9 +1,9 @@
 import { and, eq, gte, lt, sql } from 'drizzle-orm';
+import { recordOps } from '../data/ops.js';
 import type { Db } from '../db/client.js';
 import { testRowsInAnalytics } from '../data/analytics.js';
-import { clubs, events, nights, opsEvents, platformFlags, type Club } from '../db/schema.js';
+import { clubs, events, nights, platformFlags, type Club } from '../db/schema.js';
 import { addDays, bangkokParts, currentNightDate, weekdayOf } from '../lib/time.js';
-import { newId } from '../lib/util.js';
 
 /**
  * The nightly data checks (plan B2, spec §14.2 "Nightly checks"). Each finding writes an
@@ -32,7 +32,7 @@ function rowsOf<T>(res: unknown): T[] {
 }
 
 async function report(db: Db, clubId: string | null, check: string, detail: Record<string, unknown>, now: Date) {
-  await db.insert(opsEvents).values({ id: newId(), clubId, kind: 'bot_error', detail: { check, ...detail }, at: now });
+  await recordOps(db, clubId, 'bot_error', { check, ...detail }, now);
 }
 
 /** True when the club was open on `nightDate`: an open weekday, not a closed date, and no closed `nights` row. */

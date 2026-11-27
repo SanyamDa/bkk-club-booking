@@ -13,13 +13,15 @@ import {
   setRunningLate,
   getBookingView,
   holdTable,
-  isNightBookable,
+  isNightOpen,
   paxRange,
   recordSlip,
   requestDeposit,
   SELF_BOOK_MAX_PAX,
-  upcomingNights,
+  bookableNights,
 } from '../bookings/service.js';
+import { verifySlip, type SlipVerifier } from '../bookings/slip-verify.js';
+import { startGatewayDeposit, type PaymentGateways } from '../integrations/payments/gateway.js';
 import type { Db } from '../db/client.js';
 import { isUniqueViolation } from '../db/client.js';
 import {
@@ -28,10 +30,12 @@ import {
   guests,
   messages as messagesTable,
   tables as tablesTable,
+  platformFlags,
   type Club,
   type Conversation,
   type Guest,
 } from '../db/schema.js';
+import { GLOBAL_STOP_FLAG, isGloballyStopped } from '../platform/support.js';
 import type { LineGateway, Message } from '../line/gateway.js';
 import type { Outbox } from '../line/outbox.js';
 import { formatClock, formatNight } from '../lib/time.js';
@@ -40,6 +44,9 @@ import { newId } from '../lib/util.js';
 import { langOf, t, type Lang } from './i18n.js';
 import { detectIntent, testerCodeIn } from './intents.js';
 import { emit } from '../data/events.js';
+import { recordMarketingOptOut, requestRemoval } from '../data/removal.js';
+import { startEpisode, type HandoffTrigger } from '../chat/episodes.js';
+import { getConversationForClub } from '../chat/conversations.js';
 import { isTestContext, isTestGuestAtCreate, redeemTesterCode } from '../data/test-flag.js';
 import type { Links } from './links.js';
 import * as M from './messages.js';
@@ -56,6 +63,10 @@ export interface BotDeps {
   log: (msg: string, err?: unknown) => void;
   /** B16: AI answers for free text; null or absent keeps the keyword rules and the menu. */
   ai?: ModelClient | null;
+  /** B9: automatic slip verification; absent or null = every slip goes to staff review. */
+  slipVerifier?: SlipVerifier | null;
+  /** A20b: payment gateways; the first one takes the deposit when the club's `payment_gateway` switch is on. */
+  payments?: PaymentGateways;
 }
 
 interface Turn {
@@ -67,6 +78,8 @@ interface Turn {
   lang: Lang;
   now: Date;
   replyToken?: string;
+  /** The inbound `messages` row of this turn (B14b: the first message of a takeover). */
+  inboundId?: string;
 }
 
 /** Sends to the guest. The reply token is single-use, so later sends in the same turn are pushes. */
@@ -81,72 +94,129 @@ const staff = (turn: Pick<Turn, 'deps' | 'gateway' | 'club'>, msgs: Message[]) =
 
 // ---------- Entry point ----------
 
-/** Handles one LINE webhook event for one club. Never throws: errors are logged and the guest gets the menu. */
+/** Handles one LINE webhook event for one club. Never throws: errors are logged (kept for `http/dev.ts`). */
 export async function handleEvent(deps: BotDeps, club: Club, gateway: LineGateway, event: webhook.Event): Promise<void> {
   try {
-    if (event.source?.type === 'group') {
-      await handleGroupEvent(deps, club, gateway, event);
-      return;
-    }
-    if (event.source?.type !== 'user' || !event.source.userId) return;
-    if (event.type !== 'message' && event.type !== 'postback' && event.type !== 'follow' && event.type !== 'unfollow') return;
-
-    const now = deps.now();
-    let guest = await upsertGuest(deps.db, gateway, club, event.source.userId);
-    if (!(await logInbound(deps.db, club, guest, event))) return; // duplicate delivery
-
-    if (event.type === 'unfollow') {
-      // Guest blocked the club's account: stop pushing to them (it would fail and waste quota).
-      await deps.db.update(guests).set({ unfollowedAt: now, updatedAt: now }).where(eq(guests.id, guest.id));
-      return;
-    }
-    if (guest.unfollowedAt) {
-      [guest] = (await deps.db
-        .update(guests)
-        .set({ unfollowedAt: null, updatedAt: now })
-        .where(eq(guests.id, guest.id))
-        .returning()) as [Guest];
-    }
-    let conv = await getConversation(deps.db, club, guest);
-    const turn: Turn = {
-      deps,
-      club,
-      gateway,
-      guest,
-      conv,
-      lang: langOf(guest.lang),
-      now,
-      replyToken: 'replyToken' in event ? event.replyToken : undefined,
-    };
-
-    if (event.type === 'follow') {
-      await send(turn, M.greeting(club, turn.lang));
-      return;
-    }
-
-    // Human handoff: the bot stays quiet until staff resolve it or it times out.
-    if (conv.mode === 'human') {
-      const timeoutMs = club.settings.handoffTimeoutMinutes * 60_000;
-      if (conv.handoffRequestedAt && now.getTime() - conv.handoffRequestedAt.getTime() > timeoutMs) {
-        conv = await updateConversation(deps.db, conv.id, { mode: 'bot', handoffRequestedAt: null, handoffReason: null });
-        turn.conv = conv;
-      } else {
-        return;
-      }
-    }
-
-    if (event.type === 'postback') {
-      await handlePostback(turn, event.postback.data, event.postback.params);
-      return;
-    }
-
-    const m = event.message;
-    if (m.type === 'text') await handleText(turn, m.text);
-    else if (m.type === 'image') await handleImage(turn, m.id);
-    else await send(turn, [M.menu(club, turn.lang)]);
+    await processEvent(deps, club, gateway, event);
   } catch (err) {
     deps.log(`Bot error for club ${club.id}`, err);
   }
+}
+
+export interface ProcessEventOptions {
+  /** Dry-run replay (B3): run the turn even when this event's turn already completed. */
+  ignoreDedupe?: boolean;
+}
+
+/**
+ * One LINE webhook event (plan B3). Throws, so `processDelivery` can record the error on the raw
+ * row. Dedupe is per `webhookEventId`: an event whose inbound row has `processed_at` set is skipped;
+ * an inbound row with `processed_at` NULL is a turn that crashed, so the row is reused and the turn runs.
+ */
+export async function processEvent(
+  deps: BotDeps,
+  club: Club,
+  gateway: LineGateway,
+  event: webhook.Event,
+  opts: ProcessEventOptions = {},
+): Promise<void> {
+  if (event.source?.type === 'group') {
+    await handleGroupEvent(deps, club, gateway, event);
+    return;
+  }
+  if (event.source?.type !== 'user' || !event.source.userId) return;
+  if (event.type !== 'message' && event.type !== 'postback' && event.type !== 'follow' && event.type !== 'unfollow') return;
+
+  const now = deps.now();
+  const guest = await upsertGuest(deps.db, gateway, club, event.source.userId);
+  const inbound = await logInbound(deps.db, club, guest, event);
+  if (inbound.processedAt && !opts.ignoreDedupe) return; // redelivery of a finished turn
+  await runTurn(deps, club, gateway, event, guest, now, inbound.id);
+  // Last step of a completed turn: a later redelivery of this event is a no-op.
+  await deps.db.update(messagesTable).set({ processedAt: deps.now() }).where(eq(messagesTable.id, inbound.id));
+}
+
+/**
+ * The bot pause in force, if any (B3): `club:<bot_paused_at>` for a club pause, `global:<updated_at>`
+ * for the platform-wide stop. The key names one pause, so the staff alert goes out once per pause.
+ */
+async function activePause(db: Db, club: Club): Promise<string | null> {
+  if (club.botPaused) return `club:${club.botPausedAt?.toISOString() ?? 'unknown'}`;
+  if (!(await isGloballyStopped(db))) return null;
+  const flag = await db.query.platformFlags.findFirst({ where: eq(platformFlags.key, GLOBAL_STOP_FLAG) });
+  return `global:${flag?.updatedAt.toISOString() ?? 'unknown'}`;
+}
+
+type GuestEvent = webhook.MessageEvent | webhook.PostbackEvent | webhook.FollowEvent | webhook.UnfollowEvent;
+
+async function runTurn(deps: BotDeps, club: Club, gateway: LineGateway, event: GuestEvent, guestIn: Guest, now: Date, inboundId?: string) {
+  let guest = guestIn;
+  if (event.type === 'unfollow') {
+    // Guest blocked the club's account: stop pushing to them (it would fail and waste quota).
+    await deps.db.update(guests).set({ unfollowedAt: now, updatedAt: now }).where(eq(guests.id, guest.id));
+    return;
+  }
+  if (guest.unfollowedAt) {
+    [guest] = (await deps.db
+      .update(guests)
+      .set({ unfollowedAt: null, updatedAt: now })
+      .where(eq(guests.id, guest.id))
+      .returning()) as [Guest];
+  }
+  let conv = await getConversation(deps.db, club, guest);
+  const turn: Turn = {
+    deps,
+    club,
+    gateway,
+    guest,
+    conv,
+    lang: langOf(guest.lang),
+    now,
+    replyToken: 'replyToken' in event ? event.replyToken : undefined,
+    inboundId,
+  };
+
+  // B3 bot pause (club pause or global stop): the inbound row is stored, the guest gets nothing,
+  // and the staff group is alerted once per conversation per pause.
+  const pause = await activePause(deps.db, club);
+  if (pause) {
+    if (conv.state.pauseAlertedFor !== pause) {
+      const who = guest.name ?? guest.displayName ?? 'A guest';
+      await staff(turn, [
+        M.plain(`Bot is paused: ${who} sent a message and got no automatic reply. Please answer from the inbox.\nบอทหยุดชั่วคราว: ${who} ส่งข้อความมาและยังไม่ได้รับคำตอบ กรุณาตอบจากกล่องข้อความ`),
+      ]);
+      await updateConversation(deps.db, conv.id, { state: { ...conv.state, pauseAlertedFor: pause } });
+    }
+    return;
+  }
+
+  if (event.type === 'follow') {
+    await send(turn, M.greeting(club, turn.lang));
+    return;
+  }
+
+  // Human handoff: the bot stays quiet until staff resolve it or the B14b timeout job hands it back.
+  // B10b (spec §5.5): a marketing opt-out applies at once, so a typed stop is recorded silently
+  // (the host sees the message), and a tap on the bot's own stop or remove-confirm button still works.
+  if (conv.mode === 'human') {
+    if (event.type === 'message' && event.message.type === 'text' && detectIntent(event.message.text).kind === 'stop_marketing') {
+      await recordMarketingOptOut(deps.db, club, guest, now);
+    } else if (event.type === 'postback') {
+      const a = new URLSearchParams(event.postback.data).get('a');
+      if (a === 'stop' || a === 'remove_confirm') await handlePostback(turn, event.postback.data, event.postback.params);
+    }
+    return;
+  }
+
+  if (event.type === 'postback') {
+    await handlePostback(turn, event.postback.data, event.postback.params);
+    return;
+  }
+
+  const m = event.message;
+  if (m.type === 'text') await handleText(turn, m.text);
+  else if (m.type === 'image') await handleImage(turn, m.id);
+  else await send(turn, [M.menu(club, turn.lang)]);
 }
 
 // ---------- Staff group linking ----------
@@ -204,7 +274,7 @@ async function handleText(turn: Turn, text: string) {
       return;
     }
     case 'handoff':
-      await requestHandoff(turn, `Guest said: "${text.slice(0, 120)}"`);
+      await requestHandoff(turn, 'guest_request', `Guest said: "${text.slice(0, 120)}"`);
       return;
     case 'my_booking':
       await showMyBooking(turn);
@@ -219,9 +289,27 @@ async function handleText(turn: Turn, text: string) {
     case 'location':
       await send(turn, [M.plain(`${turn.club.settings.address}\n${turn.club.settings.mapUrl}`, M.menuQuickReplies(turn.club, turn.lang))]);
       return;
+    case 'remove_data':
+      await send(turn, [M.removeConfirm(turn.lang)]);
+      return;
+    case 'stop_marketing':
+      await optOutMarketing(turn);
+      return;
     default:
       await handleFreeText(turn, text);
   }
+}
+
+// ---------- B10b: data removal and marketing opt-out ----------
+
+async function optOutMarketing(turn: Turn) {
+  await recordMarketingOptOut(turn.deps.db, turn.club, turn.guest, turn.now);
+  await send(turn, [M.plain(t(turn.lang, 'optedOut'), M.menuQuickReplies(turn.club, turn.lang))]);
+}
+
+async function confirmRemoval(turn: Turn) {
+  await requestRemoval(turn.deps.db, turn.club, turn.guest, turn.now);
+  await send(turn, [M.plain(t(turn.lang, 'removeRequested'))]);
 }
 
 // ---------- Postbacks ----------
@@ -258,7 +346,19 @@ async function handlePostback(turn: Turn, data: string, params?: webhook.Postbac
       await showMyBooking(turn);
       return;
     case 'host':
-      await requestHandoff(turn, 'Guest tapped "Talk to a host"');
+      await requestHandoff(turn, 'guest_request', 'Guest tapped "Talk to a host"');
+      return;
+    case 'privacy':
+      await send(turn, [M.myData(turn.lang)]);
+      return;
+    case 'stop':
+      await optOutMarketing(turn);
+      return;
+    case 'remove':
+      await send(turn, [M.removeConfirm(turn.lang)]);
+      return;
+    case 'remove_confirm':
+      await confirmRemoval(turn);
       return;
     case 'late': // B10
       await runningLate(turn, p.get('b') ?? '', p.get('m'));
@@ -340,7 +440,7 @@ async function startBooking(turn: Turn, opts: { force?: boolean } = {}) {
       return;
     }
   }
-  const nights = upcomingNights(turn.club, turn.now, 4);
+  const nights = await bookableNights(turn.deps.db, turn.club, turn.now, 4);
   await send(turn, [M.askNight(turn.club, turn.lang, nights, turn.now)]);
 }
 
@@ -360,15 +460,44 @@ async function continueBooking(turn: Turn, bookingId: string) {
     return;
   }
   if (b.status === 'awaiting_payment' && !expired) {
+    // A gateway deposit gets its same charge again (createCharge is idempotent per deposit).
+    if (view.deposit?.method === 'gateway' && (await sendGatewayPayment(turn, b.id))) return;
     await send(turn, M.payment(turn.club, turn.lang, view, turn.deps.links.promptpayQr(turn.club, b)));
     return;
   }
   await startBooking(turn, { force: true });
 }
 
+/** Where the provider sends the guest after paying: back into LINE, where the confirmation arrives. */
+export const PAYMENT_RETURN_URL = 'https://line.me/R/';
+
+/**
+ * A20b: when the club's `payment_gateway` switch is on and a gateway is configured, opens (or
+ * re-opens) the charge and sends the guest the payment link. Returns false when the caller should
+ * keep the PromptPay slip flow: switch off, no gateway, nothing to pay, or the provider failed.
+ * Booking errors (hold expired, details missing) are rethrown for the caller.
+ */
+async function sendGatewayPayment(turn: Turn, bookingId: string): Promise<boolean> {
+  const gateway = Object.values(turn.deps.payments ?? {})[0];
+  if (!gateway) return false;
+  let charge;
+  try {
+    charge = await startGatewayDeposit(turn.deps.db, turn.club, gateway, bookingId, PAYMENT_RETURN_URL, turn.now);
+  } catch (err) {
+    if (err instanceof BookingError) throw err;
+    turn.deps.log(`Payment gateway ${gateway.provider} failed; falling back to the slip flow`, err);
+    return false;
+  }
+  if (!charge) return false;
+  const view = await getBookingView(turn.deps.db, { clubId: turn.club.id, id: bookingId });
+  if (!view) return false;
+  await send(turn, [M.paymentLink(turn.club, turn.lang, view, charge.payUrl)]);
+  return true;
+}
+
 async function chooseNight(turn: Turn, date: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isNightBookable(turn.club, date, turn.now)) {
-    const nights = upcomingNights(turn.club, turn.now, 4);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !(await isNightOpen(turn.deps.db, turn.club, date, turn.now))) {
+    const nights = await bookableNights(turn.deps.db, turn.club, turn.now, 4);
     await send(turn, [
       M.plain(t(turn.lang, 'nightClosed', { night: /^\d{4}-\d{2}-\d{2}$/.test(date) ? formatNight(date, turn.lang) : date })),
       M.askNight(turn.club, turn.lang, nights, turn.now),
@@ -385,7 +514,7 @@ async function choosePax(turn: Turn, key: string) {
   if (!range || !nightDate) return startBooking(turn, { force: true });
   if (range.min > SELF_BOOK_MAX_PAX) {
     await send(turn, [M.plain(t(turn.lang, 'bigGroup'))]);
-    await requestHandoff(turn, `Large group (13+) for ${formatNight(nightDate, 'en')}`, { silent: true });
+    await requestHandoff(turn, 'large_group', `Large group (13+) for ${formatNight(nightDate, 'en')}`, { silent: true });
     return;
   }
   turn.conv = await updateConversation(turn.deps.db, turn.conv.id, { state: { nightDate, paxRange: key } });
@@ -444,6 +573,7 @@ async function confirm(turn: Turn, bookingId: string) {
   const view = await getBookingView(turn.deps.db, { clubId: turn.club.id, id: bookingId });
   if (!view || view.booking.guestId !== turn.guest.id) return startBooking(turn, { force: true });
   try {
+    if (view.booking.depositSatang > 0 && (await sendGatewayPayment(turn, bookingId))) return;
     const booking = await requestDeposit(turn.deps.db, turn.club, bookingId, turn.now);
     const fresh = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: booking.id }))!;
     if (booking.status === 'confirmed') {
@@ -454,7 +584,7 @@ async function confirm(turn: Turn, bookingId: string) {
     await send(turn, M.payment(turn.club, turn.lang, fresh, turn.deps.links.promptpayQr(turn.club, booking)));
   } catch (err) {
     if (err instanceof BookingError && err.code === 'hold_expired') {
-      const nights = upcomingNights(turn.club, turn.now, 4);
+      const nights = await bookableNights(turn.deps.db, turn.club, turn.now, 4);
       await send(turn, [M.plain(t(turn.lang, 'holdExpiredOnConfirm')), M.askNight(turn.club, turn.lang, nights, turn.now)]);
       return;
     }
@@ -498,11 +628,32 @@ async function handleImage(turn: Turn, messageId: string) {
   const relPath = join(turn.club.id, `${booking.id}-${turn.now.getTime()}.${ext}`);
   await writeFile(join(turn.deps.uploadsDir, relPath), data);
 
+  // Read before recordSlip clears holdExpiresAt: a hold that ran out but that the 30 s sweep has
+  // not expired yet is still a late slip (spec §5.2 step 6).
+  const lateSlip = booking.status === 'expired' || (booking.holdExpiresAt !== null && booking.holdExpiresAt <= turn.now);
   const { tableLost } = await recordSlip(turn.deps.db, turn.club, booking.id, relPath, turn.now);
+  // B9 (spec §11.2): verify automatically; a pass confirms, anything else stays in payment review.
+  if (!tableLost && turn.deps.slipVerifier) {
+    let verified = false;
+    try {
+      const out = await verifySlip(turn.deps.db, turn.club, booking.id, data, turn.deps.slipVerifier, turn.now, {
+        lateSlip,
+      });
+      verified = out.verified;
+    } catch (err) {
+      turn.deps.log(`slip verification failed for booking ${booking.id}`, err);
+    }
+    if (verified) {
+      const confirmed = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: booking.id }))!;
+      await send(turn, [M.confirmation(turn.club, turn.lang, confirmed, turn.deps.links.pass(confirmed.booking))]);
+      await staff(turn, [M.staffNewBooking(confirmed, 'confirmed')]);
+      return;
+    }
+  }
   await send(turn, [M.plain(t(turn.lang, tableLost ? 'slipTableLost' : 'slipReceived'))]);
   const view = (await getBookingView(turn.deps.db, { clubId: turn.club.id, id: booking.id }))!;
   await staff(turn, [M.staffNewBooking(view, 'review')]);
-  if (tableLost) await requestHandoff(turn, 'Paid after hold expired; table was taken. Reassign or refund.', { silent: true });
+  if (tableLost) await requestHandoff(turn, 'paid_after_expiry', 'Paid after hold expired; table was taken. Reassign or refund.', { silent: true });
 }
 
 // ---------- My booking / handoff ----------
@@ -570,7 +721,7 @@ async function handleFreeText(turn: Turn, text: string) {
         guest_request: 'Guest asked for a host',
       };
       const reason = `${why[out.reason]}: "${text.slice(0, 120)}"${out.summary ? `\n${out.summary}` : ''}`;
-      await requestHandoff(turn, reason, { topic: out.topic ?? out.reason });
+      await requestHandoff(turn, out.reason, reason, { topic: out.topic ?? out.reason });
       return;
     }
   }
@@ -580,7 +731,7 @@ async function handleFreeText(turn: Turn, text: string) {
 async function prefillBooking(turn: Turn, d: BookingDetails) {
   const current = await currentBookingForGuest(turn.deps.db, turn.club, turn.guest.id, turn.now);
   if (current || !d.date) return startBooking(turn);
-  if (!d.pax || !isNightBookable(turn.club, d.date, turn.now)) return chooseNight(turn, d.date);
+  if (!d.pax || !(await isNightOpen(turn.deps.db, turn.club, d.date, turn.now))) return chooseNight(turn, d.date);
   const key = paxKeyFor(d.pax);
   turn.conv = await updateConversation(turn.deps.db, turn.conv.id, { state: { nightDate: d.date } });
   const table = d.tableCode
@@ -592,13 +743,23 @@ async function prefillBooking(turn: Turn, d: BookingDetails) {
   await chooseTable(turn, table.id, d.date, d.pax);
 }
 
-/** `topic` (B16) is for B14b's `startEpisode`; until `chat/episodes.ts` exists the reason text carries it. */
-async function requestHandoff(turn: Turn, reason: string, opts: { silent?: boolean; topic?: string } = {}) {
-  turn.conv = await updateConversation(turn.deps.db, turn.conv.id, {
-    mode: 'human',
-    handoffRequestedAt: turn.now,
-    handoffReason: reason,
-  });
+/**
+ * B14b: the takeover is a `handoff_episodes` row started in `chat/episodes.ts`; `trigger` is its code.
+ * B16: `topic` is the AI's takeover topic (absent, the episode's topic is the trigger code).
+ */
+async function requestHandoff(turn: Turn, trigger: HandoffTrigger, reason: string, opts: { silent?: boolean; topic?: string } = {}) {
+  await turn.deps.db.transaction((tx) =>
+    startEpisode(tx, {
+      clubId: turn.club.id,
+      conversationId: turn.conv.id,
+      trigger,
+      reason,
+      topic: opts.topic ?? null,
+      firstMessageId: turn.inboundId ?? null,
+      now: turn.now,
+    }),
+  );
+  turn.conv = (await getConversationForClub(turn.deps.db, turn.club.id, turn.conv.id))!;
   if (!opts.silent) await send(turn, [M.plain(t(turn.lang, 'handoffAck'))]);
 
   const current = await currentBookingForGuest(turn.deps.db, turn.club, turn.guest.id, turn.now);
@@ -656,8 +817,12 @@ async function upsertGuest(db: Db, gateway: LineGateway, club: Club, lineUserId:
   }
 }
 
-/** Records the inbound event. Returns false if LINE already delivered it (webhooks can be redelivered). */
-async function logInbound(db: Db, club: Club, guest: Guest, event: webhook.Event): Promise<boolean> {
+/**
+ * Records the inbound event and returns its row. Idempotent on `(club_id, line_message_id)`: a
+ * redelivered event returns the row stored the first time (B3: the caller reads its `processed_at`).
+ * Uses ON CONFLICT DO NOTHING, never a caught unique violation, so it is safe inside a transaction.
+ */
+async function logInbound(db: Db, club: Club, guest: Guest, event: webhook.Event): Promise<{ id: string; processedAt: Date | null }> {
   const kind = event.type === 'message' ? event.message.type : event.type;
   const payload =
     event.type === 'message'
@@ -667,8 +832,9 @@ async function logInbound(db: Db, club: Club, guest: Guest, event: webhook.Event
       : event.type === 'postback'
         ? { data: event.postback.data, params: event.postback.params ?? null }
         : {};
-  try {
-    await db.insert(messagesTable).values({
+  const [row] = await db
+    .insert(messagesTable)
+    .values({
       id: newId(),
       clubId: club.id,
       guestId: guest.id,
@@ -676,12 +842,16 @@ async function logInbound(db: Db, club: Club, guest: Guest, event: webhook.Event
       kind,
       payload,
       lineMessageId: event.webhookEventId,
-    });
-    return true;
-  } catch (err) {
-    if (isUniqueViolation(err)) return false;
-    throw err;
-  }
+    })
+    .onConflictDoNothing()
+    .returning({ id: messagesTable.id, processedAt: messagesTable.processedAt });
+  if (row) return row;
+  const [found] = await db
+    .select({ id: messagesTable.id, processedAt: messagesTable.processedAt })
+    .from(messagesTable)
+    .where(and(eq(messagesTable.clubId, club.id), eq(messagesTable.lineMessageId, event.webhookEventId)))
+    .limit(1);
+  return found!;
 }
 
 async function getConversation(db: Db, club: Club, guest: Guest): Promise<Conversation> {
@@ -690,7 +860,7 @@ async function getConversation(db: Db, club: Club, guest: Guest): Promise<Conver
   try {
     const [c] = await db
       .insert(conversations)
-      .values({ id: newId(), clubId: club.id, guestId: guest.id, mode: 'bot', state: {} })
+      .values({ id: newId(), clubId: club.id, guestId: guest.id, state: {} })
       .returning();
     return c!;
   } catch (err) {

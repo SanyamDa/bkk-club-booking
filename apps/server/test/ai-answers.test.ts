@@ -8,7 +8,7 @@ import { guardAnswer } from '../src/brain/guard.js';
 import { createNote } from '../src/brain/notes.js';
 import { aiCostCapKey } from '../src/platform/club-stats.js';
 import { emit } from '../src/data/events.js';
-import { alerts, bookings, conversations, events, guests, messages, platformFlags, tables } from '../src/db/schema.js';
+import { alerts, bookings, conversations, events, guests, handoffEpisodes, messages, platformFlags, tables } from '../src/db/schema.js';
 import { callCostUsdMicros, type ModelReply, type ModelRequest } from '../src/brain/answer.js';
 import { FRIDAY_AFTERNOON, setupDb } from './helpers.js';
 import { adminCookie, testConfig } from './helpers/track-a.js';
@@ -225,7 +225,22 @@ describe('B16 AI answers', () => {
     const staff = (await staffTexts()).join('\n');
     expect(staff).toContain('Guest was overcharged last Friday.\nWants a refund of the cover fee.');
     expect(staff).not.toContain('Third line dropped.');
-    expect((await convOf('g1')).mode).toBe('human');
+    const conv = await convOf('g1');
+    expect(conv.mode).toBe('human');
+    // B14b: the takeover is a handoff_episodes row carrying the AI topic and the 2-line summary.
+    const episodes = await ctx.db.select().from(handoffEpisodes).where(eq(handoffEpisodes.conversationId, conv.id));
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0]).toMatchObject({ clubId: ctx.club.id, trigger: 'guest_request', topic: 'complaint', endedAt: null });
+    expect(episodes[0]!.reason).toContain('Guest was overcharged last Friday.\nWants a refund of the cover fee.');
+    expect(episodes[0]!.reason).not.toContain('Third line dropped.');
+  });
+
+  it('AI cost cap handoff opens an episode whose topic is the reason code', async () => {
+    await setCap(1_000, 1_000);
+    await say('g1', 'what should i wear');
+    const conv = await convOf('g1');
+    const episodes = await ctx.db.select().from(handoffEpisodes).where(eq(handoffEpisodes.conversationId, conv.id));
+    expect(episodes.map((e) => ({ trigger: e.trigger, topic: e.topic }))).toEqual([{ trigger: 'ai_cost_cap', topic: 'ai_cost_cap' }]);
   });
 
   it('ai.answered logs note ids', async () => {

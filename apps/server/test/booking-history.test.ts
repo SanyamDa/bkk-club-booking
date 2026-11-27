@@ -220,7 +220,10 @@ describe('scheduler (B2)', () => {
   it('buildScheduler registers every job', () => {
     const { ctx: app } = createApp(testConfig(), db, { bot: { now: () => now, log: () => {} } });
     expect(buildScheduler(app, () => now).names().sort()).toEqual(
-      ['alert-checks', 'brain-expiry', 'chatwoot-grant-sweep', 'club-report', 'hold-expiry', 'nightly-check', 'no-show', 'reminders'].sort(),
+      [
+        'alert-checks', 'brain-expiry', 'chatwoot-grant-sweep', 'club-report', 'handoff-timeout', 'hold-expiry', 'nightly-check',
+        'nights', 'no-show', 'reminders', 'removal', 'retention',
+      ].sort(),
     );
   });
 });

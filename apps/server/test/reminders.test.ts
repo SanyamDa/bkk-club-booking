@@ -6,6 +6,7 @@ import { auditLog, bookings, bookingStatusHistory, clubs, events, guests, messag
 import { buildScheduler } from '../src/jobs/index.js';
 import { releaseAt, releaseNow } from '../src/jobs/no-show.js';
 import { reminderDueAt, remindNow } from '../src/jobs/reminders.js';
+import { fastForward } from '../src/demo/reset.js';
 import { addDays } from '../src/lib/time.js';
 import { FRIDAY, FRIDAY_AFTERNOON, setupDb } from './helpers.js';
 import { adminCookie, testConfig } from './helpers/track-a.js';
@@ -266,16 +267,20 @@ describe('no-show job (B10)', () => {
     const chosen = await confirmedFor('f1');
     const other = await confirmedFor('f2', 'table_demo_B2');
 
-    expect(await remindNow(app.ctx, club.id, chosen.id, clock)).toBe(true);
+    // The demo control (B7 `fastForward`, widened by B10) runs `remindNow` / `releaseNow`.
+    expect((await fastForward(app.ctx, club.id, 'reminder', chosen.id, clock))?.id).toBe(chosen.id);
     expect((await bookingOf(chosen.id)).reminderSentAt).not.toBeNull();
     expect((await bookingOf(other.id)).reminderSentAt).toBeNull();
     expect(await eventsOf(chosen.id, 'reminder.sent')).toHaveLength(1);
-    expect(await remindNow(app.ctx, club.id, chosen.id, clock)).toBe(false); // once only
+    expect(await fastForward(app.ctx, club.id, 'reminder', chosen.id, clock)).toBeUndefined(); // once only
+    expect(await remindNow(app.ctx, club.id, chosen.id, clock)).toBe(false);
 
-    expect(await releaseNow(app.ctx, club.id, chosen.id, clock)).toBe(true);
+    const released = await fastForward(app.ctx, club.id, 'release', chosen.id, clock);
+    expect(released?.status).toBe('no_show');
     expect((await bookingOf(chosen.id)).status).toBe('no_show');
     expect((await bookingOf(chosen.id)).releasedAt).not.toBeNull();
     expect((await bookingOf(other.id)).status).toBe('confirmed');
+    expect(await fastForward(app.ctx, club.id, 'release', chosen.id, clock)).toBeUndefined();
 
     // Another club's id does nothing.
     expect(await releaseNow(app.ctx, 'club_other', other.id, clock)).toBe(false);

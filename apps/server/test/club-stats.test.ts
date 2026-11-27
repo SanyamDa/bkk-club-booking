@@ -22,6 +22,7 @@ import { newId } from '../src/lib/util.js';
 import { buildClubReport } from '../src/platform/club-report.js';
 import { aiCostCapKey, buildClubStats } from '../src/platform/club-stats.js';
 import { recordLineSetup } from '../src/platform/line-probe.js';
+import { seedFixtureClub } from './fixtures/club.js';
 import { setupTwoClubs } from './helpers.js';
 import { staffCookie, staffUrl, testConfig } from './helpers/track-a.js';
 
@@ -172,14 +173,57 @@ async function seedVeloraWeek() {
 describe('A16 club stats (Velora)', () => {
   beforeEach(async () => {
     ({ db, close } = await openDb({ dataDir: 'memory' }));
-    await seedDemoClub(db, {});
+    // The frozen fixture club (`club_demo`, status demo, tables V1/B1/T1...): B7's seedDemoClub now
+    // also seeds six weeks of Velora history, which the hand-counted week below must not mix with.
+    await seedFixtureClub(db);
     await seedVeloraWeek();
   });
   afterEach(async () => close());
 
-  // Plan A16: "figures match a hand-counted seeded Velora week". B7's Velora history seed is not on
-  // this branch; the week is hand-seeded on the seedDemoClub Velora club until B7 merges.
-  it.todo('figures match the hand-counted B7-seeded Velora history week (waits on B7 seed)');
+  // Plan A16: "figures match a hand-counted seeded Velora week". B7 seeds Velora's history
+  // deterministically: seeded on Wednesday 25 Nov 2026, the week of 16 Nov is four seeded nights
+  // (Wed 18 to Sat 21). The figures are pinned, and the booking ones are also counted from the raw rows.
+  it('figures match the hand-counted B7-seeded Velora history week', async () => {
+    const velora = await openDb({ dataDir: 'memory' });
+    try {
+      await seedDemoClub(velora.db, {}, new Date('2026-11-25T13:00:00Z'));
+      const s = await buildClubStats(velora.db, DEMO_CLUB_ID, FROM, TO);
+      expect(s.bookings).toEqual({ total: 44, bot: 39, manual: 5, cancelled: 2 });
+      expect(s.deposits).toEqual({ count: 42, satang: 22_000_000 });
+      expect(s.deflection).toMatchObject({ conversations: 33, deflected: 27 });
+      expect(s.takeoversByTopic).toEqual([
+        { topic: 'large_group', n: 2 },
+        { topic: 'dress_code', n: 1 },
+        { topic: 'parking', n: 1 },
+        { topic: 'private_room', n: 1 },
+        { topic: 'running_late', n: 1 },
+      ]);
+      expect(s.handoffResponse).toEqual({ medianMs: 4 * MIN, replied: 6, waiting: 0 });
+      expect(s.noShowRate).toBeCloseTo(3 / 43);
+      expect(s.minSpendBookedSatang).toBe(66_300_000);
+      expect(s.messagesByChannel).toEqual([{ channel: 'line', in: 34, out: 6 }]);
+
+      // The same figures counted straight from the seeded rows.
+      const week = (await velora.db.select().from(bookings).where(eq(bookings.clubId, DEMO_CLUB_ID))).filter(
+        (b) => b.nightDate >= FROM && b.nightDate <= TO,
+      );
+      const held = week.filter((b) => ['confirmed', 'arrived', 'completed', 'no_show'].includes(b.status));
+      expect(held).toHaveLength(s.bookings.total);
+      expect(week.filter((b) => b.status === 'cancelled')).toHaveLength(s.bookings.cancelled);
+      expect(held.filter((b) => b.status === 'no_show')).toHaveLength(3);
+      const paid = (await velora.db.select().from(deposits).where(eq(deposits.clubId, DEMO_CLUB_ID))).filter(
+        (d) => d.status === 'verified' && held.some((b) => b.id === d.bookingId),
+      );
+      expect(paid).toHaveLength(s.deposits.count);
+      expect(paid.reduce((sum, d) => sum + d.amountSatang, 0)).toBe(s.deposits.satang);
+      const episodes = (await velora.db.select().from(handoffEpisodes).where(eq(handoffEpisodes.clubId, DEMO_CLUB_ID))).filter(
+        (e) => e.startedAt >= new Date('2026-11-16T00:00:00+07:00') && e.startedAt < new Date('2026-11-23T06:00:00+07:00'),
+      );
+      expect(episodes).toHaveLength(s.takeoversByTopic.reduce((sum, t) => sum + t.n, 0));
+    } finally {
+      await velora.close();
+    }
+  });
 
   it('figures match a hand-counted seeded Velora week', async () => {
     const s = await buildClubStats(db, DEMO_CLUB_ID, FROM, TO);

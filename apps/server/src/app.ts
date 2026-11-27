@@ -11,6 +11,7 @@ import { isDevOrTest, type Config } from './config.js';
 import type { Db } from './db/client.js';
 import { jsonLog } from './lib/log.js';
 import { adminRoutes } from './http/admin/index.js';
+import { demoRoutes } from './http/demo.js';
 import { onboardPublicRoutes } from './http/admin/onboarding.js';
 import { authRoutes } from './http/auth.js';
 import { integrationRoutes } from './http/integrations.js';
@@ -30,6 +31,8 @@ import { registerStaffAlertSender } from './platform/alerts.js';
 import { fakeLiffEndpointUpdater, fakeSetupClients, realLiffEndpointUpdater, realSetupClients } from './line/setup.js';
 import { fakeLineTokenIssuer, realLineTokenIssuer } from './line/tokens.js';
 import { chatwootClient } from './integrations/chatwoot/provision.js';
+import { configuredPaymentGateways } from './integrations/payments/opn.js';
+import { paymentWebhookRoutes } from './http/payments.js';
 
 /** What `opts.onResponse` sees for every JSON response (test hook: secret-leak checks). */
 export interface ResponseRecord {
@@ -56,10 +59,13 @@ export function createApp(
     chatwootFetch?: typeof fetch;
     /** fetch used for live POS calls (A19, check-in bill); tests pass a fake POS. */
     posFetch?: AppContext['posFetch'];
+    /** Payment gateways (A20b); default: Opn from config when both Opn keys are set. */
+    payments?: AppContext['payments'];
   } = {},
 ) {
   // Structured JSON log lines on stdout (A7) unless the caller (tests) passes its own logger.
-  const deps = buildBotDeps(config, db, { ...opts.bot, log: opts.bot?.log ?? jsonLog });
+  const payments = opts.payments ?? configuredPaymentGateways(config);
+  const deps = buildBotDeps(config, db, { ...opts.bot, payments, log: opts.bot?.log ?? jsonLog });
   const log = deps.log;
   const pending = new Set<Promise<unknown>>();
   // Club secrets live encrypted in the database (A4). The env store is only a development
@@ -91,6 +97,7 @@ export function createApp(
     updateLiffEndpoint: opts.updateLiffEndpoint ?? (config.LINE_FAKE ? fakeLiffEndpointUpdater : realLiffEndpointUpdater),
     chatwoot: chatwootClient(config, opts.chatwootFetch),
     posFetch: opts.posFetch,
+    payments,
   };
 
   // A15: urgent alerts (and info ones the club switched on) reach the staff LINE group through the outbox.
@@ -132,8 +139,10 @@ export function createApp(
   app.route('/api/staff', brainRoutes(ctx)); // B19 brain manager
   app.route('/api/staff', doorRoutes(ctx)); // B11 door screen
   app.route('/api/admin', adminRoutes(ctx));
+  app.route('/api/admin/demo', demoRoutes(ctx)); // B7: Velora reset and fast-forward (platform admin)
   app.route('/api/onboard', onboardPublicRoutes(ctx)); // A17 pre-call form (token in the path, hashed at rest)
   app.route('/integrations', integrationRoutes(ctx)); // A19
+  app.route('/webhooks/payments', paymentWebhookRoutes(ctx)); // A20b
   app.route('/api/admin/sim', devRoutes(ctx)); // B8: simulator behind platform-admin login, every environment
   if (config.DEV_SIMULATOR) app.route('/api/dev', devRoutes(ctx)); // B8: same routes and login; loadConfig keeps it dev/test only
   app.onError((err, c) => {

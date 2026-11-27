@@ -14,6 +14,7 @@ import {
   messages,
   opsEvents,
   platformFlags,
+  rawWebhooks,
   type Club,
   priceRules,
   tables,
@@ -161,10 +162,12 @@ describe('founder console API (A5)', () => {
     const club = await reload(s.db, 'new-club');
     const inbound = await s.db.select().from(messages).where(and(eq(messages.clubId, club.id), eq(messages.direction, 'in')));
     expect(inbound).toHaveLength(1);
+    // Phase 1b gate (B3): the delivery is stored in raw_webhooks for that club and processed.
+    const raws = await s.db.select().from(rawWebhooks).where(eq(rawWebhooks.clubId, club.id));
+    expect(raws).toHaveLength(1);
+    expect(raws[0]).toMatchObject({ channel: 'line', signatureOk: true, error: null });
+    expect(raws[0]!.processedAt).not.toBeNull();
   });
-
-  // Phase 1b gate: the delivery is stored in raw_webhooks once B3 (durable webhook pipeline) merges.
-  it.todo('create club then receive a signed webhook with no restart: a raw_webhooks row for that club (needs B3)');
 
   it('credential change needs fresh totp', async () => {
     const s = await setup();
@@ -202,8 +205,30 @@ describe('founder console API (A5)', () => {
     expect(await staffMsgs()).toBe(2);
   });
 
-  // Needs B3's pause check in the bot pipeline.
-  it.todo('pause stops replies within one message');
+  it('pause stops replies within one message', async () => {
+    stubLineFetch();
+    const s = await setup();
+    await createClub(s, 'new-club');
+    expect((await connectLine(s, 'new-club')).status).toBe(200);
+    const club = await reload(s.db, 'new-club');
+    const staffBefore = (await s.db.select().from(messages).where(and(eq(messages.clubId, club.id), eq(messages.target, 'staff')))).length;
+    // Set directly, not through the route (whose own notice is a staff-group message too).
+    await s.db.update(clubs).set({ botPaused: true, botPausedAt: T0 }).where(eq(clubs.id, club.id));
+    for (const text of ['hello', 'book a table']) {
+      const { raw, signature } = signedWebhook(LINE_SECRET, textEvent('Upausedguest', text));
+      const res = await s.created.app.request('/line/webhook/new-club', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-line-signature': signature },
+        body: raw,
+      });
+      expect(res.status).toBe(200);
+      await s.created.settle();
+    }
+    const rows = await s.db.select().from(messages).where(eq(messages.clubId, club.id));
+    expect(rows.filter((m) => m.direction === 'in')).toHaveLength(2);
+    expect(rows.filter((m) => m.direction === 'out' && m.target === null)).toHaveLength(0);
+    expect(rows.filter((m) => m.target === 'staff').length - staffBefore).toBe(1);
+  });
 
   it('console-created club has the shared liff_id and a resolvable login channel with no env var set', async () => {
     const s = await setup();
@@ -342,9 +367,56 @@ describe('founder console API (A5)', () => {
     expect((await reload(s.db, 'new-club')).status).toBe('onboarding');
   });
 
-  // Need B3 (raw_webhooks with processing result, delivery_status on outbound rows).
-  it.todo('one guest message is traceable end to end');
-  it.todo("failed send shows in the message log with LINE's error");
+  /** Creates and connects `new-club`, then delivers one signed text message from `userId`. */
+  async function deliverToNewClub(s: Awaited<ReturnType<typeof setup>>, userId: string) {
+    await createClub(s, 'new-club');
+    expect((await connectLine(s, 'new-club')).status).toBe(200);
+    const { raw, signature } = signedWebhook(LINE_SECRET, textEvent(userId, 'hello'));
+    const res = await s.created.app.request('/line/webhook/new-club', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-line-signature': signature },
+      body: raw,
+    });
+    expect(res.status).toBe(200);
+    await s.created.settle();
+    return reload(s.db, 'new-club');
+  }
+
+  it('one guest message is traceable end to end', async () => {
+    stubLineFetch();
+    const s = await setup();
+    const club = await deliverToNewClub(s, 'Utraceguest');
+    const [conv] = await s.db.select().from(conversations).where(eq(conversations.clubId, club.id));
+    const res = await s.req('GET', `/api/admin/clubs/new-club/conversations/${conv!.id}/timeline`);
+    expect(res.status).toBe(200);
+    const { items } = (await res.json()) as { items: { kind: string; result?: string; direction?: string; deliveryStatus?: string }[] };
+    expect(items.find((i) => i.kind === 'raw_webhook')).toMatchObject({ result: 'processed' });
+    const msgs = items.filter((i) => i.kind === 'message');
+    expect(msgs.map((m) => m.direction)).toEqual(['in', 'out']);
+    expect(msgs[1]).toMatchObject({ deliveryStatus: 'sent' });
+  });
+
+  it("failed send shows in the message log with LINE's error", async () => {
+    // LINE refuses every reply and push with 429; other calls answer 200 {}.
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (/\/message\/(reply|push)/.test(url)) {
+        return new Response(JSON.stringify({ message: 'You have reached your monthly limit.' }), { status: 429, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const s = await setup();
+    const club = await deliverToNewClub(s, 'Ufailguest');
+    const res = await s.req('GET', '/api/admin/clubs/new-club/messages');
+    expect(res.status).toBe(200);
+    const { messages: log } = (await res.json()) as { messages: { direction: string; target: string | null; deliveryStatus: string; error: string }[] };
+    const out = log.find((m) => m.direction === 'out' && m.target === null)!;
+    expect(out.deliveryStatus).toBe('failed');
+    expect(out.error).toContain('429');
+    expect(out.error).toContain('monthly limit');
+    const failed = await s.db.select().from(opsEvents).where(and(eq(opsEvents.clubId, club.id), eq(opsEvents.kind, 'send_failed')));
+    expect(failed.length).toBeGreaterThan(0);
+  });
 
   it('credential change notifies the owner', async () => {
     stubLineFetch();

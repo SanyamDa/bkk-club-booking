@@ -517,7 +517,7 @@ Admin routes under `/api/admin`: `GET|POST /clubs`, `GET|PATCH /clubs/:slug`, `P
 Fresh TOTP for credential, PromptPay, greeting and platform login changes: JSON body field `totp`; missing → 401 `totp_required`, wrong → 401 `invalid_totp`. Wrong codes count like failed logins (`recordAuthFailure` in `http/auth.ts`); the fifth revokes the session and locks the account, answering 401 `totp_locked`. `POST .../line` checks the new channel id and secret with LINE (`ctx.lineTokens`) before saving and answers 400 with a failed 'LINE credentials' `SetupReport` when LINE refuses them. Staff-group notices after a committed change never fail the request. `POST /api/admin/global-stop` writes `{ stopped: boolean }`.
 
 Requests for Track B:
-- B3: call `isGloballyStopped`. Switch the direct `ops_events` insert in `http/admin/line-wizard.ts` to `recordOps`. Wire `processDelivery` into `POST .../webhooks/:id/replay` (503 `not_ready` today). Enable the `it.todo` tests: gate `raw_webhooks` row, pause stops replies, end-to-end trace, failed send in message log.
+- B3: done (2026-11-27, see sync/track-b.md). `isGloballyStopped` is called, `recordLineSetup` uses `recordOps`, replay calls `processDelivery` dry run, and the four `it.todo` tests are real.
 - B0: publish `applyClubContent`; `template: 'velora-like'` answers 501 `not_ready` until then.
 - B5: done (2026-11-27). `console-created club: details read with a valid ID token...` is a real test.
 - B6: done (2026-11-27). `POST .../tester-code` calls `issueTesterCode` and returns `{ code, expiresAt }` once; the todo is a real test.
@@ -966,3 +966,37 @@ The B0 request (`applyClubContent`, velora-like 501), the B13 request (`upsertCa
 - **it.todo:** `club-stats.test.ts` keeps one for the B7-seeded Velora history week; until B7 merges the week is hand-seeded on `seedDemoClub`'s Velora.
 - **Unverified against a real service:** none called; push quota reads the stored `lastKnownQuota`, not a live LINE call. AI cost is 0 until B16 emits `ai.call`.
 - **Web:** `/staff/stats` builds; the browser walk is still to be done by a human.
+
+## 2026-11-27 — A20b payment gateway option, built by Session A on track-a (legal gate waived by owner override)
+
+Supersedes the A20b blocker above. Migration: none (`deposits.method` gains `'gateway'` at type level only).
+
+Published (`apps/server/src/integrations/payments/gateway.ts`):
+```ts
+export interface PaymentCharge { chargeId: string; payUrl: string }
+export interface PaymentEvent { eventId: string; chargeId: string; status: 'successful' | 'failed' | 'pending'; amountSatang: number; currency: string; clubId?: string; bookingId?: string }
+export interface PaymentGateway {
+  readonly provider: string;
+  createCharge(club: Club, req: { bookingId: string; depositId: string; amountSatang: number; returnUrl: string }): Promise<PaymentCharge>; // idempotent per depositId
+  signatureOf(header: (name: string) => string | undefined): string | undefined;
+  verifyWebhook(rawBody: string, signature: string | undefined): PaymentEvent | null;
+}
+export type PaymentGateways = Record<string, PaymentGateway>;
+export async function startGatewayDeposit(db: Db, club: Club, gateway: PaymentGateway, bookingId: string, returnUrl: string, now: Date): Promise<PaymentCharge | null>; // null = switch off or nothing to pay: keep the slip flow
+export async function applyPaymentEvent(db: Db, provider: string, event: PaymentEvent, now: Date): Promise<PaymentOutcome>;
+export function fakePaymentGateway(secret?: string): PaymentGateway & { sign(body: string): string; charges: [...] };
+```
+- `integrations/payments/opn.ts`: `opnGateway({ secretKey, webhookSecret, fetch?, apiBase? })`, `configuredPaymentGateways(config)` (registers `opn` when `OPN_SECRET_KEY` and `OPN_WEBHOOK_SECRET` are set; new config keys, both optional).
+- `AppContext.payments: PaymentGateways`; `createApp(..., { payments })` test hook.
+- Route `POST /webhooks/payments/:provider` (`http/payments.ts`): 404 unknown provider, 401 bad signature (nothing written), 409 `charge_mismatch`, else 200 `{ ok, outcome }`. Verified deliveries go to `raw_webhooks` (channel `payments:<provider>`).
+- Gateway deposit row: `method = 'gateway'`, `slip_trans_ref = '<provider>:<chargeId>'`. Confirmation is `approveDeposit(..., { type: 'system', id: 'payments:<provider>' }, now)`, then `notifier.confirmed`.
+- Feature key `payment_gateway` added to `FEATURE_KEYS` (default false) and the Controls panel label.
+- Alert kinds (urgent): `payment_amount_mismatch`, `payment_charge_mismatch`, `payment_unmatched`, `payment_table_lost`, `payment_not_confirmable`.
+- **Request to the bot/flow owner:** in `bot/flow.ts` `confirm` (and `continueBooking` for `awaiting_payment`), when `ctx.payments` has a gateway, call `startGatewayDeposit` and send `payUrl`; on null keep `M.payment` with the PromptPay QR. Needs a `payments` entry in `BotDeps`/`bot/deps.ts` and a Thai/English pay-link message. **Done (integrator):** `BotDeps.payments?: PaymentGateways` (`buildBotDeps` default `configuredPaymentGateways(config)`; `createApp` passes the same map to bot and `ctx.payments`). `confirm` (deposit > 0) and `continueBooking` (deposit `method='gateway'`) call `startGatewayDeposit` with the first gateway and send `M.paymentLink` (flex, uri button `payNow`); null or a provider throw keeps the slip flow. Return URL is `https://line.me/R/` (`PAYMENT_RETURN_URL`, assumption: back to LINE, where the confirmation arrives).
+- Known: `requestDeposit` still emits `deposit.qr_sent` for a gateway deposit (no QR is sent). No webhook timestamp tolerance check (replays are no-ops anyway).
+- Gateway alerts are raised once per open (club, kind, text naming the charge), so a provider retrying a 409 does not repeat the alert.
+- Tests: `test/payment-gateway.test.ts` (7 passing, incl. `bot sends the gateway payment link when the switch is on, the slip flow when off`).
+- **Exact outcome type:** `applyPaymentEvent` returns `PaymentOutcome = { outcome: 'confirmed' | 'already_confirmed' | 'ignored' | 'unknown_charge' | 'charge_mismatch' | 'amount_mismatch' | 'table_lost' | 'not_confirmable'; clubId?: string; bookingId?: string }`. Also exported: `chargeRef(provider, chargeId)`, `safeEqualHex(a, b)`, `parseOpnEvent(rawBody): PaymentEvent | null`, `OPN_API`, `paymentWebhookRoutes(app: AppContext)`.
+- **Assumptions in place of a human decision:** provider is Opn Payments (Omise), the plan's stated option; the PromptPay slip flow stays the default and the gateway runs only with `OPN_*` keys set and the club's `payment_gateway` switch on; the return URL is `https://line.me/R/`.
+- **Unverified against a real service:** Opn charge creation, webhook signature header and event shape are from its public docs; tests use `fakePaymentGateway` and a stubbed `fetch` only. No real Opn account or charge was used.
+- **Web:** the Controls panel gains the `payment_gateway` label. The browser walk (switch on, guest pays by link, booking confirms) is still to be done by a human.

@@ -68,6 +68,11 @@ const strings = {
     en: 'Scan with any Thai banking app and pay exactly {amount} to {name}.\nThen send the payment slip here in this chat.\nRef {ref} · held until {time}',
     th: 'สแกนด้วยแอปธนาคาร และโอน {amount} พอดี ให้ {name}\nจากนั้นส่งสลิปในแชทนี้ได้เลยค่ะ\nรหัส {ref} · จองไว้ถึง {time} น.',
   },
+  payNow: { en: 'Pay deposit', th: 'ชำระมัดจำ' },
+  payLinkInstructions: {
+    en: 'Tap the button to pay {amount} by PromptPay or card. Your confirmation arrives here once it goes through.\nRef {ref} · held until {time}',
+    th: 'กดปุ่มเพื่อชำระ {amount} ผ่านพร้อมเพย์หรือบัตร เมื่อชำระสำเร็จจะได้รับการยืนยันในแชทนี้ค่ะ\nรหัส {ref} · จองไว้ถึง {time} น.',
+  },
   payDemo: {
     en: 'DEMO MODE: no real payment. Send any image here as your "slip" and a host will approve it.\nAmount {amount} · Ref {ref} · held until {time}',
     th: 'โหมดทดลอง: ไม่ต้องโอนจริง ส่งรูปภาพใดก็ได้เป็น "สลิป" แล้วพนักงานจะอนุมัติค่ะ\nยอด {amount} · รหัส {ref} · จองไว้ถึง {time} น.',
@@ -160,6 +165,28 @@ const strings = {
   cannotChangeBooking: {
     en: 'This booking can’t be changed here any more. A host can help.',
     th: 'ไม่สามารถเปลี่ยนแปลงการจองนี้ในแชทได้แล้ว พนักงานยินดีช่วยค่ะ',
+  },
+
+  // B10b: data removal and marketing opt-out (spec §14.9, §5.5).
+  myData: { en: 'My data', th: 'ข้อมูลของฉัน' },
+  myDataPrompt: {
+    en: 'You can stop promotional messages, or ask us to remove your data.',
+    th: 'คุณสามารถหยุดรับข้อความโปรโมชัน หรือขอให้เราลบข้อมูลของคุณได้ค่ะ',
+  },
+  stopPromotions: { en: 'Stop promotions', th: 'หยุดรับโปรโมชัน' },
+  removeMyData: { en: 'Remove my data', th: 'ลบข้อมูลของฉัน' },
+  removeConfirmPrompt: {
+    en: 'Remove your data? We will delete your chats, payment slips and contact details. Booking counts stay, without your name.',
+    th: 'ต้องการลบข้อมูลของคุณหรือไม่คะ? เราจะลบแชท สลิปโอนเงิน และข้อมูลติดต่อของคุณ ยอดจำนวนการจองยังคงอยู่โดยไม่มีชื่อของคุณ',
+  },
+  removeConfirm: { en: 'Yes, remove my data', th: 'ยืนยัน ลบข้อมูล' },
+  removeRequested: {
+    en: 'Done. Your data will be removed within a day.',
+    th: 'รับทราบค่ะ ข้อมูลของคุณจะถูกลบภายในหนึ่งวันค่ะ',
+  },
+  optedOut: {
+    en: 'You won’t get promotional messages from us any more. Messages about your own bookings still arrive.',
+    th: 'คุณจะไม่ได้รับข้อความโปรโมชันจากเราอีกค่ะ ข้อความเกี่ยวกับการจองของคุณยังส่งถึงตามปกติค่ะ',
   },
 } satisfies Record<string, Record<Lang, string>>;
 

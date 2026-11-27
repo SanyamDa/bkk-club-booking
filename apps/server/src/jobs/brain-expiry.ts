@@ -1,5 +1,6 @@
 import { and, eq, gte, isNotNull, lt, lte, ne } from 'drizzle-orm';
 import { compileSnapshot } from '../brain/compile.js';
+import { deactivateNoteCases } from '../brain/testset.js';
 import type { Db } from '../db/client.js';
 import { brainNotes, clubs, platformFlags, type BrainNote } from '../db/schema.js';
 import { bangkokParts, toDateString } from '../lib/time.js';
@@ -33,6 +34,7 @@ export async function runBrainExpiry(db: Db, now: Date): Promise<{ expired: numb
           .set({ status: 'retired', frontmatter: { ...(n.frontmatter as Record<string, unknown>), retiredReason: 'expired', retiredOn: today }, updatedAt: now })
           .where(eq(brainNotes.id, n.id));
       }
+      await deactivateNoteCases(tx, club.id, due.map((n) => n.id));
       await compileSnapshot(tx, club.id, now);
     });
     expired += due.length;

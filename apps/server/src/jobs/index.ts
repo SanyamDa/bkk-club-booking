@@ -13,6 +13,10 @@ import { runNightsJob } from './nights.js';
 import { runRemovalRequests } from '../data/removal.js';
 import { runRetention } from './retention.js';
 import { Scheduler } from './scheduler.js';
+import { BRAIN_DRAFT_EVERY_MS, runBrainDraft } from './brain-draft.js';
+import { runBrainLint } from './brain-lint.js';
+import { runBrainTestJob } from '../brain/testset.js';
+import { runSampleReview } from './brain-sample-review.js';
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -59,6 +63,16 @@ export function buildScheduler(ctx: AppContext, now: () => Date): Scheduler {
     await runRemovalRequests(db, at, ctx.deps.uploadsDir, ctx.deps.log);
   });
   s.register('retention', DAY, (at) => runRetention(db, at, ctx.deps.uploadsDir));
+  // B18: learning loop (drafts within 60 s of a resolved takeover) and the weekly brain check.
+  s.register('brain-draft', BRAIN_DRAFT_EVERY_MS, async (at) => {
+    await runBrainDraft(ctx.deps, at);
+  });
+  s.register('brain-lint', 15 * MINUTE, (at) => runBrainLint(ctx.deps, at));
+  // B17: each club's test set after a snapshot compile or model change, and the daily sampled review.
+  s.register('brain-testset', MINUTE, (at) =>
+    runBrainTestJob(db, { client: ctx.deps.ai ?? null, judge: ctx.deps.judge ?? null, log: ctx.deps.log }, at),
+  );
+  s.register('brain-sample-review', 15 * MINUTE, (at) => runSampleReview(db, ctx.deps.judge ?? null, at));
   return s;
 }
 

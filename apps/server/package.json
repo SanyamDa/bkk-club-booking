@@ -12,7 +12,8 @@
     "live": "tsx src/scripts/live.ts",
     "load": "tsx src/scripts/load.ts",
     "admin:create": "tsx src/scripts/create-admin.ts",
-    "events:doc": "tsx src/scripts/events-doc.ts"
+    "events:doc": "tsx src/scripts/events-doc.ts",
+    "eval:brain": "tsx src/scripts/eval-brain.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "1.14.0",

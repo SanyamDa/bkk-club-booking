@@ -180,6 +180,14 @@ Rules:
 
 const WEEKDAY_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
+/** The per-message part of the live call (after the cache breakpoint). B17's test runner sends the same. */
+export function aiUserContent(today: string, lang: 'th' | 'en', text: string): string {
+  return (
+    `Tonight's club night: ${today} (${WEEKDAY_EN[weekdayOf(today)]}). Guest language: ${lang}.\n` +
+    `<guest_message>\n${text.slice(0, 2000)}\n</guest_message>`
+  );
+}
+
 export interface AnswerSession {
   club: Club;
   guest: Guest;
@@ -242,9 +250,7 @@ export async function answerGuestMessage(deps: AnswerDeps, s: AnswerSession, tex
   const ctx = await extractContext(db, s.club, now);
   const snapshot = await latestSnapshot(db, s.club.id);
   const brain = snapshot?.compiledText ?? '# Club brain\n\n(no notes yet)\n';
-  const userContent =
-    `Tonight's club night: ${ctx.today} (${WEEKDAY_EN[weekdayOf(ctx.today)]}). Guest language: ${s.lang}.\n` +
-    `<guest_message>\n${text.slice(0, 2000)}\n</guest_message>`;
+  const userContent = aiUserContent(ctx.today, s.lang, text);
 
   let reply: ModelReply | null = null;
   for (const model of [AI_PRIMARY_MODEL, AI_FALLBACK_MODEL] as const) {

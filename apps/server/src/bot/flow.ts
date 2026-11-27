@@ -67,6 +67,10 @@ export interface BotDeps {
   slipVerifier?: SlipVerifier | null;
   /** A20b: payment gateways; the first one takes the deposit when the club's `payment_gateway` switch is on. */
   payments?: PaymentGateways;
+  /** B18: the note drafter and weekly brain check (`claude-opus-5-5`); null or absent drafts nothing. */
+  learn?: import('../brain/learn.js').LearnClient | null;
+  /** B17: the answer judge (`claude-sonnet-5-5`) for test sets and the sampled review; null or absent judges nothing. */
+  judge?: import('../brain/judge.js').JudgeClient | null;
 }
 
 interface Turn {

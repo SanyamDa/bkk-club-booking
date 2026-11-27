@@ -3,6 +3,12 @@ import { createApp } from '../src/app.js';
 import type { Actor } from '../src/bookings/service.js';
 import { latestSnapshot } from '../src/brain/compile.js';
 import { createNote } from '../src/brain/notes.js';
+import { fakeLearnClient } from '../src/bot/deps.js';
+import { runLearning } from '../src/brain/learn.js';
+import { endEpisode, startEpisode } from '../src/chat/episodes.js';
+import { brainNotes, conversations, guests, handoffEpisodes, messages } from '../src/db/schema.js';
+import { newId } from '../src/lib/util.js';
+import { and, eq } from 'drizzle-orm';
 import { emit } from '../src/data/events.js';
 import type { Db } from '../src/db/client.js';
 import type { Club } from '../src/db/schema.js';
@@ -36,6 +42,45 @@ async function req(cookie: string, club: Club, path: string, method = 'GET', bod
 const draft = (club: Club, title: string, bodyMd: string, frontmatter: Record<string, unknown> = {}) =>
   createNote(db, { clubId: club.id, title, type: 'faq', bodyMd, source: 'takeover', frontmatter }, actor, NOW);
 
+/**
+ * A real B18 draft: a guest question and a host reply in a takeover on `topic`, resolved by staff,
+ * then one learning run with a fake drafter returning `title`/`answer`. `priorTakeovers` earlier
+ * takeovers on the same topic (timed out, nothing drafted) raise `frontmatter.takeovers`.
+ */
+async function learnedDraft(club: Club, o: { topic: string; question: string; hostReply: string; title: string; answer: string; priorTakeovers?: number }) {
+  const episodeIn = async (withMessages: boolean) => {
+    const guestId = newId();
+    await db.insert(guests).values({ id: guestId, clubId: club.id, lineUserId: `U${guestId}`, displayName: 'Queue Guest' });
+    const conversationId = newId();
+    await db.insert(conversations).values({ id: conversationId, clubId: club.id, guestId, state: {} });
+    const q = withMessages ? newId() : null;
+    if (q) await db.insert(messages).values({ id: q, clubId: club.id, guestId, direction: 'in', kind: 'text', payload: { type: 'text', text: o.question }, authorType: 'guest', occurredAt: NOW });
+    const ep = await db.transaction((tx) => startEpisode(tx, { clubId: club.id, conversationId, trigger: 'guest_request', reason: null, topic: o.topic, firstMessageId: q, now: NOW }));
+    if (withMessages) {
+      const r = newId();
+      await db.insert(messages).values({ id: r, clubId: club.id, guestId, direction: 'out', kind: 'text', payload: { type: 'text', text: o.hostReply }, authorType: 'staff', authorId: 'user_host', occurredAt: NOW });
+      await db.update(handoffEpisodes).set({ lastMessageId: r }).where(eq(handoffEpisodes.id, ep.id));
+    }
+    await db.transaction((tx) => endEpisode(tx, { episodeId: ep.id, endedBy: withMessages ? 'staff' : 'timeout', resolverUserId: 'user_host', now: NOW }));
+    return ep;
+  };
+  for (let i = 0; i < (o.priorTakeovers ?? 0); i++) await episodeIn(false);
+  const ep = await episodeIn(true);
+  const learn = fakeLearnClient(() => ({
+    worth_learning: true,
+    kind: 'new',
+    edits_slug: null,
+    title: o.title,
+    question_en: o.question,
+    question_th: '',
+    answer: o.answer,
+    flags: { price_or_availability: false, personal_data: false, one_off: false },
+    contradicts: [],
+  }));
+  await runLearning({ db, client: learn, log: () => {} }, NOW);
+  return (await db.select().from(brainNotes).where(and(eq(brainNotes.clubId, club.id), eq(brainNotes.sourceEpisodeId, ep.id))))[0]!;
+}
+
 async function missed(club: Club, topic: string | null, text: string, at: Date, isTest = false) {
   await emit(db, {
     clubId: club.id,
@@ -52,7 +97,7 @@ async function missed(club: Club, topic: string | null, text: string, at: Date, 
 describe('B19 brain manager UI', () => {
   it('approve in one tap', async () => {
     const cookie = await staffCookie(app, clubB, 'manager');
-    const note = await draft(clubB, 'Dress code', 'Smart casual. No flip-flops.', { question: 'what should I wear?', hostReply: 'smart casual pls' });
+    const note = await learnedDraft(clubB, { topic: 'dress_code', question: 'what should I wear?', hostReply: 'smart casual pls', title: 'Dress code', answer: 'Smart casual. No flip-flops.' });
     const queue = await (await req(cookie, clubB, '/queue')).json();
     expect(queue.queue).toHaveLength(1);
     expect(queue.queue[0]).toMatchObject({ id: note.id, question: 'what should I wear?', hostReply: 'smart casual pls' });
@@ -141,8 +186,9 @@ describe('B19 brain manager UI', () => {
 
   it('queue ranks drafts by takeovers', async () => {
     const cookie = await staffCookie(app, clubB, 'manager');
-    const rare = await draft(clubB, 'Birthday cake', 'You may bring a cake.', { takeovers: 1 });
-    const common = await draft(clubB, 'Dress code', 'Smart casual.', { takeovers: 7 });
+    const rare = await learnedDraft(clubB, { topic: 'birthday_cake', question: 'can I bring a cake?', hostReply: 'yes', title: 'Birthday cake', answer: 'You may bring a cake.' });
+    const common = await learnedDraft(clubB, { topic: 'dress_code', question: 'dress code?', hostReply: 'smart casual', title: 'Dress code', answer: 'Smart casual.', priorTakeovers: 6 });
+    expect([rare.frontmatter, common.frontmatter]).toMatchObject([{ takeovers: 1 }, { takeovers: 7 }]);
     const none = await draft(clubB, 'Lockers', 'There are lockers.');
     const { queue } = await (await req(cookie, clubB, '/queue')).json();
     expect(queue.map((q: { id: string }) => q.id)).toEqual([common.id, rare.id, none.id]);

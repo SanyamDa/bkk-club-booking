@@ -223,6 +223,8 @@ describe('scheduler (B2)', () => {
       [
         'alert-checks', 'brain-expiry', 'chatwoot-grant-sweep', 'club-report', 'handoff-timeout', 'hold-expiry', 'nightly-check',
         'nights', 'no-show', 'reminders', 'removal', 'retention',
+        'brain-draft', 'brain-lint', // B18
+        'brain-testset', 'brain-sample-review', // B17
       ].sort(),
     );
   });

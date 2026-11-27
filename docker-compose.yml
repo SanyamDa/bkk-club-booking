@@ -1,0 +1,74 @@
+# Club booking: app + Postgres 16. Host-neutral (spec §16.1 q5: region still open, Thailand preferred).
+#
+#   put the variables below in ./.env (gitignored) or export them; see infra/README.md
+#   docker compose up -d --build
+#   curl http://localhost:8787/health    # {"ok":true}
+#
+# Required variables (compose refuses to start without them):
+#   POSTGRES_PASSWORD, APP_SECRET (>= 32 chars), CREDENTIALS_KEY (base64 of 32 bytes), PUBLIC_URL
+# Optional: ANTHROPIC_API_KEY, APP_PORT (host port, default 8787), DEMO_LIFF_ID, DEMO_PROMPTPAY_ID.
+# LINE credentials are set in the founder console (stored encrypted), not here.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-club}
+      POSTGRES_USER: ${POSTGRES_USER:-club}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Not published to the host: only the app (and backup.sh via `docker compose exec`) reach it.
+
+  app:
+    build: .
+    image: club-booking:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      API_PORT: 8787
+      # Real Postgres, not PGlite: config.ts reads DATABASE_URL and db/client.ts uses node-postgres when it is set.
+      DATABASE_URL: postgres://${POSTGRES_USER:-club}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-club}
+      DATA_DIR: /data
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL to the public https URL}
+      APP_SECRET: ${APP_SECRET:?set APP_SECRET (at least 32 random chars)}
+      CREDENTIALS_KEY: ${CREDENTIALS_KEY:?set CREDENTIALS_KEY (base64 of 32 random bytes)}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEV_SIMULATOR: "0"
+      # Seed values for the demo club row only. LINE channel secrets are not read from env in
+      # production (A4: env credentials are a development/test fallback); set them in the
+      # founder console, which stores them encrypted with CREDENTIALS_KEY.
+      DEMO_LIFF_ID: ${DEMO_LIFF_ID:-}
+      DEMO_PROMPTPAY_ID: ${DEMO_PROMPTPAY_ID:-}
+    ports:
+      - "${APP_PORT:-8787}:8787"
+    volumes:
+      - appdata:/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/health').then(r=>r.json()).then(j=>process.exit(j.ok===true?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  pgdata:
+  appdata:

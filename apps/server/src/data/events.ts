@@ -1,7 +1,12 @@
 import type { Db } from '../db/client.js';
-import { events } from '../db/schema.js';
+import { events, eventsDeadLetter } from '../db/schema.js';
 import { newId } from '../lib/util.js';
-import type { EventType } from './event-types.js';
+import { eventDeclaration, type EventType } from './event-types.js';
+
+/** A props string value: a code or id, never free text (spec §9). */
+export const PROPS_VALUE_PATTERN = /^[A-Za-z0-9_:.\-]{1,64}$/;
+
+const DATA_ORIGINS = new Set(['first_party', 'line_chat', 'line_profile', 'instagram', 'pos']);
 
 export type EventInput = {
   clubId: string;
@@ -27,12 +32,64 @@ export type EventInput = {
   dedupeKey?: string;
 };
 
+export class EventValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EventValidationError';
+  }
+}
+
+/** The reasons `e` does not match its declaration in `data/event-types.ts`; empty when it does. */
+export function eventProblems(e: EventInput): string[] {
+  const decl = eventDeclaration(e.type);
+  if (!decl) return [`unknown event type ${JSON.stringify(e.type)}`];
+  const problems: string[] = [];
+  if (!DATA_ORIGINS.has(e.dataOrigin)) problems.push(`dataOrigin ${JSON.stringify(e.dataOrigin)} is not a known origin`);
+  if (typeof e.isTest !== 'boolean') problems.push('isTest is required');
+  for (const [key, value] of Object.entries(e.props ?? {})) {
+    if (!Object.hasOwn(decl.props, key)) {
+      problems.push(`props.${key} is not declared for ${e.type}`);
+      continue;
+    }
+    const ok =
+      value === null ||
+      typeof value === 'boolean' ||
+      (typeof value === 'number' && Number.isFinite(value)) ||
+      (typeof value === 'string' && PROPS_VALUE_PATTERN.test(value));
+    if (!ok) problems.push(`props.${key} must be a number, boolean, null or a code matching ${PROPS_VALUE_PATTERN}`);
+  }
+  return problems;
+}
+
+/** The event as JSON; a raw payload that cannot be serialised is replaced so the dead letter is never lost. */
+function deadLetterPayload(e: EventInput): unknown {
+  try {
+    return JSON.parse(JSON.stringify(e));
+  } catch {
+    return JSON.parse(JSON.stringify({ ...e, raw: '[unserialisable]' }));
+  }
+}
+
+/** Strict unless told otherwise: tests throw on a bad event, production dead-letters it. */
+const defaultStrict = () => process.env.NODE_ENV === 'test';
+
 /**
- * Record one event inside the caller's transaction (spec §14.2).
- * W0 stub: one insert, a repeated (club_id, dedupe_key) is skipped.
- * B1 adds versions, props validation, privacy classes and the dead letter; `strict` is unused until then.
+ * Record one event inside the caller's transaction (spec §14.2). Pass the transaction handle so the
+ * event commits or rolls back with the change it records.
+ * - A valid event is inserted with its declared version `v`; a repeated (club_id, dedupe_key) is skipped.
+ * - An event that fails its declaration throws `EventValidationError` when `strict` (the default when
+ *   NODE_ENV is test); otherwise it is written to `events_dead_letter` in the same transaction and the
+ *   caller's change still commits.
  */
-export async function emit(tx: Db, e: EventInput, _opts?: { strict?: boolean }): Promise<void> {
+export async function emit(tx: Db, e: EventInput, opts?: { strict?: boolean }): Promise<void> {
+  const problems = eventProblems(e);
+  if (problems.length) {
+    const error = `${e.type}: ${problems.join('; ')}`;
+    if (opts?.strict ?? defaultStrict()) throw new EventValidationError(error);
+    await tx.insert(eventsDeadLetter).values({ id: newId(), receivedAt: new Date(), payload: deadLetterPayload(e), error });
+    return;
+  }
+  const decl = eventDeclaration(e.type)!;
   await tx
     .insert(events)
     .values({
@@ -41,7 +98,7 @@ export async function emit(tx: Db, e: EventInput, _opts?: { strict?: boolean }):
       recordedAt: new Date(),
       clubId: e.clubId,
       type: e.type,
-      v: 1,
+      v: decl.v,
       actorType: e.actorType,
       actorId: e.actorId ?? null,
       channel: e.channel ?? null,

@@ -2,7 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import type { Db } from '../src/db/client.js';
-import { auditLog, clubProfile, clubs, events, messages, nights, opsEvents, priceRules, tables, users, zones, type Club } from '../src/db/schema.js';
+import { auditLog, calendarDays, clubProfile, clubs, events, messages, nights, opsEvents, priceRules, tables, users, zones, type Club } from '../src/db/schema.js';
 import { newId } from '../src/lib/util.js';
 import { base32Decode, base32Encode, totp } from '../src/platform/totp.js';
 import { FRIDAY_AFTERNOON, setupTwoClubs } from './helpers.js';
@@ -63,8 +63,37 @@ describe('settings (plan A9)', () => {
     expect(club.settings.rulesVersion).toBe('2026-11-27');
     const [ev] = await eventsOf('club.settings_changed');
     expect(ev).toMatchObject({ actorType: 'staff', actorId: manager.id, dataOrigin: 'first_party' });
-    expect(ev!.props).toMatchObject({ fields: 'holdMinutes,rules' });
+    expect(ev!.props).toMatchObject({ fields: 'hold:rules' });
     expect(await auditOf('club.settings_changed')).toHaveLength(1);
+  });
+
+  it('the full booking-rules form (every field the web page sends) emits club.settings_changed', async () => {
+    // pages/staff/Settings.tsx RulesEditor sends all of these together.
+    const res = await staff('PATCH', '/settings', {
+      openWeekdays: [3, 4, 5, 6],
+      holdMinutes: 15,
+      arrivalBy: '23:00',
+      bookingWindowDays: 21,
+      handoffTimeoutMinutes: 20,
+      rules: { en: ['No shorts'], th: ['ห้ามกางเกงขาสั้น'] },
+    });
+    expect(res.status).toBe(200);
+    const [ev] = await eventsOf('club.settings_changed');
+    expect(ev!.props).toMatchObject({ fields: 'days:window:hold:arrival:handoff:rules' });
+    // Every key the route accepts, at once, still fits the props pattern.
+    const all = await staff('PATCH', '/settings', {
+      openWeekdays: [3, 4],
+      bookingWindowDays: 30,
+      holdMinutes: 10,
+      arrivalBy: '23:30',
+      handoffTimeoutMinutes: 30,
+      accentColor: '#112233',
+      rules: { en: ['No shorts'], th: ['ห้ามกางเกงขาสั้น'] },
+      address: '1 Sukhumvit',
+      drinksMenuUrl: 'https://example.com/menu',
+    });
+    expect(all.status).toBe(200);
+    expect(await eventsOf('club.settings_changed')).toHaveLength(2);
   });
 
   it('a host cannot change settings', async () => {
@@ -211,14 +240,20 @@ describe('settings (plan A9)', () => {
     expect((await send('PUT', `/api/admin/clubs/nope/nights`, { date: '2026-12-12', status: 'open' }, admin)).status).toBe(404);
   });
 
-  it('POST /api/admin/calendar-days answers 503 not_ready until B13 merges', async () => {
+  it('an election day entered from the console appears in calendar_days', async () => {
     const admin = await adminCookie(app);
-    const res = await send('POST', '/api/admin/calendar-days', { date: '2027-03-29', kind: 'election', name: 'General election' }, admin);
-    expect(res.status).toBe(503);
-    expect(await res.json()).toMatchObject({ error: 'not_ready' });
+    const body = { date: '2027-03-29', kind: 'election', name: 'General election' };
+    const res = await send('POST', '/api/admin/calendar-days', body, admin);
+    expect(res.status).toBe(200);
+    expect((await send('POST', '/api/admin/calendar-days', body, admin)).status).toBe(200);
+    const rows = await db.select().from(calendarDays).where(eq(calendarDays.date, '2027-03-29'));
+    expect(rows).toEqual([expect.objectContaining({ kind: 'election', name: 'General election' })]);
+    const [audit] = await db.select().from(auditLog).where(eq(auditLog.action, 'platform.calendar_day_set'));
+    expect(audit).toMatchObject({ clubId: null, actorType: 'platform', entity: 'calendar_days' });
+    expect((await send('POST', '/api/admin/calendar-days', { ...body, kind: 'public_holiday' }, admin)).status).toBe(400);
+    expect((await send('POST', '/api/admin/calendar-days', { ...body, date: '2027-02-30' }, admin)).status).toBe(400);
+    expect((await send('POST', '/api/admin/calendar-days', body, cookie)).status).toBe(403);
   });
-
-  it.todo('an election day entered from the console appears in calendar_days (needs B13 upsertCalendarDay)');
 
   it('profile edit is saved and audited', async () => {
     const res = await staff('PUT', '/profile', { capacityStanding: 400, genres: ['techno', 'house'], usualPeakHour: 1 });

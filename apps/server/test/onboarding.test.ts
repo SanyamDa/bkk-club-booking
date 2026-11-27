@@ -3,7 +3,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import type { Db } from '../src/db/client.js';
-import { auditLog, clubProfile, clubs, platformFlags, priceRules, tables, zones } from '../src/db/schema.js';
+import { auditLog, brainNotes, clubProfile, clubs, platformFlags, priceRules, tables, zones } from '../src/db/schema.js';
 import { setupTwoClubs } from './helpers.js';
 import { adminCookie, secretLeakRecorder, testConfig } from './helpers/track-a.js';
 
@@ -116,7 +116,7 @@ describe('onboarding wizard (A17)', () => {
 
   // Plan A17 "form submission creates tables, prices, rules, baseline FAQs and club profile" is met
   // in two steps (recorded as a plan change in sync/track-a.md): the club submits, the founder
-  // reviews and applies. Baseline FAQs wait on B15 (todo below).
+  // reviews and applies. Baseline FAQs go into the brain as drafts (B15, test below).
   it('form submission, once the founder applies it, creates zones, tables, price_rules, rules and the club profile', async () => {
     const s = await setup();
     const { token } = await newLink(s);
@@ -127,7 +127,7 @@ describe('onboarding wizard (A17)', () => {
     const body = (await res.json()) as { steps: { name: string; status: string; count?: number }[] };
     const step = (n: string) => body.steps.find((x) => x.name === n)!;
     expect(step('tables')).toMatchObject({ status: 'done', count: 3 });
-    expect(step('faqs').status).toBe('not_ready');
+    expect(step('faqs')).toMatchObject({ status: 'done', count: 1 });
 
     const zs = await s.db.select().from(zones).where(eq(zones.clubId, s.club.id));
     expect(zs.map((z) => z.name).sort()).toEqual(['Floor', 'VIP']);
@@ -223,5 +223,35 @@ describe('onboarding wizard (A17)', () => {
     expect(await s.db.select().from(tables).where(eq(tables.clubId, orbit.id))).toHaveLength(0);
   });
 
-  it.todo('apply writes the baseline FAQs into the brain (needs B15 brain/notes.ts)');
+  it('apply writes the baseline FAQs into the brain', async () => {
+    const s = await setup();
+    const { token } = await newLink(s);
+    const form = {
+      ...FORM,
+      faqs: [
+        ...FORM.faqs,
+        { question: 'Can I bring a cake?', answerEn: 'Yes, tell us when you book.' },
+        { question: 'How much is the VIP minimum spend?', answerEn: 'Minimum spend 20,000 baht.' },
+        { question: 'Is there a coat check?' },
+        { question: 'มีที่จอดรถไหม', answerTh: 'มีบริการรับจอดรถ' },
+      ],
+    };
+    await s.req('PUT', `/api/onboard/${token}`, form, false);
+    leaks.records.splice(0);
+    const res = await s.req('POST', '/api/admin/clubs/nova/onboarding/apply', {});
+    const body = (await res.json()) as { steps: { name: string; status: string; count?: number; detail?: string }[] };
+    expect(body.steps.find((x) => x.name === 'faqs')).toMatchObject({ status: 'done', count: 3 });
+
+    const notes = await s.db.select().from(brainNotes).where(and(eq(brainNotes.clubId, s.club.id), eq(brainNotes.type, 'faq')));
+    expect(notes.map((n) => n.title).sort()).toEqual(['Can I bring a cake?', 'Is there parking?', 'มีที่จอดรถไหม']);
+    expect(notes.every((n) => n.status === 'draft' && n.source === 'onboarding')).toBe(true);
+    expect(notes.find((n) => n.title === 'Is there parking?')!.bodyMd).toBe('Yes, valet\n\nมีบริการรับจอดรถ');
+    // The tables also produced the generated layout note.
+    const layout = await s.db.query.brainNotes.findFirst({ where: and(eq(brainNotes.clubId, s.club.id), eq(brainNotes.slug, 'layout')) });
+    expect(layout!.bodyMd).toContain('V1');
+
+    // A second apply writes no duplicate notes, also for the Thai-only question.
+    await s.req('POST', '/api/admin/clubs/nova/onboarding/apply', {});
+    expect(await s.db.select().from(brainNotes).where(and(eq(brainNotes.clubId, s.club.id), eq(brainNotes.type, 'faq')))).toHaveLength(3);
+  });
 });

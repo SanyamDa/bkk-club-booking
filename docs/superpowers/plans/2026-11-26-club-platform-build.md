@@ -230,7 +230,7 @@ Session B must not start B1 until W0 is merged to `main`.
 **Interfaces (Produces):** `export const VELORA: { zones: VeloraZone[]; tables: VeloraTable[]; priceRules: VeloraPriceRule[]; policies: { en: string; th: string }[]; faqs: { slug: string; question_en: string; question_th: string; answer_en: string; answer_th: string }[]; gaps: { question_en: string; question_th: string; answer_en: string; answer_th: string }[]; profile: VeloraProfile; }` with the small `Velora*` types declared in the same file.
 `applyClubContent(tx: Db, clubId: string, content: typeof VELORA): Promise<void>` in `demo/apply-content.ts`: inserts zones, tables, price rules and policies for that club (no history, no brain notes, no status change). Zone and table rows also carry the base price in the existing price columns, which the booking flow still reads. A5 calls it for `template: 'velora-like'`; B7 reuses it. Publish the signature in `sync/track-b.md` when it merges.
 
-**Tests:** `every table code is unique`; `every table belongs to a declared zone`; `every FAQ has non-empty Thai and English`; `gap questions do not appear in faqs`; `prices are integers in satang`; `applyClubContent writes tables and prices for a new club id` (in `apply-content.test.ts`, against `setupTwoClubs().clubB`).
+**Tests:** `every table code is unique`; `every table belongs to a declared zone`; `every FAQ has non-empty Thai and English`; `gap questions do not appear in faqs`; `prices are integers in satang`; `applyClubContent writes tables and prices for a new club id` (in `apply-content.test.ts`: on a new club inserted next to `setupTwoClubs()`, because `clubB` already has tables V1, V2, S1 and S2, which Velora reuses; the test checks that `clubB` stays untouched).
 
 **Migration:** no.
 
@@ -765,6 +765,30 @@ Expand with superpowers:writing-plans at the start of the phase.
 
 **Migration (Track B, Phase 1):** B14 yes (the custom migration in its row). B9, B9b, B10, B10b, B11, B12 and B13 no: W0 added `price_rules`, `deposits.slip_*`, `bookings.reminder_sent_at`, `removal_requests`, `notices`, `nights`, `door_counts`, `occupancy_snapshots`, `crowd_ratings` and `calendar_days`.
 
+#### Task B13: Calendar days (expanded)
+
+**Spec:** §14.3 "The city calendar", §9 (`calendar_days`).
+
+**Files:** Create `apps/server/src/data/calendar-seed.ts`, `apps/server/src/data/calendar.ts`. Modify `http/admin/calendar.ts` (A9's route calls `upsertCalendarDay`), `main.ts` (one line: `seedCalendarDays(db)` at boot). Test: `apps/server/test/calendar.test.ts`, and `settings.test.ts` (A9's todo turned real).
+
+**Decisions:**
+- `CALENDAR_SEED` is a frozen list of `{ date, kind, name, notes? }` for 2026 and 2027: national public holidays (with substitution days, `notes: 'substitution day'`), the five Buddhist holy days (Makha Bucha, Visakha Bucha, Asahna Bucha, Khao Phansa, Ok Phansa) as `holy_day`, and the same five as `alcohol_ban`. Lunar dates are from the full-moon calendar; 2027's are marked `notes: 'lunar date, confirm against the cabinet announcement'` until a person checks them.
+- A date can carry several rows (the primary key is `date, kind, name`), so Makha Bucha is a `public_holiday`, a `holy_day` and an `alcohol_ban` row.
+- `upsertCalendarDay` validates `kind` against the five spec kinds and the date as `YYYY-MM-DD` (throws `CalendarDayError` otherwise), inserts on conflict of the key and updates only `notes`. A repeat with the same input is a no-op. No event is emitted (no calendar type in `data/event-types.ts`; the A9 route writes the audit row).
+- `seedCalendarDays(db)` runs every seed row through `upsertCalendarDay`'s insert path with `on conflict do nothing`, so a hand-edited note survives a reboot. `main.ts` runs it at boot after `seedDemoClub`.
+- `POST /api/admin/calendar-days` (A9) calls `upsertCalendarDay`, audits `platform.calendar_day_set`, and answers 200 `{ ok: true }`.
+
+**Interfaces (Produces):** `upsertCalendarDay(db, input: { date: string; kind: string; name: string; notes?: string }): Promise<void>`, `seedCalendarDays(db): Promise<number>` (rows inserted), `alcoholBanDates(db, from: string, to: string): Promise<Set<string>>` (for B8b's `nights` job) in `data/calendar.ts`; `CALENDAR_SEED` in `data/calendar-seed.ts`.
+
+**Tests (`calendar.test.ts`):**
+- `Thai public holidays, holy days and alcohol-ban days for 2026-2027 are present`.
+- `upsertCalendarDay adds an election day once; a repeat is a no-op`.
+- `upsertCalendarDay rejects an unknown kind and a bad date`.
+- `seeding twice inserts nothing the second time`.
+- `the next nights job run closes a new alcohol-ban day on rows nobody edited` (`it.todo` until B8b's `ensureNights` lands; B8b reads `alcoholBanDates`).
+
+**Migration:** no (`calendar_days` comes from W0).
+
 ---
 
 ## Phase 2: Brain and inbox
@@ -809,6 +833,31 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 | B19b Alert call sites (after A15 merges) | §6.4: every trigger the A15 row lists for B. Complaint or safety word detection uses a Thai and English word list kept in the club's settings (editable per club, §8.1) | `bot/flow.ts`, the pause alert from B3 and B16's cost-cap warning: replace the direct `outbox.toStaff` staff-alert sends with `raiseAlert(...)`. `Notifier.confirmed`'s new-booking staff message in `bot/notify.ts` stays as is unless §6.4 classes it as an alert. Add the calls for payment needs review and complaint or safety word (`bot/flow.ts`), table not arrived at release time (`jobs/no-show.ts`) and brain draft or gap waiting (`jobs/brain-draft.ts`) | urgent alert reaches inbox and staff group within 5 s; a paused club raises one alert per conversation per pause through `raiseAlert`; a complaint word raises urgent; a release time passed with no arrival raises urgent; a waiting draft raises needs-input |
 
 **Migration (Track B, Phase 2):** B17 yes (the per-club test-set table; columns decided in the phase-start writing-plans pass). Others none planned (`handoff_episodes` with `topic`, and the `brain_*` tables with `valid_until` and `review_by`, come from W0).
+
+#### Task B15: Brain store (expanded)
+
+**Files:** `brain/{lint,notes,compile,layout,export,import}.ts`, `jobs/brain-expiry.ts`, `jobs/index.ts` (one start line, the style A15/A16b use until B2's scheduler), `http/staff-settings.ts` and `http/admin/onboarding.ts` (one `regenerateLayoutNote` call after each table or zone write; A17's FAQ step), test `test/brain-store.test.ts`.
+
+**Decisions:**
+- Price lint (§8.4): a number next to ฿, บาท, baht or THB, or a number of 100 or more within 30 characters of "minimum spend", "min spend", "deposit", ขั้นต่ำ or มัดจำ, is a `price` issue. Times (`20:00`) and numbers followed by a time unit (hours, days, minutes, ชั่วโมง, วัน, นาที) are not amounts. "available" next to a table, seat or "tonight", "availability", "sold out", "fully booked", โต๊ะว่าง, ยังว่าง, เต็มแล้ว are `availability` issues ("valet parking is available" passes). An `event` note without `validUntil` is `event_needs_end_date`. A failing save throws `BrainLintError { issues }` and writes nothing; the error carries `fix: 'prices'` (the pricing screen).
+- Expiry: event and promotion notes are `type: 'event'` and need `validUntil`. Other notes get `reviewBy` = club today + 90 days on create and on every edit. A note whose `validUntil` is before club today (`clubToday`, the night date) leaves the compile at once; the job also sets it `retired` with `frontmatter.retiredReason = 'expired'`. A note past `reviewBy` stays live and is listed for review in the digest (it is not removed).
+- Compile: live, in-date notes, ordered by type (policy, faq, layout, event, learned: the §8.4 source order) then slug; the text is pure (no time stamps), hashed with SHA-256. Tokens are estimated as `ceil(utf8 bytes / 4)` (no tokenizer dependency; Thai counts about 0.75 per character). Warn at 40,000, refuse at 60,000: an over-cap compile writes no snapshot, and an approve that would push the brain over the cap is refused and rolled back. A compile whose hash equals the latest snapshot writes nothing.
+- Folder import (Obsidian round trip) and paste/photo import create **draft** notes only (`source: 'import'`). A file whose slug exists with a different body becomes a draft with `supersedesId` (the approval screen's "replaces note X"); the same body is skipped. Paste splits on markdown headings, else on blank-line paragraphs; a section failing lint is returned as rejected, not saved. Photo import takes an injected `OcrFn`; there is no OCR provider yet (tests use a fake).
+- Layout note: slug `layout`, generated from active zones and tables (codes, guest range, table count per zone; no prices), saved live without approval (it is the club's own data), regenerated after every table or zone write in staff settings and onboarding apply. "Near the DJ" waits for a floor-plan DJ marker; none exists yet.
+- Weekly digest: Monday from 10:00 Bangkok, once per club per week (claimed in `platform_flags` key `brain-digest:<clubId>:<monday>`, the A16b pattern; onboarding clubs skipped), an `info` alert `brain_digest` through `raiseAlert` when anything expired in the last 7 days or is due for review.
+- Events: `brain.note_drafted` on a draft create, `brain.note_approved`, `brain.note_rejected`; props `noteId`, `noteType`, `source` only.
+
+**Interfaces:**
+- `brain/lint.ts`: `lintNote(n: { type: NoteType; title: string; bodyMd: string; validUntil?: string | null }): LintIssue[]`, `class BrainLintError`.
+- `brain/notes.ts`: `createNote(db, input: NewNote, actor: Actor, now): Promise<BrainNote>`, `updateNote(db, clubId, noteId, patch, actor, now)`, `approveNote(db, clubId, noteId, actor, now)`, `rejectNote(db, clubId, noteId, actor, now)`, `listNotes(db, clubId, { status? })`, `noteVersions(db, clubId, noteId)`.
+- `brain/compile.ts`: `compileText(notes): string`, `estimateTokens(text): number`, `compileSnapshot(db, clubId, now): Promise<CompileResult>`, `latestSnapshot(db, clubId)`, `BRAIN_TOKEN_WARN`, `BRAIN_TOKEN_CAP`.
+- `brain/layout.ts`: `regenerateLayoutNote(db, clubId, now): Promise<BrainNote | null>`.
+- `brain/export.ts`: `exportObsidianFolder(db, clubId): Promise<NoteFile[]>`, `noteLinks(bodyMd): string[]`. `brain/import.ts`: `importObsidianFolder`, `importPastedText`, `importPhoto(db, clubId, image, ocr: OcrFn, actor, now)`.
+- `jobs/brain-expiry.ts`: `runBrainExpiry(db, now)`, `brainDigest(db, clubId, now)`, `sendBrainDigests(db, now)`, `startBrainExpiry(ctx, now)`.
+
+**Tests (`brain-store.test.ts`):** `note with a price is rejected at save`; `compile is deterministic and hashed`; `over 60k refuses to publish`; `export then import round-trips notes and links`; `pasted text becomes draft notes, never live`; `photo import runs the injected OCR and makes draft notes`; `a table change regenerates the layout note`; `an event note without an end date is rejected`; `an expired note is absent from the next snapshot and listed in the digest`. A17: `onboarding.test.ts › apply writes the baseline FAQs into the brain` replaces its todo.
+
+**Migration:** no.
 
 ---
 

@@ -3,7 +3,8 @@ import { Hono, type Context } from 'hono';
 import { setCookie } from 'hono/cookie';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { auditLog, clubs, users, type MembershipRole } from '../db/schema.js';
+import { emit, type EventInput } from '../data/events.js';
+import { auditLog, clubs, users, type Club, type MembershipRole } from '../db/schema.js';
 import { newId } from '../lib/util.js';
 import {
   acceptInvite,
@@ -63,6 +64,11 @@ async function audit(db: Db, c: TeamContext, action: string, entity: string, ent
   });
 }
 
+/** A staff.* team event (B1 declared them for A8's funnel), beside the audit row. */
+function teamEvent(db: Db, club: Club, actor: { type: EventInput['actorType']; id?: string | null }, now: Date, e: Pick<EventInput, 'type' | 'props'>) {
+  return emit(db, { ...e, clubId: club.id, occurredAt: now, actorType: actor.type, actorId: actor.id ?? undefined, dataOrigin: 'first_party', isTest: club.status === 'demo' });
+}
+
 /**
  * Team routes (plan A8), mounted inside `staffRoutes` so every path is `/clubs/:slug/team...`
  * and goes through `requireClubRole(app, 'owner', 'manager')`. A manager cannot invite, promote,
@@ -97,6 +103,7 @@ export function teamRoutes(app: AppContext) {
     const now = app.deps.now();
     const { invite, token } = await createInvite(db, app.config.APP_SECRET, { clubId: c.var.club.id, email, role, createdBy: c.var.user.id }, now);
     await audit(db, c, 'team.invite_created', 'invite', invite.id, { data: { email: invite.email, role, via: via ?? 'email' } }, now);
+    await teamEvent(db, c.var.club, c.var.actor, now, { type: 'staff.invited', props: { inviteId: invite.id, role, via: via ?? 'email' } });
     const link = inviteLink(app.config.PUBLIC_URL, token);
     const text = `You're invited to join ${c.var.club.name} as ${role}. Open this link to set up your account: ${link}`;
     return c.json(
@@ -141,6 +148,7 @@ export function teamRoutes(app: AppContext) {
     try {
       const change = await setMemberRole(db, c.var.club.id, g.target.userId, parsed.data.role);
       await audit(db, c, 'team.role_changed', 'user', g.target.userId, { before: { role: change.before }, after: { role: change.after } }, now);
+      await teamEvent(db, c.var.club, c.var.actor, now, { type: 'staff.role_changed', props: { from: change.before, to: change.after } });
       // A13: the Chatwoot login keeps its old role until revoked; the next "Open inbox" makes a new one.
       if (change.before !== change.after) app.track(tryRevokeInboxUser(db, app.chatwoot, c.var.club.id, g.target.userId, app.deps.log));
       return c.json({ ok: true, role: change.after });
@@ -156,6 +164,7 @@ export function teamRoutes(app: AppContext) {
     try {
       const out = await disableMember(db, c.var.club.id, g.target.userId, now);
       await audit(db, c, 'team.member_disabled', 'user', g.target.userId, { before: { role: out.role }, data: out }, now);
+      await teamEvent(db, c.var.club, c.var.actor, now, { type: 'staff.disabled', props: { role: out.role, sessionsRevoked: out.sessionsRevoked, accountDisabled: out.accountDisabled } });
       app.track(tryRevokeInboxUser(db, app.chatwoot, c.var.club.id, g.target.userId, app.deps.log)); // A13
       return c.json({ ok: true, sessionsRevoked: out.sessionsRevoked, accountDisabled: out.accountDisabled });
     } catch (err) {
@@ -246,6 +255,7 @@ export function inviteAcceptRoutes(app: AppContext) {
       data: { email: accepted.invite.email, role: accepted.role, createdBy: accepted.invite.createdBy },
       at: now,
     });
+    await teamEvent(db, club, { type: 'staff', id: accepted.userId }, now, { type: 'staff.invite_accepted', props: { inviteId: accepted.invite.id, role: accepted.role } });
 
     const result = { ok: true, club: { slug: club.slug, name: club.name }, role: accepted.role };
     const fresh = await db.query.users.findFirst({ where: eq(users.id, accepted.userId) });

@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { listNights, nightBody, nightsRange, SettingsError, upsertNight, type SettingsActor } from '../../platform/club-settings.js';
 import { clientIp, type AuthEnv } from '../auth.js';
 import type { AppContext } from '../context.js';
-import { clubBySlug, jsonBody } from './controls.js';
+import { CalendarDayError, upsertCalendarDay } from '../../data/calendar.js';
+import { adminAudit, clubBySlug, jsonBody } from './controls.js';
 
 /** Founder-entered city calendar days (spec §14.3); the seed holds the rest (B13). */
 export const calendarDayBody = z
@@ -46,14 +47,24 @@ export function calendarRoutes(app: AppContext) {
     }
   });
 
-  /**
-   * Election and city-event days. Needs B13's `upsertCalendarDay` (data/calendar.ts), which is not
-   * merged yet: until then the route validates and answers 503 `not_ready`.
-   */
+  /** Election and city-event days, written through B13's `upsertCalendarDay` (data/calendar.ts) and audited. */
   r.post('/calendar-days', async (c) => {
     const parsed = calendarDayBody.safeParse(await jsonBody(c));
     if (!parsed.success) return c.json({ error: 'bad_request', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400);
-    return c.json({ error: 'not_ready', message: 'City calendar entry needs Track B task B13 (upsertCalendarDay).' }, 503);
+    try {
+      await upsertCalendarDay(db, parsed.data);
+    } catch (err) {
+      if (err instanceof CalendarDayError) return c.json({ error: 'bad_request', issues: [err.code] }, 400);
+      throw err;
+    }
+    const day = parsed.data;
+    await adminAudit(
+      db,
+      c,
+      { clubId: null, action: 'platform.calendar_day_set', entity: 'calendar_days', entityId: `${day.date}:${day.kind}:${day.name}`, after: day },
+      app.deps.now(),
+    );
+    return c.json({ ok: true });
   });
 
   return r;

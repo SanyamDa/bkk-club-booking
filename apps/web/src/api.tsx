@@ -166,4 +166,6 @@ export const adminApi = {
   /** A9 event calendar (nights rows) for one club. */
   nights: (slug: string, from: string, days: number) => api<{ nights: any[] }>(adm(slug) + '/nights' + qs({ from, days })),
   saveNight: (slug: string, b: Record<string, unknown>) => api(adm(slug) + '/nights', { method: 'PUT', body: b }),
+  /** B13 city calendar: founder-entered election and city-event days. */
+  saveCalendarDay: (b: { date: string; kind: 'election' | 'city_event'; name: string; notes?: string }) => api('/api/admin/calendar-days', { body: b }),
 };

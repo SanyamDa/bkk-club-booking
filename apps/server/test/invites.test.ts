@@ -1,7 +1,7 @@
 import { and, eq, isNull } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
-import { auditLog, clubMemberships, invites, sessions, supportGrants, users, type Club } from '../src/db/schema.js';
+import { auditLog, clubMemberships, events, invites, sessions, supportGrants, users, type Club } from '../src/db/schema.js';
 import type { Db } from '../src/db/client.js';
 import { newId } from '../src/lib/util.js';
 import { inviteTokenHash } from '../src/platform/invites.js';
@@ -269,5 +269,24 @@ describe('staff invites (A8)', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, loginRequired: true });
     expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('team changes emit staff.invited, staff.invite_accepted, staff.role_changed and staff.disabled', async () => {
+    const { user: manager, cookie } = await signIn('manager@test.local');
+    const body = await (await invite(cookie, { email: 'n@test.local', role: 'host', via: 'line' })).json();
+    const accept = await req('POST', '/api/auth/invites/accept', undefined, { token: tokenOf(body.link), name: 'N', password: 'a-long-password' });
+    expect(accept.status).toBe(200);
+    const [newUser] = await db.select().from(users).where(eq(users.email, 'n@test.local'));
+    expect((await req('PATCH', staffUrl(clubA.slug, `/team/members/${newUser!.id}`), cookie, { role: 'door' })).status).toBe(200);
+    expect((await req('POST', staffUrl(clubA.slug, `/team/members/${newUser!.id}/disable`), cookie, {})).status).toBe(200);
+
+    const rows = await db.select().from(events).where(eq(events.clubId, clubA.id));
+    const of = (type: string) => rows.filter((r) => r.type === type);
+    expect(of('staff.invited')).toEqual([expect.objectContaining({ actorType: 'staff', actorId: manager.id, props: { inviteId: body.invite.id, role: 'host', via: 'line' } })]);
+    expect(of('staff.invite_accepted')).toEqual([expect.objectContaining({ actorId: newUser!.id, props: { inviteId: body.invite.id, role: 'host' } })]);
+    expect(of('staff.role_changed')).toEqual([expect.objectContaining({ props: { from: 'host', to: 'door' } })]);
+    expect(of('staff.disabled')).toEqual([expect.objectContaining({ props: { role: 'door', sessionsRevoked: 1, accountDisabled: true } })]);
+    // The email stays in audit_log; no event carries it.
+    expect(JSON.stringify(rows.map((r) => r.props))).not.toContain('n@test.local');
   });
 });

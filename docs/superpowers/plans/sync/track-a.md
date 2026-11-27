@@ -592,7 +592,7 @@ export async function upsertNight(db: Db, club: Club, input: NightInput, actor: 
 export async function listNights(db: Db, club: Club, from: string, days: number): Promise<Night[]>
 ```
 
-Staff routes (owner, manager) under `/api/staff/clubs/:slug`: `PATCH /settings`, `PUT /promptpay` and `PUT /greeting` (fresh TOTP, audited, staff-group notice), `GET /tables`, `POST|PATCH /zones[/:id]`, `POST|PATCH /tables[/:id]`, `GET|PUT /prices`, `GET|PUT /nights` (night date in the body), `GET|PUT /profile`, `GET /quota` (`warn` at 80%). Console: `GET|PUT /api/admin/clubs/:slug/nights`, `POST /api/admin/calendar-days` (validates, then 503 `not_ready` until B13).
+Staff routes (owner, manager) under `/api/staff/clubs/:slug`: `PATCH /settings`, `PUT /promptpay` and `PUT /greeting` (fresh TOTP, audited, staff-group notice), `GET /tables`, `POST|PATCH /zones[/:id]`, `POST|PATCH /tables[/:id]`, `GET|PUT /prices`, `GET|PUT /nights` (night date in the body), `GET|PUT /profile`, `GET /quota` (`warn` at 80%). Console: `GET|PUT /api/admin/clubs/:slug/nights`, `POST /api/admin/calendar-days` (validates, then calls B13's `upsertCalendarDay`; wired 2026-11-27, see track-b.md B13).
 
 For B9b: `price_rules.valid_to` is inclusive. A change closes the open rule at yesterday and opens one from today; a second change the same day edits today's rule. An event-night price is a `scope: 'club'` rule with `night_id`. Zone price columns stay the fallback.
 For B8b: a hand-edited night has `edited_by` = user id; closing needs `closed_reason`, opening clears it.
@@ -953,3 +953,7 @@ Route: `POST /integrations/pos/papaya/:slug`.
 - **Blockers:** A20b payment gateway not built; blocked on a written legal review of the money flow (§11.2). Link attribution waits on B's `/r/p/...` redirect and bot hold.
 - **it.todo:** none in `test/promoters.test.ts` or `test/crm.test.ts`.
 - **Browser walk:** still to be done by a human: Guests page (search, tag, note), Promoters page (create, link, report), a promoter login landing on `/staff/promoters`, and the report VIP tile and top promoters. Typecheck and `npm run build -w @club/web` green.
+
+## 2026-11-27: Track B requests closed by B0 part 2, B13, B15
+
+The B0 request (`applyClubContent`, velora-like 501), the B13 request (`upsertCalendarDay`, A9 todo) and the B15 request (`brain/notes.ts`, A17 `faqs` step and todo) are done; earlier lines above that say "until B0/B13/B15" are historical. See `sync/track-b.md`, "Integration: B0 part 2, B1, B13, B15".

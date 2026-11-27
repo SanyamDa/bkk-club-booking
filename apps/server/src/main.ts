@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { openDb } from './db/client.js';
+import { seedCalendarDays } from './data/calendar.js';
 import { DEMO_CLUB_SLUG, seedDemoClub } from './db/seed.js';
 import { startBackground } from './jobs/index.js';
 import { logLine } from './lib/log.js';
@@ -10,6 +11,7 @@ import { logLine } from './lib/log.js';
 const config = loadConfig();
 const { db, close } = await openDb({ url: config.DATABASE_URL, dataDir: config.DATA_DIR });
 await seedDemoClub(db);
+await seedCalendarDays(db); // B13: the city calendar seed; existing rows are kept
 const { app, ctx } = createApp(config, db);
 
 const stopBackground = await startBackground(ctx, () => new Date());

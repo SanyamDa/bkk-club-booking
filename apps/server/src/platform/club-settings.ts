@@ -221,7 +221,8 @@ export async function upsertNight(db: Db, club: Club, input: NightInput, actor: 
       await clubChangeEvent(tx, club, actor, now, {
         type: 'club.event_night_created',
         nightDate: input.date,
-        props: { nightId: night.id, eventName: night.eventName, eventType: night.eventType },
+        props: { nightId: night.id, eventType: night.eventType },
+        raw: { eventName: night.eventName }, // free text stays out of props (B1)
       });
     }
     await auditClubChange(tx, club, actor, { action: 'club.night_changed', entity: 'nights', entityId: night.id, before: before ?? null, after: night }, now);

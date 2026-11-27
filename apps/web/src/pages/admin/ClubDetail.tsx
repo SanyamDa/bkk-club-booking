@@ -10,9 +10,63 @@ function EventCalendar({ slug, openWeekdays }: { slug: string; openWeekdays?: nu
   return (
     <div className="card stack">
       <h2>Event calendar</h2>
-      <p className="faint" style={{ margin: 0 }}>Close a night with its reason, or name an event night. City days (elections, concerts) are entered once B13 ships.</p>
+      <p className="faint" style={{ margin: 0 }}>Close a night with its reason, or name an event night.</p>
       <NightsCalendar key={slug} nightsApi={nightsApi} openWeekdays={openWeekdays} />
+      <CityDayForm />
     </div>
+  );
+}
+
+/** Founder-only city calendar entry (spec §14.3; plan A9 and B13): elections and city events, for every club. */
+function CityDayForm() {
+  const [f, setF] = useState({ date: '', kind: 'election' as 'election' | 'city_event', name: '', notes: '' });
+  const [msg, setMsg] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    setMsg('');
+    try {
+      await adminApi.saveCalendarDay({ date: f.date, kind: f.kind, name: f.name.trim(), ...(f.notes.trim() ? { notes: f.notes.trim() } : {}) });
+      setMsg(`Saved ${f.name.trim()} on ${f.date}.`);
+      setF((p) => ({ ...p, name: '', notes: '' }));
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="stack" onSubmit={save}>
+      <h3 style={{ margin: 0 }}>City calendar day</h3>
+      <p className="faint" style={{ margin: 0 }}>Elections and city events, as they are announced. Holidays and alcohol-ban days are already loaded.</p>
+      <label>
+        Date
+        <input type="date" required value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} />
+      </label>
+      <label>
+        Kind
+        <select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value as 'election' | 'city_event' })}>
+          <option value="election">Election</option>
+          <option value="city_event">City event (concert, festival)</option>
+        </select>
+      </label>
+      <label>
+        Name
+        <input required maxLength={200} value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
+      </label>
+      <label>
+        Notes
+        <input maxLength={1000} value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} />
+      </label>
+      <button type="submit" disabled={busy || !f.date || !f.name.trim()}>Save day</button>
+      {msg && <p className="faint" style={{ margin: 0 }}>{msg}</p>}
+      {error && <div className="error">{error}</div>}
+    </form>
   );
 }
 import { HealthTile } from './Clubs';

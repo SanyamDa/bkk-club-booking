@@ -2,8 +2,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import { and, eq, like, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
+import { regenerateLayoutNote } from '../../brain/layout.js';
+import { BrainLintError } from '../../brain/lint.js';
+import { createNote, stableSlug } from '../../brain/notes.js';
 import type { Db } from '../../db/client.js';
-import { auditLog, clubProfile, clubs, platformFlags, priceRules, tables, zones, type Club } from '../../db/schema.js';
+import { auditLog, brainNotes, clubProfile, clubs, platformFlags, priceRules, tables, zones, type Club } from '../../db/schema.js';
 import { tryProvisionClubInbox } from '../../integrations/chatwoot/provision.js';
 import { newId } from '../../lib/util.js';
 import { clubToday, setPriceRule, type SettingsActor } from '../../platform/club-settings.js';
@@ -24,8 +27,9 @@ import { adminAudit, clubBySlug, jsonBody } from './controls.js';
  * - `onboarding_form:<clubId>`: `{ submittedAt, data }`, the latest submission.
  * - `onboarding:<clubId>`: `{ steps: { [step]: { startedAt, endedAt, durationMs } }, appliedAt? }`.
  *
- * Baseline FAQs are kept in the submission; writing them into the brain waits for B15
- * (`brain/notes.ts`), so the apply step reports `faqs: not_ready`.
+ * Baseline FAQs with an answer are written into the brain as draft notes (`brain/notes.ts`, B15;
+ * source `onboarding`), for the manager to approve. A FAQ whose slug already has a note is skipped,
+ * so apply stays idempotent; one that fails the price lint is counted and not saved.
  */
 
 export const LINK_TTL_MS = 14 * 86_400_000;
@@ -246,7 +250,31 @@ async function applyForm(db: Db, club: Club, form: OnboardingForm, actor: Settin
     steps.push({ name: 'profile', status: 'done' });
   } else steps.push({ name: 'profile', status: 'skipped' });
 
-  steps.push({ name: 'faqs', status: 'not_ready', count: form.faqs.length, detail: 'Baseline FAQs wait for the brain store (B15 brain/notes.ts); kept in the submission.' });
+  await regenerateLayoutNote(db, club.id, now);
+
+  let faqsWritten = 0;
+  let faqsRejected = 0;
+  let faqsKept = 0;
+  for (const f of form.faqs) {
+    const answers = [f.answerEn, f.answerTh].filter((a): a is string => Boolean(a));
+    if (!answers.length) continue; // a template blank the club left empty
+    const slug = stableSlug(f.question);
+    if (await db.query.brainNotes.findFirst({ where: and(eq(brainNotes.clubId, club.id), eq(brainNotes.slug, slug)) })) {
+      faqsKept++;
+      continue;
+    }
+    try {
+      await createNote(db, { clubId: club.id, title: f.question, type: 'faq', bodyMd: answers.join('\n\n'), source: 'onboarding', slug, frontmatter: { question: f.question } }, actor, now);
+      faqsWritten++;
+    } catch (err) {
+      if (!(err instanceof BrainLintError)) throw err;
+      faqsRejected++;
+    }
+  }
+  const faqDetail = [faqsKept ? `${faqsKept} already in the brain` : '', faqsRejected ? `${faqsRejected} rejected (a price or availability claim; prices live in the pricing screen)` : '']
+    .filter(Boolean)
+    .join('; ');
+  steps.push({ name: 'faqs', status: form.faqs.length ? 'done' : 'skipped', count: faqsWritten, ...(faqDetail ? { detail: faqDetail } : {}) });
   steps.push({ name: 'promptpay', status: 'manual', detail: 'Enter the PromptPay ID in Settings with a fresh second factor.' });
   return steps;
 }

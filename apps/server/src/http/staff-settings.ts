@@ -2,6 +2,7 @@ import { and, asc, desc, eq } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import type { Actor } from '../bookings/service.js';
+import { regenerateLayoutNote } from '../brain/layout.js';
 import type { Db } from '../db/client.js';
 import { clubProfile, clubs, opsEvents, tables, zones, type ClubSettings } from '../db/schema.js';
 import { newId } from '../lib/util.js';
@@ -39,6 +40,24 @@ export function actorOf(c: C): SettingsActor {
 }
 
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+/**
+ * `club.settings_changed` props.fields code per settings key. All the keys the settings route
+ * accepts, joined with ':', stay within the 64-character props limit.
+ */
+export const SETTINGS_FIELD_CODES: Record<string, string> = {
+  openWeekdays: 'days',
+  bookingWindowDays: 'window',
+  holdMinutes: 'hold',
+  arrivalBy: 'arrival',
+  handoffTimeoutMinutes: 'handoff',
+  accentColor: 'accent',
+  rules: 'rules',
+  address: 'address',
+  drinksMenuUrl: 'menu',
+  greeting: 'greeting',
+  mapUrl: 'map',
+};
+
 const settingsBody = z
   .object({
     openWeekdays: z.array(z.number().int().min(0).max(6)).max(7),
@@ -104,16 +123,25 @@ export function staffSettingsRoutes(app: AppContext) {
     throw err;
   };
 
-  /** Writes new `settings`, audits and emits `club.settings_changed` with the changed field names. */
+  /**
+   * Writes new `settings`, audits and emits `club.settings_changed` with the changed fields as
+   * short codes (SETTINGS_FIELD_CODES), in one transaction. Codes, not key names, because every
+   * key the settings form sends, joined, is longer than the 64-character props limit.
+   */
   async function saveSettings(c: C, db: Db, patch: Partial<ClubSettings>, action: string) {
     const club = c.var.club;
     const now = app.deps.now();
     const settings = { ...club.settings, ...patch };
-    await db.update(clubs).set({ settings }).where(eq(clubs.id, club.id));
-    const fields = Object.keys(patch).filter((k) => k !== 'rulesVersion');
+    const fields = Object.keys(patch)
+      .filter((k) => k !== 'rulesVersion')
+      .map((k) => SETTINGS_FIELD_CODES[k] ?? k);
     const pickOf = (s: ClubSettings) => Object.fromEntries(Object.keys(patch).map((k) => [k, s[k as keyof ClubSettings] ?? null]));
-    await auditClubChange(db, club, actorOf(c), { action, entity: 'clubs', entityId: club.id, before: pickOf(club.settings), after: pickOf(settings) }, now);
-    await clubChangeEvent(db, club, actorOf(c), now, { type: 'club.settings_changed', props: { fields: fields.join(',') } });
+    await db.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Db;
+      await tx.update(clubs).set({ settings }).where(eq(clubs.id, club.id));
+      await auditClubChange(tx, club, actorOf(c), { action, entity: 'clubs', entityId: club.id, before: pickOf(club.settings), after: pickOf(settings) }, now);
+      await clubChangeEvent(tx, club, actorOf(c), now, { type: 'club.settings_changed', props: { fields: fields.join(':') } }); // ':' because ',' fails the B1 props pattern
+    });
     return settings;
   }
 
@@ -178,6 +206,7 @@ export function staffSettingsRoutes(app: AppContext) {
     const [zone] = await db.insert(zones).values({ id: `zone_${newId()}`, clubId: club.id, ...parsed.data }).returning();
     await auditClubChange(db, club, actorOf(c), { action: 'club.zone_created', entity: 'zones', entityId: zone!.id, after: zone }, now);
     await clubChangeEvent(db, club, actorOf(c), now, { type: 'club.settings_changed', zoneId: zone!.id, props: { fields: 'zones' } });
+    await refreshLayout(club.id, now);
     return c.json(zone, 201);
   });
 
@@ -191,9 +220,18 @@ export function staffSettingsRoutes(app: AppContext) {
     const [zone] = Object.keys(parsed.data).length ? await db.update(zones).set(parsed.data).where(eq(zones.id, before.id)).returning() : [before];
     await auditClubChange(db, club, actorOf(c), { action: 'club.zone_changed', entity: 'zones', entityId: before.id, before, after: zone }, now);
     await clubChangeEvent(db, club, actorOf(c), now, { type: 'club.settings_changed', zoneId: before.id, props: { fields: 'zones' } });
+    await refreshLayout(club.id, now);
     return c.json(zone);
   });
 
+  // The brain's layout note follows the tables (spec §8.2, B15). A failure is logged; the table change stands.
+  async function refreshLayout(clubId: string, now: Date) {
+    try {
+      await regenerateLayoutNote(db, clubId, now);
+    } catch (err) {
+      app.deps.log('Layout note regenerate failed', err);
+    }
+  }
   const ownZone = (clubId: string, id: string) => db.query.zones.findFirst({ where: and(eq(zones.id, id), eq(zones.clubId, clubId)) });
   const codeTaken = async (clubId: string, code: string, exceptId?: string) => {
     const t = await db.query.tables.findFirst({ where: and(eq(tables.clubId, clubId), eq(tables.code, code)) });
@@ -211,6 +249,7 @@ export function staffSettingsRoutes(app: AppContext) {
     const [table] = await db.insert(tables).values({ id: `table_${newId()}`, clubId: club.id, ...parsed.data, validFrom: clubToday(club, now) }).returning();
     await auditClubChange(db, club, actorOf(c), { action: 'club.table_created', entity: 'tables', entityId: table!.id, after: table }, now);
     await clubChangeEvent(db, club, actorOf(c), now, { type: 'club.settings_changed', tableId: table!.id, zoneId: table!.zoneId, props: { fields: 'tables' } });
+    await refreshLayout(club.id, now);
     return c.json(table, 201);
   });
 
@@ -230,6 +269,7 @@ export function staffSettingsRoutes(app: AppContext) {
     const [table] = await db.update(tables).set({ ...p, ...validity }).where(eq(tables.id, before.id)).returning();
     await auditClubChange(db, club, actorOf(c), { action: 'club.table_changed', entity: 'tables', entityId: before.id, before, after: table }, now);
     await clubChangeEvent(db, club, actorOf(c), now, { type: 'club.settings_changed', tableId: before.id, zoneId: table!.zoneId, props: { fields: 'tables' } });
+    await refreshLayout(club.id, now);
     return c.json(table);
   });
 

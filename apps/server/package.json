@@ -11,7 +11,8 @@
     "db:generate": "drizzle-kit generate",
     "live": "tsx src/scripts/live.ts",
     "load": "tsx src/scripts/load.ts",
-    "admin:create": "tsx src/scripts/create-admin.ts"
+    "admin:create": "tsx src/scripts/create-admin.ts",
+    "events:doc": "tsx src/scripts/events-doc.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.6.0",

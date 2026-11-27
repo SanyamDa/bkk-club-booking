@@ -12,7 +12,11 @@ import {
   messages,
   opsEvents,
   type Club,
+  priceRules,
+  tables,
+  zones,
 } from '../src/db/schema.js';
+import { VELORA } from '../src/demo/velora-content.js';
 import { newId } from '../src/lib/util.js';
 import { fakeSetupClients, type SetupClients } from '../src/line/setup.js';
 import { totp } from '../src/platform/totp.js';
@@ -460,17 +464,28 @@ describe('founder console API (A5)', () => {
     }
   });
 
-  it('velora-like template answers 501 not_ready and creates nothing until B0 merges', async () => {
+  it('a velora-like club gets complete settings, a channels row, a refPrefix no other club has, and Velora tables and prices', async () => {
     const s = await setup();
-    const velora = await createClub(s, 'velora-two', 'velora-like');
-    expect(velora.status).toBe(501);
-    expect(await velora.json()).toMatchObject({ error: 'not_ready' });
-    expect(await s.db.query.clubs.findFirst({ where: eq(clubs.slug, 'velora-two') })).toBeUndefined();
+    const res = await createClub(s, 'velora-two', 'velora-like');
+    expect(res.status).toBe(201);
+    const c = await reload(s.db, 'velora-two');
+    const prefixes = (await s.db.select().from(clubs)).map((x) => x.settings.refPrefix);
+    expect(new Set(prefixes).size).toBe(prefixes.length);
+    expect(Object.keys(c.settings).sort()).toEqual(expect.arrayContaining(Object.keys(fixtureSettings).filter((k) => k !== 'drinksMenuUrl').sort()));
+    expect(c.settings).toMatchObject({ openWeekdays: [3, 4, 5, 6], bookingWindowDays: 30, holdMinutes: 10, arrivalBy: '23:30', rulesVersion: '2026-11-27' });
+    expect(c.settings.rules).toEqual({ en: VELORA.policies.map((p) => p.en), th: VELORA.policies.map((p) => p.th) });
+    expect(c.status).toBe('onboarding');
+    expect(await s.db.select().from(channels).where(and(eq(channels.clubId, c.id), eq(channels.kind, 'line')))).toHaveLength(1);
+    const zs = await s.db.select().from(zones).where(eq(zones.clubId, c.id));
+    expect(zs.map((z) => [z.name, z.minSpendSatang, z.depositSatang]).sort()).toEqual(VELORA.zones.map((z) => [z.name_en, z.minSpendSatang, z.depositSatang]).sort());
+    const ts = await s.db.select().from(tables).where(eq(tables.clubId, c.id));
+    expect(ts.map((t) => t.code).sort()).toEqual(VELORA.tables.map((t) => t.code).sort());
+    expect(await s.db.select().from(priceRules).where(eq(priceRules.clubId, c.id))).toHaveLength(VELORA.priceRules.length);
+    // A blank club still gets no content.
+    expect((await createClub(s, 'blank-two')).status).toBe(201);
+    const blank = await reload(s.db, 'blank-two');
+    expect(await s.db.select().from(tables).where(eq(tables.clubId, blank.id))).toHaveLength(0);
   });
-
-  // Needs B0's applyClubContent (called in the club-insert transaction). Run the same settings,
-  // channels-row and refPrefix assertions as the blank-club test on a velora-like club.
-  it.todo('a velora-like club gets complete settings, a channels row, a refPrefix no other club has, and Velora tables and prices');
 
   it('the health tile reads LINE status and quota from the newest line_setup row, and shows not connected when there is none', async () => {
     const s = await setup();

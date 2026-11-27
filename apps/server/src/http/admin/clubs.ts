@@ -5,6 +5,8 @@ import type { Db } from '../../db/client.js';
 import { channels, clubProfile, clubs, type ClubStatus } from '../../db/schema.js';
 import { emit } from '../../data/events.js';
 import { chatwootFlagKey, tryProvisionClubInbox } from '../../integrations/chatwoot/provision.js';
+import { applyClubContent } from '../../demo/apply-content.js';
+import { VELORA } from '../../demo/velora-content.js';
 import { newId } from '../../lib/util.js';
 import { newClubSettings, uniqueRefPrefix } from '../../platform/club-templates.js';
 import { credentialSummary } from '../../platform/credentials.js';
@@ -65,8 +67,6 @@ export function clubsRoutes(app: AppContext) {
     const parsed = createBody.safeParse(await jsonBody(c));
     if (!parsed.success) return c.json({ error: 'bad_request', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400);
     const { name, slug, template } = parsed.data;
-    // B0's applyClubContent is not merged yet: the velora-like template waits for it.
-    if (template === 'velora-like') return c.json({ error: 'not_ready', message: 'The velora-like template needs Track B task B0.' }, 501);
     if (await clubBySlug(db, slug)) return c.json({ error: 'slug_taken' }, 409);
     const now = app.deps.now();
     const id = `club_${newId()}`;
@@ -85,6 +85,8 @@ export function clubsRoutes(app: AppContext) {
         createdAt: now,
       });
       await tx.insert(channels).values({ id: `chan_line_${id}`, clubId: id, kind: 'line' });
+      // B0: the velora-like template copies the Velora zones, tables, prices and policies.
+      if (template === 'velora-like') await applyClubContent(tx, id, VELORA);
       await emit(tx, {
         clubId: id,
         type: 'club.created',

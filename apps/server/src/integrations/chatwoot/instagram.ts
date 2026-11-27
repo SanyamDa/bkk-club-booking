@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { Db } from '../../db/client.js';
 import { channels, conversations, guests, messages, platformFlags, type Club } from '../../db/schema.js';
 import { emit } from '../../data/events.js';
+import { isTestContext } from '../../data/test-flag.js';
 import { newId } from '../../lib/util.js';
 import { decryptSecret } from '../../platform/crypto.js';
 import { chatwootConversationRef, chatwootState, InboxNotProvisioned, type ChatwootClient } from './provision.js';
@@ -230,7 +231,7 @@ export async function recordInstagramMessage(db: Db, club: Club, state: Instagra
       .returning({ id: messages.id });
     if (!inserted.length) return 'duplicate' as const;
 
-    const base = { clubId: club.id, actorType: 'guest' as const, channel: INSTAGRAM_CHANNEL, dataOrigin: 'instagram' as const, source: 'chatwoot', guestId: g.id, conversationId: c.id, isTest };
+    const base = { clubId: club.id, actorType: 'guest' as const, channel: INSTAGRAM_CHANNEL, dataOrigin: 'instagram' as const, source: 'chatwoot', guestId: g.id, conversationId: c.id, isTest: isTestContext({ club, guest: g }) };
     if (newGuest) await emit(tx, { ...base, type: 'guest.first_seen', occurredAt: at, dedupeKey: `ig:first_seen:${g.id}` });
     await emit(tx, {
       ...base,

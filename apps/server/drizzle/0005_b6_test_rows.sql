@@ -1,0 +1,3 @@
+DROP INDEX "bookings_one_active_per_table_night";--> statement-breakpoint
+CREATE UNIQUE INDEX "bookings_one_active_test_per_table_night" ON "bookings" USING btree ("table_id","night_date") WHERE "bookings"."status" in ('held','awaiting_payment','payment_review','confirmed','arrived') and "bookings"."is_test" = true;--> statement-breakpoint
+CREATE UNIQUE INDEX "bookings_one_active_per_table_night" ON "bookings" USING btree ("table_id","night_date") WHERE "bookings"."status" in ('held','awaiting_payment','payment_review','confirmed','arrived') and "bookings"."is_test" = false;

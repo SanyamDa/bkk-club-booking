@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { handleEvent } from '../bot/flow.js';
 import { clubs, guests, messages } from '../db/schema.js';
 import { SIM_USER_PREFIX } from '../line/gateway.js';
+import { requirePlatformAdmin, type AuthEnv } from './auth.js';
 import type { AppContext } from './context.js';
 
 const eventSchema = z.object({
@@ -20,12 +21,16 @@ const eventSchema = z.object({
 });
 
 /**
- * Local chat simulator (DEV_SIMULATOR=1 only). Builds the same webhook events LINE would send
- * and runs them through the real bot, using the dev gateway so nothing reaches LINE.
+ * Chat simulator (B8, spec §12.3 Simulator, §13.1 #1). Builds the same webhook events LINE would
+ * send and runs them through the real bot, using the dev gateway so nothing reaches LINE.
+ * Every route needs a platform-admin session. `app.ts` mounts it at `/api/admin/sim` in every
+ * environment and also at `/api/dev` when `config.DEV_SIMULATOR` is on.
+ * It runs against any club by slug; the simulator guest is a test row (`guests.is_test = true`).
  */
 export function devRoutes(app: AppContext) {
-  const r = new Hono();
+  const r = new Hono<AuthEnv>();
   const { db } = app.deps;
+  r.use('*', requirePlatformAdmin(app));
 
   r.post('/:slug/event', async (c) => {
     const club = await db.query.clubs.findFirst({ where: eq(clubs.slug, c.req.param('slug')) });
@@ -35,6 +40,13 @@ export function devRoutes(app: AppContext) {
     const input = parsed.data;
     const userId = `${SIM_USER_PREFIX}${input.userId}`;
     app.gateways.dev.setProfile(userId, { displayName: input.displayName, language: input.lang });
+    // The simulator guest is always test data, at any club (Global Constraints: is_test lives on the guest).
+    // A new `SIM-` guest is created by the bot's `upsertGuest`, which marks it test (B6) and emits
+    // `guest.first_seen`; here we only flag a guest row that existed before it was marked.
+    await db
+      .update(guests)
+      .set({ isTest: true })
+      .where(and(eq(guests.clubId, club.id), eq(guests.lineUserId, userId), eq(guests.isTest, false)));
 
     const base = {
       timestamp: Date.now(),

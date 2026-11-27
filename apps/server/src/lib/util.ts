@@ -17,10 +17,6 @@ export function newRefCode(prefix: string): string {
   return `${prefix}-${s}`;
 }
 
-export function newLinkCode(): string {
-  return randomBytes(3).toString('hex').toUpperCase();
-}
-
 /** Short HMAC used to sign public links (media URLs, guest detail forms). */
 export function sign(secret: string, purpose: string, value: string): string {
   return createHmac('sha256', secret).update(`${purpose}:${value}`).digest('base64url').slice(0, 22);

@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '../api';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { adminApi, api, ApiError, type AdminClub } from '../api';
 import { FlexRender, type LineAction } from '../components/FlexRender';
 import { describe } from './staff/MessageThread';
 
 /**
- * Local chat simulator: talk to the real bot as if you were a guest in LINE.
- * Events go through exactly the same code path as LINE webhooks; nothing is sent to LINE.
+ * Chat simulator (B8, spec §12.3): talk to the real bot as if you were a guest in LINE, at any club.
+ * Platform admins only: the page calls `/api/admin/sim`, which needs an admin session, so it sends
+ * anyone signed out to the login page and shows a refusal to everyone else. Events go through
+ * exactly the same code path as LINE webhooks; nothing is sent to LINE, and every simulator guest
+ * is test data.
  */
 
 interface Msg { id: string; direction: 'in' | 'out'; kind: string; payload: any; at: string }
@@ -16,8 +20,14 @@ const GUESTS = [
   { id: 'guest-c', name: 'James' },
 ];
 
+const SIM = (club: string) => `/api/admin/sim/${encodeURIComponent(club)}`;
+
 export function Simulator() {
-  const [club] = useState('demo');
+  const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const club = params.get('club') || 'demo';
+  const [auth, setAuth] = useState<'loading' | 'ok' | 'forbidden'>('loading');
+  const [clubs, setClubs] = useState<AdminClub[]>([]);
   const [guest, setGuest] = useState(GUESTS[0]!);
   const [lang, setLang] = useState<'en' | 'th'>('en');
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -28,17 +38,32 @@ export function Simulator() {
   const endRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    adminApi
+      .me()
+      .then((d) => {
+        if (d.user.platformRole !== 'admin') return setAuth('forbidden');
+        setAuth('ok');
+        adminApi.clubs().then((r) => setClubs(r.clubs)).catch(() => setClubs([]));
+      })
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 401) navigate(`/staff/login?next=${encodeURIComponent('/dev/simulator')}`, { replace: true });
+        else setAuth('forbidden');
+      });
+  }, [navigate]);
+
   const load = useCallback(async () => {
-    const d = await api<{ messages: Msg[]; staffAlerts: Msg[] }>(`/api/dev/${club}/transcript?userId=${guest.id}`);
+    const d = await api<{ messages: Msg[]; staffAlerts: Msg[] }>(`${SIM(club)}/transcript?userId=${guest.id}`);
     setMessages(d.messages);
     setAlerts(d.staffAlerts);
   }, [club, guest.id]);
 
   useEffect(() => {
+    if (auth !== 'ok') return;
     void load();
     const id = setInterval(load, 1500);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, auth]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -47,7 +72,7 @@ export function Simulator() {
   async function send(body: Record<string, unknown>) {
     setBusy(true);
     try {
-      await api(`/api/dev/${club}/event`, { body: { userId: guest.id, displayName: guest.name, lang, ...body } });
+      await api(`${SIM(club)}/event`, { body: { userId: guest.id, displayName: guest.name, lang, ...body } });
       await load();
     } finally {
       setBusy(false);
@@ -70,14 +95,32 @@ export function Simulator() {
   const lastOut = [...messages].reverse().find((m) => m.direction === 'out');
   const quick: LineAction[] = lastOut?.payload?.quickReply?.items?.map((i: any) => i.action) ?? [];
 
+  const clubName = clubs.find((c) => c.slug === club)?.name ?? (club === 'demo' ? 'Velora (Demo)' : club);
+
+  if (auth === 'loading') return <div className="staff"><p className="faint" style={{ padding: 16 }}>Loading… / กำลังโหลด…</p></div>;
+  if (auth === 'forbidden') {
+    return (
+      <div className="staff">
+        <div className="card" style={{ margin: 16 }}>
+          <h2>Platform admins only</h2>
+          <p>The chat simulator needs a platform-admin login. / เครื่องจำลองแชทใช้ได้เฉพาะผู้ดูแลแพลตฟอร์ม</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="staff">
       <header className="topbar">
         <div>
-          <div className="brand">Chat simulator <span>·</span> Velora (Demo)</div>
-          <div className="faint">Runs the real bot locally. Nothing is sent to LINE.</div>
+          <div className="brand">Chat simulator <span>·</span> {clubName}</div>
+          <div className="faint">Runs the real bot. Nothing is sent to LINE; every simulator guest is test data.</div>
         </div>
         <div className="row wrap">
+          <select className="input" style={{ width: 'auto', minHeight: 34 }} value={club} onChange={(e) => setParams({ club: e.target.value })} aria-label="Club">
+            {!clubs.some((c) => c.slug === club) && <option value={club}>Club: {clubName}</option>}
+            {clubs.map((c) => <option key={c.slug} value={c.slug}>Club: {c.name} ({c.status})</option>)}
+          </select>
           <select className="input" style={{ width: 'auto', minHeight: 34 }} value={guest.id} onChange={(e) => setGuest(GUESTS.find((g) => g.id === e.target.value)!)} aria-label="Simulated guest">
             {GUESTS.map((g) => <option key={g.id} value={g.id}>Guest: {g.name}</option>)}
           </select>
@@ -92,7 +135,7 @@ export function Simulator() {
       <div className="split">
         <div className="main" style={{ maxWidth: 460 }}>
           <div style={{ border: '1px solid var(--line)', borderRadius: 28, overflow: 'hidden', background: '#8aa1c1' }}>
-            <div style={{ background: '#1f2a37', color: '#fff', padding: '14px 16px', fontWeight: 600 }}>Velora (Demo)</div>
+            <div style={{ background: '#1f2a37', color: '#fff', padding: '14px 16px', fontWeight: 600 }}>{clubName}</div>
             <div style={{ height: 560, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 8, background: '#7c93b3' }}>
               {messages.length === 0 && (
                 <div style={{ textAlign: 'center', color: '#fff', marginTop: 40 }}>

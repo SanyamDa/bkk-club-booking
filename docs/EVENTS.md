@@ -124,6 +124,7 @@ Every event the platform records, written with `emit()` into the `events` table 
 | `link.opened` | 1 | `kind` (none) | — | Tagged redirect link tapped (B4). |
 | `guest.removal_requested` | 1 | — | — | Guest asked for their data to be removed (B10b). |
 | `guest.removed` | 1 | — | — | Guest data removal job finished (B10b). |
+| `guest.tester_registered` | 1 | — | — | Guest typed the one-time tester code at an onboarding club; their rows are test data from now on (B6). |
 | `staff.invited` | 1 | `inviteId` (pseudonymous), `role` (none), `via` (none) | — | Manager invited a staff member (A8). |
 | `staff.invite_accepted` | 1 | `inviteId` (pseudonymous), `role` (none) | — | Invite accepted (A8). |
 | `staff.role_changed` | 1 | `from` (none), `to` (none) | — | Member role changed (A8). |

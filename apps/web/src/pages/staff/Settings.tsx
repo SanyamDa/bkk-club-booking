@@ -4,8 +4,9 @@ import { useStaff } from './Layout';
 
 interface SettingsData {
   name: string;
-  staffLinkCode: string;
   staffGroupLinked: boolean;
+  /** A new group typed a code while another group is linked; a second code there replaces it (B5). */
+  staffGroupPending: boolean;
   lineConnected: boolean;
   webhookUrl: string;
   liffEndpoint: string;
@@ -109,6 +110,37 @@ function LinePanel({ club }: { club: string }) {
   );
 }
 
+/**
+ * B5: "Issue link code" makes a fresh single-use code (10 minutes) and shows it once; the server
+ * keeps only its hash. Replacing an already linked group needs a second code typed in the new group.
+ */
+function StaffLinkHint({ club, pending }: { club: string; pending: boolean }) {
+  const [issued, setIssued] = useState<{ code: string; expiresAt: string } | null>(null);
+  const [err, setErr] = useState('');
+  const issue = async () => {
+    setErr('');
+    try {
+      setIssued(await api<{ code: string; expiresAt: string }>(staffPath(club, '/staff-link-code'), { method: 'POST', body: {} }));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed');
+    }
+  };
+  const until = issued ? new Date(issued.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  return (
+    <span className="stack" style={{ gap: 6 }}>
+      <span>
+        Invite the club’s LINE account to your staff group, press Issue link code, and type <code className="mono">link</code> followed by the code in the group.
+        {pending && ' A new group is waiting: issue a second code and type it in that new group to move alerts there.'}
+      </span>
+      <span>
+        <button className="btn" type="button" onClick={issue}>Issue link code</button>
+        {issued && <> <code className="mono">link {issued.code}</code> <span className="faint">works once, until {until}</span></>}
+        {err && <span className="error"> {err}</span>}
+      </span>
+    </span>
+  );
+}
+
 /** Setup checklist, live LINE status, and the manager's club settings (plan A9). */
 export function Settings() {
   const { club } = useStaff();
@@ -124,7 +156,7 @@ export function Settings() {
       <div className="card stack">
         <Check ok={s.lineConnected} label="LINE Messaging API connected" hint={<>Set the channel secret and access token in <code>apps/server/.env</code>, then run <code>npm run live</code>. It points LINE’s webhook here for you (currently <code>{s.webhookUrl}</code>).</>} />
         <Check ok={s.liffConfigured} label="Booking form inside LINE (LIFF)" hint={<>Create a LIFF app (endpoint <code>{s.liffEndpoint}</code>), put its ID in <code>DEMO_LIFF_ID</code> and the LINE Login channel ID/secret in <code>.env</code>, so the endpoint follows the tunnel automatically. Until then the form opens in the browser.</>} />
-        <Check ok={s.staffGroupLinked} label="Staff LINE group" hint={<>Invite the club’s LINE account to your staff group and type <code className="mono">link {s.staffLinkCode}</code> in the group.</>} />
+        <Check ok={s.staffGroupLinked} label="Staff LINE group" hint={<StaffLinkHint club={club} pending={s.staffGroupPending} />} />
         <Check ok={s.promptpayConfigured} label="PromptPay deposits" hint={<>Set <code>DEMO_PROMPTPAY_ID</code> to the account deposits are paid to. Without it the bot runs in demo mode (no real QR).</>} />
       </div>
       <QuotaPanel club={club} />
@@ -304,7 +336,7 @@ function TablesEditor({ club }: { club: string }) {
   return (
     <div className="card stack">
       <h2>Zones, tables and prices</h2>
-      <p className="faint" style={{ margin: 0 }}>A price change starts tonight; past nights keep the price they had. The booking flow uses these prices once Track B task B9b ships; until then it uses the zone and table prices set at creation.</p>
+      <p className="faint" style={{ margin: 0 }}>A price change starts tonight; past nights keep the price they had. The booking flow uses these prices; a table with no price rule uses its zone's base price.</p>
       {data.zones.map((z) => (
         <div key={z.id} className="stack" style={{ gap: 6, borderTop: '1px solid var(--line, #eee)', paddingTop: 8 }}>
           <div className="spread wrap">

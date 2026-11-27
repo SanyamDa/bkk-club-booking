@@ -17,7 +17,8 @@ const HANDOFF =
 const MY_BOOKING = /\bmy\s+(booking|reservation|table)\b|การจองของฉัน|เช็คการจอง|ดูการจอง/i;
 const BOOK = /\b(book|booking|reserve|reservation|table|tables)\b|จอง|โต๊ะ/i;
 const LOCATION = /\b(location|address|where are you|map|directions)\b|แผนที่|ที่อยู่|อยู่ที่ไหน|ไปยังไง/i;
-const STAFF_LINK = /^\s*link\s+([A-F0-9]{6})\s*$/i;
+/** `link <code>`: the 8-character code from the dashboard's "Issue link code" button (bot/staff-link.ts). */
+const STAFF_LINK = /^\s*link\s+([A-Z0-9]{8})\s*$/i;
 
 export function detectIntent(text: string): Intent {
   const details = text.match(DETAILS_SENT);
@@ -29,4 +30,16 @@ export function detectIntent(text: string): Intent {
   if (BOOK.test(text)) return { kind: 'book' };
   if (LOCATION.test(text)) return { kind: 'location' };
   return { kind: 'unknown' };
+}
+
+/** Tester code (B6): a message that is only 8 letters or digits, optionally after "tester". */
+const TESTER_CODE = /^\s*(?:tester\s+)?([A-Za-z0-9]{8})\s*$/i;
+
+/**
+ * The typed text as a tester-code candidate, or null. Not part of `detectIntent`: the bot only
+ * checks it at an onboarding club, and text that is not the live code goes on to `detectIntent`.
+ */
+export function testerCodeIn(text: string): string | null {
+  const m = text.match(TESTER_CODE);
+  return m ? m[1]!.toUpperCase() : null;
 }

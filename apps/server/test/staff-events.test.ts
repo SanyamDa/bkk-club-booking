@@ -64,4 +64,19 @@ describe('staff events (plan A2)', () => {
     const [b] = await db.select().from(bookings).where(eq(bookings.id, ids['bookings/:id']!));
     expect(b!.status).toBe('held');
   });
+
+  it('the arrived route stores the party size at the door', async () => {
+    const bookingId = ids['bookings/:id']!;
+    await db.update(bookings).set({ status: 'confirmed' }).where(eq(bookings.id, bookingId));
+    const res = await app.app.request(staffUrl(clubA.slug, `/bookings/${bookingId}/arrived`), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ arrivedPax: 5 }),
+    });
+    expect(res.status).toBe(200);
+    const [b] = await db.select().from(bookings).where(eq(bookings.id, bookingId));
+    expect(b).toMatchObject({ status: 'arrived', arrivedPax: 5 });
+    const [checkedIn] = await eventsOf('booking.checked_in');
+    expect(checkedIn!.props).toMatchObject({ arrived_pax: 5 });
+  });
 });

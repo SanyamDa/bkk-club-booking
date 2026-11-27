@@ -2,7 +2,6 @@ import { and, eq, gte, isNotNull, lt, lte, ne } from 'drizzle-orm';
 import { compileSnapshot } from '../brain/compile.js';
 import type { Db } from '../db/client.js';
 import { brainNotes, clubs, platformFlags, type BrainNote } from '../db/schema.js';
-import type { AppContext } from '../http/context.js';
 import { bangkokParts, toDateString } from '../lib/time.js';
 import { raiseAlert } from '../platform/alerts.js';
 import { clubToday } from '../platform/club-settings.js';
@@ -101,21 +100,5 @@ export async function sendBrainDigests(db: Db, now: Date): Promise<void> {
     if (!claimed.length || (!digest.expired.length && !digest.dueForReview.length)) continue;
     await raiseAlert(db, { clubId: club.id, level: 'info', kind: 'brain_digest', text: digestText(digest) }, now);
   }
-}
-
-/**
- * Runs expiry and the weekly digest every 15 minutes until the returned function is called.
- * Stand-in for B2's scheduler: `jobs/index.ts` calls this until `scheduler.register('brain-expiry', ...)`.
- */
-export function startBrainExpiry(ctx: AppContext, now: () => Date): () => void {
-  const timer = setInterval(async () => {
-    try {
-      await runBrainExpiry(ctx.deps.db, now());
-      await sendBrainDigests(ctx.deps.db, now());
-    } catch (err) {
-      ctx.deps.log('Brain expiry failed', err);
-    }
-  }, 15 * 60_000);
-  return () => clearInterval(timer);
 }
 

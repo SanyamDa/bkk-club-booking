@@ -18,7 +18,7 @@
  *
  * Flags: --base http://127.0.0.1:8787  --clubs demo,other  --duration 30  --scale 1
  *        --bookings 50 (per club per min)  --inbound 1000 (total per min)  --target-ms 3000
- * Env:   LOAD_CHANNEL_SECRET (webhook mode)  LOAD_COOKIE (sent as Cookie, once /api/dev needs login)
+ * Env:   LOAD_CHANNEL_SECRET (webhook mode)  LOAD_COOKIE (sim mode: a platform-admin `sid=...` cookie; /api/dev needs admin login, B8)
  *
  * A booking is two events from one guest: the "book" postback, then the night pick. Other
  * inbound traffic is free text (location, menu, unknown) from many guests.

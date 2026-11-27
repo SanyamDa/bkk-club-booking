@@ -1,4 +1,5 @@
 import type { PaxRangeKey } from '../bookings/service.js';
+import type { BookingStatus } from '../db/schema.js';
 
 /**
  * Privacy class of one event field (spec §14.2 "a privacy class per field").
@@ -136,6 +137,7 @@ export const EVENT_DECLARATIONS = {
   'link.opened': { v: 1, area: 'Internal', description: 'Tagged redirect link tapped (B4).', props: { kind: N } },
   'guest.removal_requested': { v: 1, area: 'Internal', description: 'Guest asked for their data to be removed (B10b).', props: {} },
   'guest.removed': { v: 1, area: 'Internal', description: 'Guest data removal job finished (B10b).', props: {} },
+  'guest.tester_registered': { v: 1, area: 'Internal', description: 'Guest typed the one-time tester code at an onboarding club; their rows are test data from now on (B6).', props: {} },
   'staff.invited': { v: 1, area: 'Internal', description: 'Manager invited a staff member (A8).', props: { inviteId: P, role: N, via: N } },
   'staff.invite_accepted': { v: 1, area: 'Internal', description: 'Invite accepted (A8).', props: { inviteId: P, role: N } },
   'staff.role_changed': { v: 1, area: 'Internal', description: 'Member role changed (A8).', props: { from: N, to: N } },
@@ -157,3 +159,23 @@ const PAX_RANGE_CODES: Record<PaxRangeKey, PaxRangeCode> = { '2-4': 'p2_4', '5-8
 export function paxRangeCode(key: PaxRangeKey): PaxRangeCode {
   return PAX_RANGE_CODES[key];
 }
+
+/**
+ * The §14.2 events a booking status change writes, by the status it moves to (B2). `changeStatus` in
+ * `bookings/service.ts` writes these next to the generic `booking.status_changed`, in the same
+ * transaction. The `deposit.*` entries are written only when the change concerns a deposit (a
+ * confirm with no deposit, or a manual booking without one, writes `booking.confirmed` alone).
+ * `completed` has no entry: the POS bill close that completes a booking emits `booking.completed`.
+ */
+export const STATUS_EVENTS: Partial<Record<BookingStatus, readonly EventType[]>> = {
+  held: ['table.held'],
+  expired: ['hold.expired'],
+  abandoned: ['booking.abandoned'],
+  awaiting_payment: ['deposit.qr_sent'],
+  payment_review: ['slip.received'],
+  confirmed: ['deposit.verified', 'booking.confirmed'],
+  rejected: ['deposit.rejected'],
+  cancelled: ['booking.cancelled'],
+  arrived: ['booking.checked_in'],
+  no_show: ['booking.no_show'],
+};

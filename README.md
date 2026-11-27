@@ -27,7 +27,7 @@ Leave out `--club` and `--role` to create a platform admin instead: it also prin
 
 | Open | What it is |
 |---|---|
-| http://localhost:5173/dev/simulator | Chat with the bot as a guest. Uses the real bot code; nothing is sent to LINE |
+| http://localhost:5173/dev/simulator | Chat with the bot as a guest at any club (platform-admin login). Uses the real bot code; nothing is sent to LINE; simulator guests are test data |
 | http://localhost:5173/staff | Staff dashboard (sign in with the email and password from `npm run admin:create`) |
 
 The database is an embedded Postgres (PGlite) stored in `apps/server/.data/`. Delete that folder to start fresh.

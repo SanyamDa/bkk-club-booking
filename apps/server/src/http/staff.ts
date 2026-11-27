@@ -37,7 +37,9 @@ import { describeLineError, runLineSetup } from '../line/setup.js';
 import { currentNightDate, formatNight } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
 import { openPosBillAtCheckIn } from '../integrations/pos/live.js';
-import { requireClubRole, type AuthEnv, type Role } from './auth.js';
+import { issueStaffLinkCode } from '../bot/staff-link.js';
+import { auditClubChange } from '../platform/club-settings.js';
+import { clientIp, requireClubRole, type AuthEnv, type Role } from './auth.js';
 import type { AppContext } from './context.js';
 import { staffAlertRoutes } from './staff-alerts.js';
 import { staffInboxRoutes } from './staff-inbox.js';
@@ -113,6 +115,7 @@ export function staffRoutes(app: AppContext) {
     notes: b.notes,
     statusReason: b.statusReason,
     createdAt: b.createdAt.toISOString(),
+    isTest: b.isTest,
   });
 
   // ----- Tonight: table map + bookings for one night -----
@@ -120,7 +123,9 @@ export function staffRoutes(app: AppContext) {
     const club = c.var.club;
     const now = app.deps.now();
     const date = c.req.query('date') || currentNightDate(now, club.settings.nightEndHour);
-    const [options, nightBookings] = await Promise.all([listTableOptions(db, club.id), bookingsForNight(db, club.id, date)]);
+    // The night's price from price_rules (B9b); a malformed date falls back to column prices.
+    const priceDate = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined;
+    const [options, nightBookings] = await Promise.all([listTableOptions(db, club.id, priceDate), bookingsForNight(db, club.id, date)]);
     const guestRows = nightBookings.length
       ? await db.select().from(guests).where(eq(guests.clubId, club.id))
       : [];
@@ -130,7 +135,9 @@ export function staffRoutes(app: AppContext) {
       active.has(b.status) && !((b.status === 'held' || b.status === 'awaiting_payment') && b.holdExpiresAt && b.holdExpiresAt <= now);
 
     const tables = options.map((o) => {
-      const b = nightBookings.find((x) => x.tableId === o.table.id && isLive(x));
+      // A test booking may share a table with a real one (B6): the real booking is the occupancy.
+      const onTable = nightBookings.filter((x) => x.tableId === o.table.id && isLive(x));
+      const b = onTable.find((x) => !x.isTest) ?? onTable[0];
       const g = b ? guestById.get(b.guestId) : undefined;
       return {
         id: o.table.id,
@@ -216,6 +223,8 @@ export function staffRoutes(app: AppContext) {
   const actionSchema = z.object({
     reason: z.string().trim().max(200).optional(),
     reasonCode: z.enum(REASON_CODES).optional(),
+    /** `arrived` only: the party size actually at the door (B2 `markArrived`). */
+    arrivedPax: z.number().int().min(0).max(200).optional(),
   });
   type ActionInput = z.infer<typeof actionSchema>;
   /** Builds the W0 `Reason` from the optional code and free text; `fallback` when neither is given. */
@@ -254,8 +263,8 @@ export function staffRoutes(app: AppContext) {
     await cancelBooking(db, club.id, id, actor, reasonOf(input, { code: 'club_cancelled', text: 'Cancelled by the club' }), app.deps.now());
     await app.notifier.cancelled(club.id, id, input.reason ?? '');
   });
-  act('arrived', staff, async (club, id, actor) => {
-    await markArrived(db, club.id, id, actor, app.deps.now());
+  act('arrived', staff, async (club, id, actor, input) => {
+    await markArrived(db, club.id, id, actor, app.deps.now(), input.arrivedPax);
     // A19 L2: open the POS bill with the deposit as a prepayment (no-op without a live POS).
     app.track(openPosBillAtCheckIn(db, app.config.CREDENTIALS_KEY, club, id, { now: app.deps.now(), fetch: app.posFetch }));
   });
@@ -362,8 +371,9 @@ export function staffRoutes(app: AppContext) {
     const club = c.var.club;
     return c.json({
       name: club.name,
-      staffLinkCode: club.staffLinkCode,
+      // B5: no link code here; a manager issues a fresh one with POST /staff-link-code.
       staffGroupLinked: Boolean(club.staffGroupId),
+      staffGroupPending: Boolean(club.pendingStaffGroupId),
       lineConnected: (await app.credentials.line(club)) !== null,
       webhookUrl: `${app.config.PUBLIC_URL.replace(/\/$/, '')}/line/webhook/${club.slug}`,
       liffEndpoint: `${app.config.PUBLIC_URL.replace(/\/$/, '')}/liff/details`,
@@ -373,6 +383,25 @@ export function staffRoutes(app: AppContext) {
       secondFactorEnrolled: Boolean(c.var.user.totpSecret),
       settings: club.settings,
     });
+  });
+
+  /**
+   * B5: a fresh single-use staff link code, shown once (8 characters, 10-minute expiry, only its
+   * hash stored). A founder uses this same route under a write-mode support grant.
+   */
+  r.post('/clubs/:slug/staff-link-code', managers, async (c) => {
+    const club = c.var.club;
+    const now = app.deps.now();
+    const issued = await issueStaffLinkCode(db, club.id, c.var.user.id, now);
+    // The code itself is never written to the audit row or a log line.
+    await auditClubChange(
+      db,
+      club,
+      { ...actorOf(c), ip: clientIp(c) },
+      { action: 'staff_link_code.issued', entity: 'club', entityId: club.id, after: { expiresAt: issued.expiresAt.toISOString() } },
+      now,
+    );
+    return c.json({ code: issued.code, expiresAt: issued.expiresAt.toISOString() });
   });
 
   // ----- LINE connection -----

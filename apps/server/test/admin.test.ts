@@ -2,6 +2,8 @@ import { createHmac } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
+import { holdTable } from '../src/bookings/service.js';
+import type { IdTokenVerifier } from '../src/line/idtoken.js';
 import type { Db } from '../src/db/client.js';
 import {
   auditLog,
@@ -11,6 +13,7 @@ import {
   events,
   messages,
   opsEvents,
+  platformFlags,
   type Club,
   priceRules,
   tables,
@@ -66,7 +69,7 @@ afterEach(async () => {
   leaks.assertNoLeak();
 });
 
-async function setup(opts: { line?: FakeLine; publicUrl?: string } = {}) {
+async function setup(opts: { line?: FakeLine; publicUrl?: string; verifyIdToken?: IdTokenVerifier } = {}) {
   const h = await setupTwoClubs();
   cleanups.push(h.close);
   const clock = { now: T0 };
@@ -75,6 +78,7 @@ async function setup(opts: { line?: FakeLine; publicUrl?: string } = {}) {
     bot: { now: () => clock.now, log: () => {} },
     lineSetupClients: fakeLine(opts.line),
     onResponse: leaks.onResponse,
+    ...(opts.verifyIdToken ? { verifyIdToken: opts.verifyIdToken } : {}),
   });
   const cookie = await adminCookie(created);
   const req = (method: string, path: string, body?: unknown, cookieOverride?: string) =>
@@ -219,8 +223,26 @@ describe('founder console API (A5)', () => {
     expect(await s.created.ctx.credentials.login(club)).toMatchObject({ channelId: PLATFORM_LOGIN.channelId, liffId: PLATFORM_LOGIN.liffId, shared: true });
   });
 
-  // Phase 1b gate item; needs B5 (shared-channel ID token pairing).
-  it.todo('console-created club: details read with a valid ID token is 200, with no token it is refused');
+  // Phase 1b gate item (A4b + B5): the shared platform channel and the first-use sub pair.
+  it('console-created club: details read with a valid ID token is 200, with no token it is refused', async () => {
+    const verify = vi.fn(async (token: string) => (token === 'shared-token' ? { sub: 'Uplatform-sub' } : null));
+    const s = await setup({ verifyIdToken: verify });
+    expect((await s.req('POST', '/api/admin/platform/line-login', { ...PLATFORM_LOGIN, totp: s.code() })).status).toBe(200);
+    expect((await createClub(s, 'shared-club', 'velora-like')).status).toBe(201);
+    const club = await reload(s.db, 'shared-club');
+    expect(club.lineLoginChannelIdEnv).toBeNull();
+    const guest = await makeGuest(s.db, { clubId: club.id, lineUserId: 'Uwebhook-id' });
+    const [table] = await s.db.select().from(tables).where(eq(tables.clubId, club.id)).limit(1);
+    const booking = await holdTable(s.db, club, { guestId: guest.id, tableId: table!.id, nightDate: '2026-11-27', pax: table!.minPax }, T0);
+    const link = new URL(s.created.ctx.deps.links.details(club, booking, T0));
+    expect(link.host).toBe('liff.line.me');
+    const path = `/api/liff/booking?ref=${link.searchParams.get('ref')}&t=${link.searchParams.get('t')}`;
+    const none = await s.created.app.request(path);
+    expect(none.status).toBe(401);
+    const ok = await s.created.app.request(path, { headers: { 'X-Line-Id-Token': 'shared-token' } });
+    expect(ok.status).toBe(200);
+    expect(verify).toHaveBeenCalledWith('shared-token', PLATFORM_LOGIN.channelId);
+  });
 
   it('line/status reports the webhook switch and chat mode from the fake LINE client', async () => {
     const s = await setup({ line: { chatMode: 'chat', webhookActive: false, endpoint: 'https://club.test/line/webhook/new-club' } });
@@ -504,13 +526,22 @@ describe('founder console API (A5)', () => {
     expect(a).toMatchObject({ lineConnected: false, webhookOk: false, quota: null });
   });
 
-  it('tester-code route answers 503 not_ready until B6 merges', async () => {
+  it('tester-code route returns the code once', async () => {
     const s = await setup();
     const res = await s.req('POST', '/api/admin/clubs/test-b/tester-code');
-    expect(res.status).toBe(503);
-    expect(await res.json()).toMatchObject({ error: 'not_ready' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { code: string; expiresAt: string };
+    expect(body.code).toMatch(/^[A-Z0-9]{8}$/);
+    expect(new Date(body.expiresAt).getTime()).toBe(T0.getTime() + 10 * 60_000);
+    // Only the hash is stored, and the audit row does not carry the code.
+    const flag = await s.db.query.platformFlags.findFirst({ where: eq(platformFlags.key, `tester_code:${s.clubB.id}`) });
+    expect(flag).toBeTruthy();
+    expect(JSON.stringify(flag)).not.toContain(body.code);
+    const audits = await s.db.select().from(auditLog).where(eq(auditLog.action, 'line.tester_code_issued'));
+    expect(audits).toHaveLength(1);
+    expect(JSON.stringify(audits)).not.toContain(body.code);
+    // A second call issues a different code; nothing reads the old one back.
+    const again = (await (await s.req('POST', '/api/admin/clubs/test-b/tester-code')).json()) as { code: string };
+    expect(again.code).not.toBe(body.code);
   });
-
-  // Needs B6's issueTesterCode.
-  it.todo('tester-code route returns the code once');
 });

@@ -902,6 +902,27 @@ Gate (spec §10): 3 paying clubs; one club live on Instagram; the feed publishes
 ### Track B, Phase 3
 
 | Task | Scope (spec) | Files | Acceptance tests |
+#### Task B19: Brain manager UI (expanded)
+
+**Files:** `http/brain.ts` (router), `brain/gaps.ts` (gap query, reused by B18), `app.ts` (one mount line), `test/helpers/track-b.ts` (fixture `notes/:noteId`), `pages/staff/brain/Brain.tsx`, `pages/staff/Layout.tsx` (one nav item), `apps/web/src/main.tsx` (one route line), test `test/brain-ui.test.ts`.
+
+**Decisions:**
+- All routes are under `/api/staff/clubs/:slug/brain` with `requireClubRole('owner','manager')` (a host or door login is 403). A note id from another club is 404, checked before the body is read.
+- Notes (§6.6): every non-retired note with its type, source, `reviewBy`, `validUntil` and last edit; the page groups them by type. The response carries the latest snapshot's version and token count, with `BRAIN_TOKEN_WARN` and `BRAIN_TOKEN_CAP`.
+- Approval queue: draft notes. Each shows `frontmatter.question` and `frontmatter.hostReply` when present (B18 writes them; B15 drafts from import and onboarding have none), and the title of the note it replaces (`supersedesId`). Ranked by `frontmatter.takeovers` (count of takeovers on the topic, written by B18) descending, then newest first. Until B18 merges every draft has 0 takeovers, so the order is newest first.
+- Approve is one tap: `POST .../notes/:noteId/approve` with no body calls `approveNote`. [Edit] is `PATCH .../notes/:noteId` (`updateNote`, which writes a version row when the body changes) and then approve. [Reject] calls `rejectNote`.
+- A note the manager writes (`POST .../notes`, also [Write an answer] on a gap) is saved **live**: the manager is the approver. With `gapTopic`, the note stores `frontmatter.gapTopic`, which closes that gap.
+- Gaps: `faq.missed` events of the last 30 days, grouped by `props.topic` (or, with no topic, by the lower-cased question text), most frequent first, with the count, the last time asked and the latest question (`raw.text`, written by B16). A gap is closed when a live note has `frontmatter.gapTopic` equal to its key and was approved after the last miss. A live club does not see test events; the demo club does. B16 does not emit `faq.missed` yet, so gaps stay empty until it does.
+- Errors: lint failure 422 `{ error: 'lint', issues, fix }`; over the token cap 409 `{ error: 'over_cap', tokenCount }`; approving a retired note 409 `not_draft`.
+
+**Interfaces:**
+- `brain/gaps.ts`: `listGaps(db, club: Club, now: Date, opts?: { days?: number }): Promise<BrainGap[]>` with `BrainGap { key: string; topic: string | null; count: number; lastAskedAt: string; question: string | null }`.
+- `http/brain.ts`: `brainRoutes(app: AppContext)`, mounted with `app.route('/api/staff', brainRoutes(ctx))`. Routes: `GET /clubs/:slug/brain/notes`, `GET /clubs/:slug/brain/queue`, `GET /clubs/:slug/brain/gaps`, `POST /clubs/:slug/brain/notes`, `PATCH /clubs/:slug/brain/notes/:noteId`, `GET /clubs/:slug/brain/notes/:noteId/versions`, `POST /clubs/:slug/brain/notes/:noteId/approve`, `POST /clubs/:slug/brain/notes/:noteId/reject`.
+
+**Tests (`brain-ui.test.ts`):** `approve in one tap` (draft goes live and into the snapshot, queue empties); `edit creates a version`; `gaps list shows unanswered questions` (most frequent first, with the latest question); `writing an answer to a gap closes it`; `a live club's gaps exclude test events`; `a lint failure returns the issues`; `queue ranks drafts by takeovers`; `host gets 403`; `another club's note is 404`. `isolation.test.ts` passes with the brain routes (fixture `notes/:noteId`).
+
+**Migration:** no.
+
 |---|---|---|---|
 | B20 Cross-club identity map | §14.4: `person_id` across clubs, built on the `identity_map` pairs stored since Phase 1b (the shared LIFF is A4b, the first-use `sub` pair is B5, and the `liff.sendMessages()` device check is in the Phase 1b gate). Adds the phone-hash link and fills `events.person_id` | `data/identity.ts` | same LINE person at two clubs gets one `person_id`; the same phone hash at two clubs links to one `person_id`; removal (B10b) deletes the links |
 | B21 Busyness feed v1 | §14.7: `GET /data/v1/busyness`, 5-step level per club per 30-min bucket relative to capacity, "no data" when inputs are thin, staged model (booking heat → weekday baseline × pace) | `data/busyness.ts`, `http/data.ts` (API key auth for the separate app) | level for every live club on a night whose `nights.status` is not `closed`; demo club never appears; no guest-level field; reads only `first_party` and `pos` origins |

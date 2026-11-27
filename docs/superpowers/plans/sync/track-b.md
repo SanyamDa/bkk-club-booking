@@ -167,3 +167,23 @@ One session now builds both tracks on `track-a`. After the four tasks: `npm test
 - **Cross-task fix kept:** B1's props pattern rejects `,`, so `club.settings_changed.fields` is joined with `:`; the `settings.test.ts` assertion follows. Free-text `eventName` of `club.event_night_created` moved to `raw`.
 - **Todos left, each waiting on an unbuilt task:** `calendar.test.ts` nights-job close (B8b), plus the B3, B4, B5, B6, B7 todos listed in `sync/track-a.md`.
 - **Deviations:** `applyClubContent` test runs on a fresh club, not `setupTwoClubs().clubB` (clubB already has V1, V2, S1, S2). `main.ts` gained `seedCalendarDays(db)` (outside B13's Files list). `brain-expiry` uses its own `setInterval` until B2's scheduler. `STATUS_EVENTS` is left to B2. No promoter or guest-tag event names yet (A20a request 5): not in spec §14.2.
+
+## 2026-11-27: B19 Brain manager UI, built by Session A on track-c (not merged)
+
+**Published (`http/brain.ts`, mounted with `app.route('/api/staff', brainRoutes(ctx))`; owner or manager; another club's note id is 404):**
+`GET /api/staff/clubs/:slug/brain/notes` (non-retired notes, latest snapshot version and token count, `tokenWarn`, `tokenCap`), `GET .../brain/queue` (drafts with `question`, `hostReply`, `takeovers`, `replaces`), `GET .../brain/gaps`, `POST .../brain/notes` (manager-written, saved **live**; optional `gapTopic`), `PATCH .../brain/notes/:noteId`, `GET .../brain/notes/:noteId/versions`, `POST .../brain/notes/:noteId/approve`, `POST .../brain/notes/:noteId/reject`. Errors: lint 422 `{ error: 'lint', issues, fix }`, cap 409 `{ error: 'over_cap', tokenCount }`, retired note approve 409 `not_draft`.
+`brain/gaps.ts`: `listGaps(db, club, now, { days? = 30 }): Promise<BrainGap[]>`, `BrainGap { key, topic, count, lastAskedAt, question }`.
+
+**Assumptions others must match:**
+- B16 emits `faq.missed` with `props.topic` (a code) and the guest's question in `raw.text`. Gaps group by topic, else the lower-cased question. Until B16 emits it, gaps are empty.
+- B18 writes on each learned draft `frontmatter.question`, `frontmatter.hostReply` and `frontmatter.takeovers` (a number: takeovers on the topic). The queue ranks by `takeovers` desc, then newest. Until B18, every draft ranks newest first.
+- A note with `frontmatter.gapTopic = <gap key>`, live and approved after the last miss, closes the gap. B18's gap handling should reuse `listGaps`.
+- `isolationFixtures` in `test/helpers/track-b.ts` now inserts one draft note per club (`notes/:noteId`).
+
+**Web:** `pages/staff/brain/Brain.tsx` (approval queue with Approve / Edit then approve / Reject, gaps with Write an answer, notes grouped by type with source, last edit and review date), nav item "Brain" in `Layout.tsx`, route `/staff/brain` in `main.tsx`. Builds; the browser walk is still to be done by a human.
+
+**Unverified against a real service:** none called; B16 `faq.missed` and B18 frontmatter are assumed shapes, tested with hand-written rows.
+
+**Closed:** the B15 note "the B19 approval screen is not built" is done. No code fallback waited on B19.
+
+**Tests:** `brain-ui.test.ts` (9 pass); `isolation.test.ts` passes with the brain routes.

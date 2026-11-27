@@ -1,7 +1,23 @@
+import { brainNotes } from '../../src/db/schema.js';
 import type { Db } from '../../src/db/client.js';
 import type { Club } from '../../src/db/schema.js';
+import { newId } from '../../src/lib/util.js';
 
-/** Per-club rows Track B adds for isolation tests. W0: none. */
-export async function isolationFixtures(_db: Db, _club: Club): Promise<Record<string, string>> {
-  return {};
+/**
+ * Per-club rows Track B adds for isolation tests, keyed like Track A's (segment before the param
+ * plus the param). B19: one draft brain note (`/brain/notes/:noteId/...`).
+ */
+export async function isolationFixtures(db: Db, club: Club): Promise<Record<string, string>> {
+  const noteId = newId();
+  await db.insert(brainNotes).values({
+    id: noteId,
+    clubId: club.id,
+    slug: `isolation-${noteId.slice(0, 8)}`,
+    title: 'Isolation note',
+    type: 'faq',
+    status: 'draft',
+    bodyMd: 'Isolation probe note.',
+    source: 'manual',
+  });
+  return { 'notes/:noteId': noteId };
 }

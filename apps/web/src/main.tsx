@@ -32,6 +32,7 @@ import { Timeline } from './pages/admin/Timeline';
 import { WebhookLog } from './pages/admin/WebhookLog';
 import { OnboardForm } from './pages/onboard/OnboardForm';
 import { InboxPanel } from './pages/staff/InboxPanel';
+import { Brain } from './pages/staff/brain/Brain';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -55,9 +56,10 @@ createRoot(document.getElementById('root')!).render(
           <Route path="team" element={<Team />} />
           <Route path="pos" element={<PosImport />} />
           <Route path="report" element={<Report />} />
-          <Route path="guests" element={<Guests />} />
           <Route path="stats" element={<Stats />} />
+          <Route path="guests" element={<Guests />} />
           <Route path="promoters" element={<Promoters />} />
+          <Route path="brain" element={<Brain />} />
         </Route>
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<Clubs />} />

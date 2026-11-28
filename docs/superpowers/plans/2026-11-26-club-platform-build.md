@@ -410,13 +410,14 @@ Gate (spec §10, §17.1): a second club is created from the console and takes a 
 - **Clubs:** `GET /api/admin/clubs` returns per club: status, LINE connected, webhook endpoint matches and active (from the club's newest `ops_events` row with `kind = 'line_setup'`; no row means not connected), last inbound message time, `ops_events` failures in last 24 h, quota used (`detail.quota` of the same row; `warn` at 80%, §11.1.4), handoffs past timeout, deposits in review, `bot_paused`. `POST /api/admin/clubs {name, slug, template: 'blank' | 'velora-like'}` creates status `onboarding`. `PATCH /api/admin/clubs/:slug {status}`. `velora-like` calls B0's `applyClubContent(tx, newClubId, VELORA)` in the same transaction as the club insert; `blank` adds no zones, tables or prices. Both templates write a complete `ClubSettings`, because `clubs.settings` is NOT NULL: `newClubSettings(slug: string, now: Date): ClubSettings` in `platform/club-templates.ts` is a literal that starts from today's operating values in `db/seed.ts` (`openWeekdays` Wed to Sat, `bookingWindowDays` 30, `holdMinutes` 10, night 18 to 6, `arrivalBy` '23:30', `handoffTimeoutMinutes` 30, the same accent colour, `rulesVersion` = the creation date) with empty `rules`, `greeting`, `address` and `mapUrl`, which the founder or the manager fills before go-live. The club id is `'club_' + newId()`. `refPrefix` is the first three letters of the slug in upper case, with a digit added when another club already uses that prefix. The insert also adds the club's `kind = 'line'` row in `channels` (W0). The insert does not set `staff_link_code` (nullable since W0). A founder links a club's staff group by opening a write-mode support session and using the staff route from B5. The insert sets `clubs.liff_id` to the platform LIFF id (A4b; null when no platform channel is saved yet). `PUT /api/admin/clubs/:slug/profile` writes `club_profile` (§9 columns: capacity standing and seated, location, district, venue type, genres, price band, opening hours, usual peak hour, licence type, POS vendor); it is the only writer before A9 and A17. `PATCH {status: 'live'}` answers 409 `profile_missing` when the club has no profile row (§14.3 "the club itself"), and 409 `login_not_configured` when `clubs.liff_id` is null or `credentials.login(club)` returns `null`, because B5 would refuse every real guest of that club.
 - **LINE wizard backend:** `POST /api/admin/clubs/:slug/line {channelId, channelSecret}` stores credentials (A4), then runs the existing `runLineSetup` (tokens, webhook set + test, rich menu, message check, quota) and returns its `SetupReport`. After each run, and on each `GET .../line/status`, it writes one `ops_events` row with `kind = 'line_setup'` and `detail = { report: SetupReport, quota: { used: number; limit: number } | null }` (through B's `recordOps` once B3 is merged; a direct insert until then). The health tile reads the newest row. `GET .../line/status` re-checks for the manual switches (§12.2 minute 6–8) so the wizard can show each one going green. Requires a fresh TOTP code in the body (credential change, §12.3). The body also takes optional `{ loginChannelId, loginChannelSecret, liffId }` for a club that wants its own login channel (§11.1.1); they are stored as kind `line_login` and `liffId` overwrites `clubs.liff_id`. `GET .../line/status` returns `{ webhookActive: boolean; chatMode: string; quota: { limit: number; used: number; pct: number; warn: boolean }; planCheck: { expectedMonthlyPushes: number; recommendUpgrade: boolean }; liveTest: 'pending' | 'pass' | 'fail' }`. `quota.warn` is true from 80% used. `expectedMonthlyPushes` = expected bookings a month × 2 pushes + host replies sent from the inbox + staff-group alerts × group size (§11.1.2 step 6); the wizard sends the inputs as query params. `POST .../line/live-test` opens a 60 s window: `liveTest` is `pass` when one inbound message in the window has exactly one outbound message, `fail` when it has none, `pending` otherwise. LINE's own auto-reply never reaches our webhook, so the wizard also asks the admin to confirm on the phone that exactly one reply arrived (§11.1.2 step 4). `POST /api/admin/clubs/:slug/tester-code` returns B6's `issueTesterCode` result once, for the live test on the call (§12.2) as `{ code, expiresAt }` (B6 merged).
 - **Support sessions:** `POST /api/admin/support {clubSlug, reason, ticketRef?}` creates a `support_grants` row, mode `read`, expires in 60 min. `POST /api/admin/support/:id/elevate {reason}` sets mode `write`. `POST /api/admin/support/:id/end`. `requireClubRole` accepts an active, unexpired grant for that club; write methods (POST/PATCH/DELETE) need mode `write`. **Every request** made under a grant writes an `audit_log` row with `support_grant_id`, reason, method, path and entity ids (views included). The response carries header `X-Support-Session: <club name>, ends <HH:MM>` for the banner.
-- **Debug (read-only, reads Track B tables; every path here is under `/api/admin/clubs/:slug`):** `GET .../webhooks?limit&before` (`raw_webhooks` + processing result), `.../messages` (with `delivery_status`, `error`), `.../conversations/:id/timeline` (messages, events, booking changes, ordered by time), `.../bookings/:id/timeline` (`booking_status_history`), `POST .../webhooks/:id/replay` (calls B's `processDelivery(ctx, rawId, { dryRun: true })`, B3; the response shows the dry run's `replies` even when the delivery was already processed), `POST .../test-message {to: 'self' | 'staff_group'}`.
+- **Debug (read-only, reads Track B tables; every path here is under `/api/admin/clubs/:slug`):** `GET .../webhooks?limit&before` (`raw_webhooks` + processing result), `.../messages` (with `delivery_status`, `error`), `.../conversations/:id/timeline` (messages, events, booking changes, ordered by time), `.../bookings/:id/timeline` (`booking_status_history`), `POST .../webhooks/:id/replay` (calls B's `processDelivery(ctx, rawId, { dryRun: true })`, B3; the response shows the dry run's `replies` even when the delivery was already processed), `POST .../test-message {to: 'self' | 'staff_group'}`. `to: 'self'` pushes to the founder's own LINE user id, `users.line_user_id`, through the club's gateway: 409 `no_founder_line_user` when it is unset, 502 `send_failed` when LINE refuses.
+- **Founder LINE user id (gap close):** `users.line_user_id` (nullable text, migration `0010_a5_founder_line_user`). `GET /api/admin/me/line` returns it (last4 only); `PUT /api/admin/me/line {lineUserId: 'U' + 32 hex | null}` sets or clears it, audited as `admin.line_user_set` / `admin.line_user_cleared` with last4 only. A LINE user id is per provider, so it reaches the founder only on OAs under the provider it came from.
 - **Controls:** `POST /api/admin/clubs/:slug/pause {paused: boolean}` sets `clubs.bot_paused` and `bot_paused_at` (`now` on pause, null on resume; W0 column) and sends one "bot paused" or "bot resumed" notice to the staff group; `POST /api/admin/global-stop {stopped}` sets `platform_flags['global_stop']`. PromptPay ID, greeting/map link and LINE credentials changes need a fresh TOTP, record before/after, and notify the club's owner: one message to the staff LINE group, plus the `audit_log` row. This build has no separate in-account notice.
 - **Platform login channel (A4b):** `POST /api/admin/platform/line-login {channelId, channelSecret, liffId}` calls `setPlatformLoginChannel`; it needs a fresh TOTP and writes an `audit_log` row with `last4` only. `GET /api/admin/platform/line-login` returns `platformLoginSummary`, never the secret.
 - **Data (read-only, reads Track B tables; §14.6):** `GET /api/admin/data/health` returns per club: events per day, time of the last event, rejected events (`events_dead_letter`, club read from the payload), share of guests with a `notices` row, pending `removal_requests`. `GET /api/admin/events?club&conversation&booking&guest&before&limit` returns the filterable event stream, newest first; the page polls it.
 - **Events:** `club.created`, `line.setup_run`, `support.session_started` and `support.session_ended` are written with `emit` in the same transaction as the change (owners per the B4b table).
 
-**Interfaces (Produces):** no route list export: tests compute `ADMIN_ROUTES = routeTable(app, '/api/admin')` (A2), which also walks B's routers under `/api/admin`; `isGloballyStopped(db): Promise<boolean>` in `platform/support.ts` (B3 calls it).
+**Interfaces (Produces):** no route list export: tests compute `ADMIN_ROUTES = routeTable(app, '/api/admin')` (A2), which also walks B's routers under `/api/admin`; `isGloballyStopped(db): Promise<boolean>` in `platform/support.ts` (B3 calls it). Routes `GET`/`PUT /api/admin/me/line`; column `users.line_user_id`.
 
 **Consumes:** `processDelivery` (B3): if B3 is not merged yet, ship replay last within this task or as A5b. `raw_webhooks` write (B3): until B3 merges, the gate test asserts 200 and an inbound `messages` row for the new club; keep the `raw_webhooks` assertion as `it.todo` and enable it when B3 merges. `applyClubContent` (B0) for `template: 'velora-like'`. `issueTesterCode` (B6) for the tester-code route. `recordOps` (B3) for the `line_setup` rows; a direct insert until B3 merges.
 
@@ -447,7 +448,7 @@ Gate (spec §10, §17.1): a second club is created from the console and takes a 
 - `› the health tile reads LINE status and quota from the newest line_setup row, and shows not connected when there is none`.
 - `› tester-code route returns the code once` (B6 merged; real test).
 
-**Migration:** no.
+**Migration:** yes, `0010_a5_founder_line_user` (`users.line_user_id`), generated with `drizzle-kit --name a5_founder_line_user`.
 
 #### Task A6: Founder console web v1
 
@@ -581,7 +582,10 @@ Gate (spec §10, §17.1): a second club is created from the console and takes a 
 - Every §14.2 event has one owning task (table below). B4b writes the `emit` calls marked B4b. Every other task writes its own and asserts them in its own tests.
 - Steps before the hold have no booking row, so `changeStatus` cannot emit them. They are plain `emit` calls in the flow, in the same transaction as the conversation-state update, and carry the `attempt_id` created at `booking.started`.
 - `booking.abandoned` carries `last_step` (one of `night`, `pax`, `table`, `details`, `rules`, `payment`), read from the conversation state when the hold expires or the attempt is replaced.
+  - As built: an attempt replaced before any hold gets `booking.abandoned` from `beginAttempt` in `bot/flow.ts` (`last_step` `night`, `pax` or `table` from the state, `reason_code` `attempt_replaced`). An attempt with a booking row is abandoned by `abandonUnfinished` in `bookings/service.ts` (`details` before the form, `payment` after it). A hold that runs out records `hold.expired`, its own end of the funnel, and no second `booking.abandoned`.
 - `message.sent` props: `kind` (`reply` or `push`), `delivered` (boolean), `latency_ms` (from the inbound message named by `cause_id`), `template`.
+  - As built: one event per message row LINE was asked to deliver (`Outbox.toGuest` and `Outbox.deliver`). `template` is the LINE message type. `cause_id` is the inbound `messages` row, which the flow passes in `toGuest`'s `opts.causeId`. Rows skipped without a send (no LINE user, guest blocked the OA) get no event.
+- Every declared type must have an emitter in `src`, or a row in `RESERVED` in `emit-coverage.test.ts` with its reason. The test checks this statically: each type appears in a `src` file that is not a reader, or in `STATUS_EVENTS`. It also checks that this file or the owning task's test names each type. `RESERVED` is empty.
 - Handoff events come from today's flow in Phase 1b. B14b moves them into `chat/episodes.ts` without renaming them.
 
 | Events | Code site | Owner |
@@ -591,25 +595,31 @@ Gate (spec §10, §17.1): a second club is created from the console and takes a 
 | `notice.accepted`, `rules.accepted` | `http/liff.ts` submit | B4b |
 | `marketing.opted_out` | `bot/flow.ts` | B10b |
 | `message.received`, `message.sent` | `bot/flow.ts` (`logInbound`), `line/outbox.ts` | B4b |
-| `intent.detected`, `intent.unknown`, `bot.fallback_menu`, `bot.error` | `bot/flow.ts`, `bot/intents.ts` | B4b |
-| `booking.started`, `night.selected`, `night.rejected`, `pax.selected`, `night.sold_out_shown`, `table.hold_lost_race` | `bot/flow.ts` | B4b |
-| `availability.searched` | `bot/flow.ts` | B4 |
-| `table.held`, `hold.expired`, `booking.abandoned`, `details.submitted`, `deposit.qr_sent`, `slip.received`, `deposit.verified`, `deposit.rejected`, `booking.confirmed`, `booking.cancelled`, `booking.checked_in`, `booking.no_show`, `table.released`, `booking.manual_created` | `bookings/service.ts` | B2 |
-| `handoff.requested`, `handoff.timed_out`, `host.replied` | `bot/flow.ts`, `bot/notify.ts` | B4b, then B14b |
+| `intent.detected`, `intent.unknown`, `bot.fallback_menu` | `bot/flow.ts` (`bot.fallback_menu` on the AI path: `brain/answer.ts`, B16) | B4b |
+| `bot.error` | `bot/flow.ts` (`recordBotError`, from `handleEvent`), `http/webhook.ts` (`processDelivery`) | B4b |
+| `booking.started`, `night.selected`, `night.rejected`, `pax.selected`, `night.sold_out_shown`, `table.hold_lost_race`, `booking.abandoned` (attempt replaced before a hold) | `bot/flow.ts` | B4b |
+| `form.opened`, `form.validation_failed`, `form.identity_rejected`, `form.submit_rejected` | `http/liff.ts` | B4b |
+| `availability.searched`, `link.opened` | `bot/flow.ts`, `http/liff.ts`, `http/redirect.ts` | B4 |
+| `table.held`, `hold.expired`, `booking.abandoned`, `details.submitted`, `deposit.qr_sent`, `slip.received`, `deposit.verified`, `deposit.rejected`, `booking.confirmed`, `booking.cancelled`, `booking.checked_in`, `booking.no_show`, `table.released`, `booking.manual_created`, `booking.status_changed` | `bookings/service.ts` | B2 |
+| `handoff.requested`, `handoff.timed_out`, `host.replied` | `chat/episodes.ts` (moved by B14b) | B4b, then B14b |
 | `handoff.resolved` | `http/staff.ts` resolve route | A2, then B14b (`endEpisode`) |
 | `line.webhook.rejected` | `http/webhook.ts` | B4b |
 | `night.sold_out` | `bookings/service.ts` | B8b |
 | `staff.login` | `http/auth.ts` | A1 |
 | `staff.booking_viewed`, `staff.slip_viewed` | `http/staff.ts` | A2 |
 | `support.session_started`, `support.session_ended`, `club.created`, `line.setup_run` | `http/admin/**` | A5 |
-| `club.settings_changed`, `club.price_changed`, `club.event_night_created` | `http/staff.ts` | A9 |
+| `club.settings_changed`, `club.price_changed`, `club.event_night_created` | `http/staff-settings.ts`, `platform/club-settings.ts` | A9 |
 | `slip.auto_verified`, `slip.review` | `bot/flow.ts` | B9 |
 | `running_late`, `reminder.sent` | `bot/flow.ts`, `jobs/reminders.ts` | B10 |
 | `door.count`, `crowd.rated` | `http/door.ts` | B11, B12 |
-| `booking.completed`, `pos.bill_opened`, `pos.bill_updated`, `pos.bill_closed`, `pos.bill_matched` | `integrations/pos/**` | A11, A19 |
+| `pos.bill_opened`, `pos.bill_updated`, `pos.bill_closed`, `pos.bill_matched` | `integrations/pos/**` | A11, A19 |
+| `booking.completed` | `integrations/pos/csv-import.ts` (`emitBookingCompleted`, called by the report import and by `applyLiveBill` in `live.ts` when a closed bill is tied to a booking; once per booking) | B4b (missing emitter found by the coverage check) |
 | `ai.answered`, `ai.call`, `faq.missed` | `brain/answer.ts` | B16 |
 | `brain.note_drafted`, `brain.note_approved`, `brain.note_rejected` | `brain/learn.ts`, `http/brain.ts` | B18, B19 |
 | `waitlist.joined`, `waitlist.offered`, `preorder.placed` | `bookings/waitlist.ts`, `bookings/preorders.ts` | B22 |
+| `guest.removal_requested`, `guest.removed` (internal) | `data/removal.ts` | B10b |
+| `guest.tester_registered` (internal) | `data/test-flag.ts` | B6 |
+| `staff.invited`, `staff.invite_accepted`, `staff.role_changed`, `staff.disabled` (internal) | `http/team.ts` | A8 |
 
 **Interfaces:** Consumes `emit` (B1), the `changeStatus` events (B2), entry tags and `attempt_id` (B4). Produces no new function. B14's funnel board and A16 read these events.
 
@@ -623,6 +633,7 @@ Gate (spec §10, §17.1): a second club is created from the console and takes a 
 - `unknown text emits intent.unknown and bot.fallback_menu`.
 - `bad signature emits line.webhook.rejected`.
 - `every Phase 1b event type is emitted at least once`: the test file holds the names the table above gives to B2, B4 and B4b; after the walks, each has at least one row. Events owned by any other task (A1, A2, A5, B8b and the later phases) are asserted in that task's own tests.
+- Added as built: `a failing turn emits bot.error`; `the details form records opened, validation, identity and submit failures`; `a closed POS bill completes its booking (booking.completed)`; `brain note approval and rejection emit` (no other test asserted those two); and the static pair `each type is emitted somewhere in src, or reserved with a reason` and `each type's emitter is asserted by this file or by its owning task's test`.
 
 **Migration:** no.
 
@@ -731,11 +742,29 @@ Gate (spec §10, §17.1): a second club is created from the console and takes a 
 
 **Phase 1b gate checklist** (both sessions tick in their sync files): A5 `create club then receive a signed webhook with no restart` passes; A2 isolation suite passes; B2 nightly check passes on a seeded week; Velora demo script (§12.4) steps 1, 2 and 7 run in the simulator and on a phone, and step 4 in its Phase 1b form (the guest asks for a person and we answer from the Chats page); step 8 needs Phase 1, and steps 3, 5 and 6, and step 4 as written, need the brain and inbox (Phase 2); every §13.1 row closed with the task that closed it; A5 `console-created club: details read with a valid ID token` passes with no env var set (A4b + B5); B4b `emit-coverage.test.ts` passes; B8b: every night in the booking window has a `nights` row; device check before the gate: `liff.sendMessages()` works when the LIFF app's provider differs from the OA's provider (§16.1 q3), and if it does not, the form submits with `viaChat=false` and the server pushes the summary (the existing fallback in `http/liff.ts`); cross-review done.
 
+Gate status 2026-11-27 (track-a, full `npm test` 70 files / 706 tests green; detail and the §13.1 table in `sync/track-a.md`, "Phase gate record"):
+- [x] A5 `create club then receive a signed webhook with no restart` (`admin.test.ts`)
+- [x] A2 isolation suite (`isolation.test.ts`)
+- [x] B2 nightly check on a seeded week (`velora.test.ts`, `nightly-check.test.ts`)
+- [x] Every §13.1 row closed, with closing task and test
+- [x] A5 `console-created club: details read with a valid ID token` with no env var set (`admin.test.ts`)
+- [x] B4b `emit-coverage.test.ts`
+- [x] B8b a `nights` row for every night in the booking window (`nights.test.ts`)
+- [x] Cross-review: the 2026-11-27 whole-branch review (one session built both tracks)
+- [ ] Human: Velora demo steps 1, 2, 7 and step 4 (Phase 1b form) on a phone; the simulator side passes in `velora.test.ts` and `flow.test.ts`
+- [ ] Human: device check of `liff.sendMessages()` across providers (§16.1 q3); the `viaChat=false` fallback is tested
+- [ ] Tag `phase-1b-done` on `main` after the owner merges
+
 ---
 
 ## Phase 1: Pilot (House of Savoy, 4 weeks)
 
 Gate (spec §10): G1–G8 measured; club agrees to continue; onboarding call timed against P1. Before the first real guest: the B10b removal and retention tests pass (§17.1 Data). Velora demo step 8 (the Velora-only board) runs once B14 is merged. Human task, start now: **Meta business verification and app review** (§11.5, longest lead item).
+
+Gate status 2026-11-27:
+- [x] B10b removal and retention tests pass (`removal.test.ts`, `retention.test.ts`)
+- [x] Velora demo step 8 data: B14 merged, `analytics.test.ts` passes
+- [ ] Human: G1–G8 measured on the pilot club; club agrees to continue; onboarding call timed against P1; Meta business verification and app review
 
 Expand with superpowers:writing-plans at the start of the phase.
 
@@ -965,6 +994,10 @@ Expand with superpowers:writing-plans at the start of the phase.
 
 Gate (spec §10): ≥ 85% of free-text booking requests correctly pre-filled; no AI-caused wrong price or availability; G9 and G10 measured; three clubs onboarded at ≤ 15 minutes each. The Velora demo script (§12.4) runs end to end on a real phone and in the simulator, steps 3 to 6 included (§17.1).
 
+Gate status 2026-11-27:
+- [x] Answer path tested with fakes: `ai-answers.test.ts` (guard, extraction pre-fill), `brain-eval.test.ts` (Thai-100, per-club test set)
+- [ ] Human: ≥ 85% pre-fill and no AI-caused wrong price or availability, measured on real traffic; G9, G10; three clubs onboarded at ≤ 15 minutes each; Velora script end to end on a real phone
+
 **Interface first (week 1 of the phase, B publishes, A consumes):** `chat/episodes.ts`:
 `startEpisode(tx, { clubId, conversationId, trigger, reason, topic?, firstMessageId, now })`, `recordStaffReply(db, { clubId, conversationId, userId, text, channel, occurredAt, externalId }): Promise<{ messageId: string }>` (stores the message `author_type='staff'`, writes the event, sends to the guest through the outbox, dedupes on `externalId`), `endEpisode(tx, { episodeId, endedBy: 'staff' | 'timeout', resolverUserId?, now })`. Handoff timeout moves from lazy (today `bot/flow.ts:116–119`) to a scheduler job. `topic` fills `handoff_episodes.topic` (a W0 column, §9): B16 classifies it, and until B16 merges it is the handoff reason code. A16 groups takeovers by it.
 
@@ -1079,7 +1112,7 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 - `brain/compile.ts`: `compileText(notes): string`, `estimateTokens(text): number`, `compileSnapshot(db, clubId, now): Promise<CompileResult>`, `latestSnapshot(db, clubId)`, `BRAIN_TOKEN_WARN`, `BRAIN_TOKEN_CAP`.
 - `brain/layout.ts`: `regenerateLayoutNote(db, clubId, now): Promise<BrainNote | null>`.
 - `brain/export.ts`: `exportObsidianFolder(db, clubId): Promise<NoteFile[]>`, `noteLinks(bodyMd): string[]`. `brain/import.ts`: `importObsidianFolder`, `importPastedText`, `importPhoto(db, clubId, image, ocr: OcrFn, actor, now)`.
-- `jobs/brain-expiry.ts`: `runBrainExpiry(db, now)`, `brainDigest(db, clubId, now)`, `sendBrainDigests(db, now)`, `startBrainExpiry(ctx, now)`.
+- `jobs/brain-expiry.ts`: `runBrainExpiry(db, now)`, `brainDigest(db, clubId, now)`, `sendBrainDigests(db, now)`. The job is `s.register('brain-expiry', 15 min, ...)` on B2's scheduler in `jobs/index.ts` (runs `runBrainExpiry` then `sendBrainDigests`); there is no `startBrainExpiry`.
 
 **Tests (`brain-store.test.ts`):** `note with a price is rejected at save`; `compile is deterministic and hashed`; `over 60k refuses to publish`; `export then import round-trips notes and links`; `pasted text becomes draft notes, never live`; `photo import runs the injected OCR and makes draft notes`; `a table change regenerates the layout note`; `an event note without an end date is rejected`; `an expired note is absent from the next snapshot and listed in the digest`. A17: `onboarding.test.ts › apply writes the baseline FAQs into the brain` replaces its todo.
 
@@ -1177,6 +1210,11 @@ B14b (first row of the Track B table below) builds `chat/episodes.ts`. It is the
 ## Phase 3: Channels, POS and busyness feed
 
 Gate (spec §10): 3 paying clubs; one club live on Instagram; the feed publishes a level for every live club on every open night.
+
+Gate status 2026-11-27:
+- [x] Feed level for every live club on every open night (`busyness.test.ts`)
+- [x] Instagram path tested with a fake Chatwoot (`instagram.test.ts`)
+- [ ] Human: 3 paying clubs; one club live on Instagram
 
 ### Track A, Phase 3
 

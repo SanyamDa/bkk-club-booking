@@ -40,7 +40,7 @@ Every event the platform records, written with `emit()` into the `events` table 
 | `night.rejected` | 1 | `reason` (none) | — | Guest picked a night that cannot be booked. |
 | `pax.selected` | 1 | `pax_range` (none) | — | Guest picked a party size range (paxRangeCode). |
 | `availability.searched` | 1 | `night_date` (none), `pax_range` (none), `result_count` (none), `tables_shown` (none) | — | Table search, including zero results. |
-| `night.sold_out_shown` | 1 | `pax_range` (none) | — | Guest was shown a full night. |
+| `night.sold_out_shown` | 1 | — | — | Guest was shown a full night (no pax range: shown before the party size step). |
 | `waitlist.joined` | 1 | `pax_range` (none) | — | Guest joined the waitlist for a night. |
 | `waitlist.offered` | 1 | `pax_range` (none) | — | A freed table was offered to a waitlisted guest (B22). |
 
@@ -112,7 +112,7 @@ Every event the platform records, written with `emit()` into the `events` table 
 | `support.session_started` | 1 | `supportGrantId` (pseudonymous), `mode` (none) | — | Platform support session started. |
 | `support.session_ended` | 1 | `supportGrantId` (pseudonymous), `mode` (none) | — | Platform support session ended. |
 | `club.created` | 1 | `template` (none) | — | Club created from the console. |
-| `club.settings_changed` | 1 | `fields` (none) | — | Club settings changed; changed fields as short codes (days, window, hold, arrival, handoff, accent, rules, address, menu, greeting, map, promptpay, zones, tables, profile) joined with ":". |
+| `club.settings_changed` | 1 | `fields` (none) | — | Club settings changed; changed fields as short codes (days, window, hold, arrival, handoff, accent, rules, address, menu, words, greeting, map, grace, remind, cancel, tone, after, fields, hosts, promptpay, zones, tables, profile) joined with ":". |
 | `club.price_changed` | 1 | `scope` (none), `scopeId` (pseudonymous), `weekday` (none), `nightId` (pseudonymous), `minSpendSatang` (none), `depositSatang` (none), `previousMinSpendSatang` (none), `previousDepositSatang` (none), `validFrom` (none) | — | Price rule changed. |
 | `club.event_night_created` | 1 | `nightId` (pseudonymous), `eventType` (none) | none | Event night created; the event name is in raw. |
 | `line.setup_run` | 1 | `ok` (none), `check` (none) | — | LINE setup, status or probe ran. |
@@ -123,6 +123,7 @@ Every event the platform records, written with `emit()` into the `events` table 
 | Event | v | Props (privacy) | Raw | Description |
 |---|---|---|---|---|
 | `booking.status_changed` | 1 | `from` (none), `to` (none), `reason_code` (none) | personal | Every booking status change (B2); the row the nightly check matches on. |
+| `booking.changed` | 1 | `field` (none), `from_pax` (none), `to_pax` (none), `from_table_id` (pseudonymous), `from_night` (none) | — | Booking changed without a status change (§6.2, §5.3): field pax, table, night or notes, with the old values. |
 | `link.opened` | 1 | `kind` (none) | — | Tagged redirect link tapped (B4). |
 | `guest.removal_requested` | 1 | — | — | Guest asked for their data to be removed (B10b). |
 | `guest.removed` | 1 | — | — | Guest data removal job finished (B10b). |

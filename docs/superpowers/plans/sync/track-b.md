@@ -143,12 +143,13 @@ export async function importPhoto(db, clubId, image, ocr: OcrFn, actor, now);
 // jobs/brain-expiry.ts
 export async function runBrainExpiry(db, now): Promise<{ expired: number }>;
 export async function brainDigest(db, clubId, now): Promise<{ expired: BrainNote[]; dueForReview: BrainNote[] }>;
-export async function sendBrainDigests(db, now): Promise<void>; export function startBrainExpiry(ctx, now): () => void;
+export async function sendBrainDigests(db, now): Promise<void>;
+// No startBrainExpiry: the job is s.register('brain-expiry', 15 * MINUTE, ...) in jobs/index.ts (B2 scheduler).
 ```
 - Every import is a draft. A folder file whose slug exists with a different body becomes a draft with `supersedesId`.
 - Expiry: a live note past `validUntil` (club night date) is out of the compile and retired by the job (`frontmatter.retiredReason = 'expired'`). A note past `reviewBy` (default today + 90 days, reset on edit) stays live and is listed in the digest. The digest is an `info` alert `brain_digest`, once per club per week from Monday 10:00 Bangkok (`platform_flags['brain-digest:<clubId>:<monday>']`).
 - Events: `brain.note_drafted|approved|rejected` props are now `noteId, noteType, source` (declarations and `docs/EVENTS.md` updated).
-- `jobs/index.ts`: a `startBrainExpiry` line, to become `scheduler.register('brain-expiry', ...)` with B2's scheduler.
+- `jobs/index.ts`: `s.register('brain-expiry', 15 * MINUTE, ...)` on B2's scheduler (runs `runBrainExpiry`, then `sendBrainDigests`). The interim `startBrainExpiry` stand-in was deleted (see the B2 entry below).
 - The layout note (slug `layout`, live, no prices) is regenerated after every zone and table write in `http/staff-settings.ts` and in onboarding apply.
 
 **Assumptions to match:** no real OCR provider (inject an `OcrFn`); the token count is an estimate, not the provider's tokenizer; "near the DJ" is not in the layout note until the floor plan has a DJ marker. B16 answers from `latestSnapshot(...).compiledText`; B18 creates learned notes with `createNote({ type: 'learned', source: 'takeover', sourceEpisodeId })`; B19 routes call `approveNote` / `rejectNote` / `updateNote` and show `BrainLintError.issues`.
@@ -480,11 +481,11 @@ Routes (`http/demo.ts`, mounted at `/api/admin/demo`, `requirePlatformAdmin`): `
 - **Published (`data/ops.ts`):** `recordOps(db, clubId: string | null, kind: OpsKind, detail, now)`, the one `ops_events` writer (`line-probe.ts` `recordLineSetup` and `jobs/nightly-check.ts` switched).
 - **Outbox:** every outbound row ends with `delivery_status` `sent` (`sent_via` `reply`/`push`), `skipped` (`sent_via='none'`: no LINE id, unfollowed with no reply token, no staff group, staff messages past the first 5) or `failed` (`sent_via='push'`, `error` = `describeLineError`, plus one ops `send_failed` `{ target: 'guest' | 'staff', messageIds, error }`). `Outbox` takes an optional third constructor arg `now`.
 - **Bot pause:** `clubs.bot_paused` or `isGloballyStopped(db)`: inbound stored, nothing to the guest, one staff-group message per conversation per pause, through `raiseAlert` (urgent `bot_paused`, since B19b). Pause identity `club:<bot_paused_at ISO>` or `global:<platform_flags.global_stop.updated_at ISO>`, kept in `conversations.state.pauseAlertedFor` (new optional `ConversationState` field, no migration).
-- **Dry run:** one `db.transaction`, fresh `buildBotDeps(config, tx, { now, log, slipVerifier: null, payments: {} }) (no slip provider and no payment gateway is called)`, the dev gateway wrapped to collect `{ via, to|replyToken, messages }` into `replies`, no dedupe, always rolled back. `POST /api/admin/clubs/:slug/webhooks/:id/replay` returns `{ dryRun: true, events, replies }`, 409 `not_replayable` for an unsigned or non-LINE row, 500 `replay_failed` on a throw, and writes a `debug.view` audit row.
+- **Dry run:** one `db.transaction`, fresh `buildBotDeps(config, tx, { now, log, slipVerifier: null, payments: {}, ai: null, learn: null, judge: null }) (no slip provider, payment gateway or model is called; review fix: since the B16 merge an omitted `ai` built a real Anthropic client from `ANTHROPIC_API_KEY`, and its cost events rolled back with the transaction)`, the dev gateway wrapped to collect `{ via, to|replyToken, messages }` into `replies`, no dedupe, always rolled back. `POST /api/admin/clubs/:slug/webhooks/:id/replay` returns `{ dryRun: true, events, replies }`, 409 `not_replayable` for an unsigned or non-LINE row, 500 `replay_failed` on a throw, and writes a `debug.view` audit row.
 - **Start-up:** `startBackground` awaits `replayUnprocessed(ctx, now())` before the scheduler starts. Tested by `webhook-durability.test.ts › startBackground replays unprocessed deliveries before it returns` (integrator).
 - **Alert script:** `infra/check-webhook-errors.sh` denominator is now LINE rows in `raw_webhooks`.
 - **Tests:** `webhook-durability.test.ts` 10 pass (plan names); `admin.test.ts` gate `raw_webhooks` assertion, `pause stops replies within one message`, `one guest message is traceable end to end`, `failed send shows in the message log with LINE's error` are real tests; `admin-support.test.ts` replay dry run, end-to-end trace, failed send are real tests; `instagram.test.ts` raw-writer test is real.
-- **Not done:** no event for webhook rejection (`line.webhook.rejected` is B4b's).
+- **Not done:** ~~no event for webhook rejection (`line.webhook.rejected` is B4b's).~~ Done in B4b: `http/webhook.ts` emits `line.webhook.rejected` (see the B4b entry below).
 - **Assumptions in place of a human decision:** start-up replay waits 10 s past receipt so a delivery still in flight is not processed twice; the pause notice goes to the staff group once per conversation per pause.
 - **Unverified against a real service:** signatures and redeliveries are tested with locally signed bodies; no delivery from the real LINE platform was received. No web page changed.
 
@@ -606,3 +607,70 @@ Landed on `track-a` (one session builds both tracks). Tests: `test/busyness.test
 - **Model:** forecast = booking heat of the latest snapshot at or before the bucket (or now); `baseline_pace` (mean final heat of the last up-to-8 same-weekday nights × pace at the same lead bucket) once 4 such nights have snapshots. A started bucket takes a crowd rating from the last 60 min (level = rating, `high`), else the cumulative door count ÷ `club_profile.capacity_standing` (`medium`). `noData` when the snapshot has < 10 booked guests, or a bucket has started on a night with neither a door count nor a rating.
 - **Assumptions others must match:** production key = `status 'live'` clubs only; sandbox key = `status 'demo'` clubs only, marked `test`. Search demand reads only `events.data_origin in ('first_party','pos')` (and `is_test = false` in production). Booking-derived inputs come from B12 snapshots; booking events are `first_party` whatever channel (if LINE's q12 answer is no, B12 must split snapshots by `bookings.source`). The forecast is flat across the night's buckets. Rate limit is per process in memory (a multi-instance deploy needs a shared store). Access log = one `audit_log` row per accepted read (`action 'busyness_read'`, `entity 'busyness_key'`); refused reads write nothing. Rotation stops the old token at once (no grace period). §16.1 q9 q10 (what "busy" means, the feed shape the app needs) are still open; the bucket size and levels above are the plan's assumption.
 - **Unverified:** no external service; the separate app has not called it. LINE's written answer to q12 is still needed before the feed goes to the app (spec §10, owner waived the gate for building).
+
+## 2026-11-27 · B4b: Emit coverage, built by Session A on track-a
+
+- **Emitters added:** `bot/flow.ts` `booking.started` (with the attempt's entry tag in `source`), `booking.abandoned` (`last_step`, `reason_code: attempt_replaced`), `bot.fallback_menu`, `bot.error`; `http/liff.ts` `form.opened`, `form.validation_failed`, `form.submit_rejected`, `form.identity_rejected`, `notice.accepted`, `rules.accepted`; `http/webhook.ts` `line.webhook.rejected`; `line/outbox.ts` `message.sent` (`kind`, `delivered`, `latency_ms`, `template`, `messageId`); `integrations/pos/csv-import.ts` `booking.completed`. All through `emit`, inside the change's transaction where there is one.
+- **Review fix:** `prefillBooking` (B16 typed or AI-extracted requests) now emits `night.selected` and, when a table is named, `pax.selected` with the state change, so the funnel has no step missing before `table.held`. `night.sold_out_shown` declares no `pax_range` (it is shown at the night step, before the party size); the pax split of sold-out demand in `analytics_src.demand_no_table` is the zero-result `availability.searched` that follows.
+- **Test:** `apps/server/test/emit-coverage.test.ts`: every event the B4b table gives to B2, B4 and B4b fires in a real flow (signed LINE webhooks, the LIFF form, the booking service), and every type in `EVENT_TYPES` has an emitter in `src` whose test asserts it. This is the Phase 1b gate item "B4b emit-coverage.test.ts passes".
+- **Not committed by the review fixer:** the fixer was told not to commit; the B4b changes and the gap-closing work at the end of `sync/track-a.md` (`integrations/chatwoot/instagram-answer.ts`, migration `0010_a5_founder_line_user` and its snapshot, `jobs/brain-draft.ts` `gap_waiting`) still need their commits (`B4b: emit coverage`, and a separate gap-closing commit).
+
+
+## 2026-11-27 · Phase gate record (Phase 1b, then Phases 1, 2 and 3)
+
+One session built both tracks. The full checklist, with each automated item ticked against its passing test, the §13.1 rows 1 to 11 with the task that closed each, and the open human items (phone run of the Velora steps, the LIFF provider device check, real-club measurements), is in `track-a.md` under the same heading, so the two files cannot disagree. Track B items in it: B2 nightly check on a seeded week (`velora.test.ts`, `nightly-check.test.ts`), B4b `emit-coverage.test.ts`, B8b `nights.test.ts`, §13.1 rows 3, 7 (B5), 1 (B8), 9, 10 (B3) and 11 (B2), all passing. `phase-1b-done` is not tagged: the plan tags `main`, and this branch is not merged yet.
+
+### Cross-review findings (2026-11-27) on Track B code, and outcome
+
+- B15 interface list named `startBrainExpiry(ctx, now)`, which does not exist: fixed in the plan and in the B15 entry above. The job is `s.register('brain-expiry', 15 * MINUTE, ...)` on the B2 scheduler.
+- B18 × A17b: `runLearning` ignored the `learning_loop` switch: fixed. A club with the switch off gets outcome `learning_off`: the episode is claimed (never drafted later), no note is flagged, no model call. Test: `learning-loop.test.ts › with the learning_loop switch off ...`.
+- B10 × B4: the day-of reminder had a raw `mapUrl` on [Location]: fixed. `M.reminder(club, lang, view, links)` uses `links.tracked(club, 'map', 'reminder_location')`, and the button is left out when the club has no map link. Tests in `reminders.test.ts`.
+- B4b: `holdTable` abandoned other holds with `last_step: 'held'`: fixed (`details` or `payment`, as in `abandonUnfinished`). Test in `bookings.test.ts`.
+- §14.2 dead-letter check: added to the nightly job (`deadLetters`, ops row `check = 'dead_letter'` per club). `checkEventCompleteness` now returns `{ missing, silentClubs, piiInProps, testInAggregates, deadLetters }`.
+- §5.2 step 4: the details form takes optional `birthDate` (`guests.birth_date`) and `occasion` (`bookings.occasion`); the club's `requiredFields` (default `['nationality']`) are checked server side, each miss a `form.validation_failed` with code `required`. `GuestDetails.nationality` is `string | null`.
+- §5.3 [Change party size]: added. `bookingActions` is now [Change party size] [Running late] [Cancel] [Talk to a host]; postbacks `pax_change` and `pax_set` go through `changeBooking` (audit row and the new `booking.changed` event, Internal area, props `field, from_pax, to_pax, from_table_id, from_night`; `docs/EVENTS.md` regenerated).
+- §5.3 outside hours: `ClubSettings.hostHours {from, to}`; outside them the handoff reply (LINE and Instagram) is `handoffAckOffHours` ("Our hosts are online from 18:00."). `M.hostsOnline`, `M.handoffAckText`.
+- §5.4 tone: `ClubSettings.tone` (`formal` default, or `casual`) reaches the model in `aiUserContent(today, lang, text, tone)`, live and in the B17 test runner.
+- §5.2 step 10 after visit: job `after-visit` (every 15 min, `jobs/after-visit.ts`) when `afterVisitMessage` is on: one push per arrived or completed booking from 14:00 the next day, [Book again] (`a=book&s=after_visit`), `reminder.sent` kind `after_visit`. Skipped on marketing opt-out, no LINE or blocked, a test booking at a real club, and when the last known LINE quota reading is at 90% or more.
+- §7.1 `completed` and the POS bill close: see `track-a.md` (`completeBookingTx` is a booking-service function; the job is `completion`).
+
+## 2026-11-27 · Review fixes (spec gaps), track-a working tree, not committed
+
+- **A17b switch read:** `handleFreeText` and `answerInstagramMessage` read `isFeatureOn(db, clubId, 'ai_answers')` per request; off (the default) LINE free text gets the menu and Instagram answers `off`, with no model call.
+- **Instagram host replies (A18 x B16/B18):** `recordInstagramMessage` records outgoing, non-private Chatwoot messages from a person (not `agent_bot`, not the platform admin user, deduped on `cw:<account>:<message id>`) through `recordStaffReply(db, input, null)` (`send: null` = already delivered by the channel; new optional `input.channelId`). `conversation_status_changed` `resolved` on the Instagram inbox calls `endOpenEpisode`. New registrations subscribe to both events; an Instagram inbox connected before this needs its account webhook re-registered.
+- **Paused clubs (§12.3):** `activePause` returns `status:paused` for `clubs.status = 'paused'` (bot silent, inbound stored, no staff alert); `requireClubRole` answers 403 `club_paused` to any non-GET staff route of a paused club.
+- **New optional `ClubSettings` keys, defaults in code (no migration):** `sameNightCutoffHour` (1), `maxBookingsPerGuestPerNight` (1, counts `payment_review`/`confirmed`/`arrived` on that night; `holdTable` throws `BookingError('guest_night_limit')`), `maxPushesPerBooking` (2). The first two are settable through `PATCH /clubs/:slug/settings`.
+- **Push budget (§11.1.4):** `Outbox.toGuest(..., opts.booking?: { id, optional? })`; `message.sent` now carries `booking_id` for those sends. Push requests per booking are counted from delivered push `message.sent` rows (one per send time); an `optional` push (reminder, hold expired) past the cap is stored `skipped`. Confirmation, slip rejected and club cancellation are never skipped.
+- **No-show with `autoNoShow` off:** the booking is kept and one urgent `no_arrival` alert is raised per booking. The [Release] [Keep 30 min] prompt stays replaced by automatic release (plan B10 assumption).
+- **Also added:** language switch quick reply (`a=lang&l=th|en`, sets `guests.lang`); `a=book_other` ([Book another night] on "already booked"); unfollow raises info alert `guest_unfollowed` when the guest has an upcoming booking, and `unfollowedAt` is on booking detail, `/night` rows and `/handoffs`; `/night` returns `totals { depositsCollected, minSpendBooked }`; rich menu fifth cell Privacy (`links.privacy()`); staff-group messages other than `link <code>` are stripped from the stored `raw_webhooks` body once processed; brain routes `GET .../brain/export`, `POST .../brain/import {files}`, `POST .../brain/import-text {text}`; public `GET /api/liff/floor?club&d` and the `/liff/floor` page behind [See floor plan]; demo reset retires takeover-sourced brain notes (chats are back with the bot because demo conversations and episodes are deleted; mode changes stay in `chat/episodes.ts`), with Reset and Fast-forward in the founder console.
+- **Not done:** rich menu cells from a per-club setting; demo reset deleting the step-7 club and clearing the spare account's webhook (no club delete exists); photo import (no OCR provider wired).
+
+## 2026-11-27 · Final merge and whole-branch review
+
+One session built both tracks; this entry is the same in `track-a.md` and `track-b.md`.
+
+**What landed on `track-a`:**
+- B4b emit coverage: every type in `EVENT_TYPES` has an emitter in `src` and an asserting test (`emit-coverage.test.ts`, `RESERVED` empty); `message.sent` bookkeeping moved out of the send try (`outbox-bookkeeping.test.ts`).
+- Gaps closed: Instagram AI answers (`integrations/chatwoot/instagram-answer.ts`), `gap_waiting` alert in `jobs/brain-draft.ts`, founder LINE user id (`users.line_user_id`, migration `0010_a5_founder_line_user`, `test-message {to:'self'}` works, the 501 is gone).
+- Review fixes from the spec walk: §7.1 `completed` (`jobs/completion.ts`, POS bill close); §6.2 Bookings and Payments pages and routes (`http/staff-bookings.ts`, `pages/staff/Bookings.tsx`, `pages/staff/Payments.tsx`); booking detail history; guest policy settings (`PATCH /clubs/:slug/policy`); §12.3 owner notice of sensitive changes; push budget per booking (`push-budget.test.ts`); after-visit message (`jobs/after-visit.ts`); paused clubs; floor plan page (`pages/FloorPlan.tsx`); the other items listed in the two "Cross-review findings" sections and in "Review fixes (spec gaps)".
+
+**Merge notes:** track-c was merged into track-a before this work (`6537958`), so track-a holds every task of both tracks. The only migration added is `0010_a5_founder_line_user` (new file; no applied migration edited). Nothing is merged to `main`: merging and the `phase-1b-done` tag are the owner's step.
+
+**Checks at commit time:** `npm test` 70 files, 706 tests passed, 0 `it.todo` left; `npm run typecheck` clean (server and web); `npm run build -w @club/web` passes (warning only: one 603 kB chunk, over Vite's 500 kB hint).
+
+**Review findings:** fixed and decided items are listed under "Cross-review findings (2026-11-27)" in both sync files. Rejected or deferred, with reason:
+- Per-purpose `staff_groups` (§6.1, §9): not built; one staff group per club; needs a migration and a linking flow per purpose. No gate depends on it.
+- Rich menu cells from a per-club setting, demo reset deleting the step-7 club, and photo import (no OCR provider wired): not built.
+- The [Release] [Keep 30 min] no-show prompt stays replaced by automatic release (plan B10 assumption); with `autoNoShow` off one urgent `no_arrival` alert is raised.
+- Web bundle code splitting: not done; build warning only.
+
+**Gate checklists:** ticked in the plan ("Gate status 2026-11-27" under each phase gate) and in `track-a.md` "Phase gate record". Human-only items are left unticked.
+
+**Still needs a human:**
+- Browser walks of the staff dashboard, founder console, LIFF form, floor plan, Bookings and Payments pages (built and unit-tested, never opened in a browser this session).
+- Phone and device checks: Velora demo (§12.4) steps 1, 2, 7 and step 4 on a phone, the full script in Phase 2; `liff.sendMessages()` across providers (§16.1 q3); door screen on a real tablet.
+- Real accounts and keys, all faked in tests: LINE Messaging and Login channels and LIFF app (and the founder's real LINE user id per provider); Meta business verification and app review, Instagram via a real Chatwoot; POS (Papaya, Loyverse) live credentials; Opn Payments (`OPN_SECRET_KEY`, `OPN_WEBHOOK_SECRET`, sub-merchant payouts); SlipOK; Anthropic API key and cost cap on real traffic; Metabase on the `analytics` schema.
+- Native Thai review of every Thai string (`bot/i18n.ts`, `bot/messages.ts`, web copy) and of the Thai-100 evaluation set.
+- Real-club measurements: G1–G10, ≥ 85% pre-fill, onboarding at ≤ 15 minutes, 3 paying clubs, one club live on Instagram.
+- Spec open questions (§16) still open, including §16.1 q3 above; the owner decides them.
+- Owner: merge `track-a` to `main` and tag `phase-1b-done`.

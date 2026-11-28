@@ -522,7 +522,7 @@ Requests for Track B:
 - B5: done (2026-11-27). `console-created club: details read with a valid ID token...` is a real test.
 - B6: done (2026-11-27). `POST .../tester-code` calls `issueTesterCode` and returns `{ code, expiresAt }` once; the todo is a real test.
 
-Deferred (decision): `POST .../test-message {to:'self'}` answers 501 `not_ready`, because no founder LINE user id is stored anywhere. Storing it needs a `users` column (migration) and a way to capture the id (e.g. the founder adds the club's OA and sends a link code); tracked by an `it.todo` in `admin-support.test.ts`. `staff_group` works. The debug webhook and message lists now write a `debug.view` audit row each (entity `raw_webhooks` / `messages`, entity id the club id, query in `data`). The velora-like club assertions are an `it.todo` in `admin.test.ts` until B0 merges.
+Deferred (decision, superseded by "Gap closing" below: `to:'self'` now works): `POST .../test-message {to:'self'}` answered 501 `not_ready`, because no founder LINE user id is stored anywhere. Storing it needs a `users` column (migration) and a way to capture the id (e.g. the founder adds the club's OA and sends a link code); tracked by an `it.todo` in `admin-support.test.ts`. `staff_group` works. The debug webhook and message lists now write a `debug.view` audit row each (entity `raw_webhooks` / `messages`, entity id the club id, query in `data`). The velora-like club assertions are an `it.todo` in `admin.test.ts` until B0 merges.
 
 `it.todo` waiting on Track B (10 in all):
 - `admin.test.ts`: "create club then receive a signed webhook with no restart: a raw_webhooks row for that club (needs B3)"; "pause stops replies within one message" (B3); "console-created club: details read with a valid ID token is 200, with no token it is refused" (B5, now a real test); "one guest message is traceable end to end" (B3); "failed send shows in the message log with LINE's error" (B3); "a velora-like club gets complete settings, a channels row, a refPrefix no other club has, and Velora tables and prices" (B0); "tester-code route returns the code once" (B6, now a real test).
@@ -722,7 +722,7 @@ Published in `apps/server/src/platform/club-report.ts`: `buildClubReport(db, clu
 Routes in `apps/server/src/http/admin/onboarding.ts`: `POST /api/admin/clubs/:slug/onboarding/link`, `GET /api/admin/clubs/:slug/onboarding`, `POST .../onboarding/apply`, `POST .../onboarding/timing {step, event}`; public `GET`/`PUT /api/onboard/:token`.
 
 - Storage in `platform_flags`: `onboarding_link:<clubId>` (token SHA-256 only), `onboarding_form:<clubId>`, `onboarding:<clubId>` (per-step timings, `appliedAt`).
-- Apply steps: `zones`, `tables`, `prices`, `rules`, `profile`, `faqs` (`not_ready` until B15), `promptpay` (`manual`), `inbox` (A13 provisioning).
+- Apply steps: `zones`, `tables`, `prices`, `rules`, `profile`, `faqs` (draft notes since B15; `not_ready` removed from the step status type), `promptpay` (`manual`), `inbox` (A13 provisioning).
 - **Request to B:** when B15 publishes `brain/notes.ts`, A will write the submission's `faqs` as draft notes from the apply step.
 
 ## 2026-11-27 — A19 (POS live sync)
@@ -1029,3 +1029,101 @@ export async function applyCallback(db: Db, checked, send: StaffReplySend, now: 
 - **For B:** every guest, bot and staff message must stay a `messages` row (mirroring contract). A staff row whose `external_id` starts `cw:` is treated as already in Chatwoot and is not posted back.
 - Chatwoot API shapes (contact create response, `toggle_status`, inbox PATCH `channel.webhook_url`, webhook payload `conversation.display_id`, `sender.type`) are not checked against a live install.
 - **Assumptions in place of a human decision:** first run mirrors the whole message history; mirror polls every 5 s; Chatwoot account and token come from A13's stored credentials. Tests use a fake Chatwoot client; no real Chatwoot call. No web page in this task.
+
+## Gap closing: Instagram AI answers, gap_waiting, founder LINE id
+
+- **Instagram answers (A18 + B16):** `integrations/chatwoot/instagram-answer.ts` `answerInstagramMessage(deps, club, messageId, now)`, called by the Instagram webhook after `recordInstagramMessage` (which now returns `{ applied, messageId? }`). Same path as LINE: complaint word and handoff keyword, then `answerGuestMessage` (brain snapshot, guard, cost cap) with `channel: 'instagram'` on `AnswerSession` so `ai.*` and `faq.missed` are tagged `instagram`; handoff runs `startEpisode` plus an urgent alert. Replies go to the Chatwoot conversation as outgoing (Agent Bot token when present) and are stored as `messages` rows on the Instagram channel (`external_id` `cw:<account>:<id>`, `failed` with the error when Chatwoot refuses). Booking requests and LINE-button outcomes get `Links.tracked(club, 'line', 'instagram')` (new tracked kind `line`, redirect to `https://line.me/R/ti/p/<OA basic id>`); no LINE basic id hands to a host (`instagram_booking`). Quiet while a host has the chat; off while paused, with the club's `instagram` switch off, or with no model client or Chatwoot. Answer-path errors are logged and raise `bot_error`, never a 500.
+- `chat/episodes.ts` events (`handoff.*`, `host.replied`) take channel and data origin from the guest's channel: `instagram` for an Instagram contact.
+- **gap_waiting (B19b):** the `brain-draft` job raises needs-input `gap_waiting` (`alertBrainWaiting`, one open per club) when a club has unanswered gaps (`listGaps`), looking only at clubs with a `faq.missed` newer than their last `gap_waiting` alert. Threshold `GAP_WAITING_MIN_GAPS = 1` (the plan sets no count).
+- **Founder LINE user id (A5):** `users.line_user_id` (migration `0010_a5_founder_line_user`), `GET`/`PUT /api/admin/me/line {lineUserId: 'U'+32 hex | null}` (audit `admin.line_user_set` / `admin.line_user_cleared`, last4 only). `test-message {to:'self'}` pushes to it through the club's gateway; 409 `no_founder_line_user` when unset, 502 `send_failed`. The 501 is gone. A LINE user id is per provider, so it reaches the founder only on OAs under the provider it came from.
+
+## 2026-11-27 · Phase gate record (Phase 1b, then Phases 1, 2 and 3)
+
+One session built both tracks, so this section and the same one in `track-b.md` tick each gate together. "Passes" means the named test file passed on `track-a` on 2026-11-27, run file by file (`npx vitest run test/<file>`). Device and phone items are open human checks: no device run is recorded, so none is ticked.
+
+### Phase 1b gate checklist (plan line 742)
+
+- [x] A5 `create club then receive a signed webhook with no restart`: `admin.test.ts` passes.
+- [x] A2 isolation suite: `isolation.test.ts` passes (own slug with another club's id is 404, another club's slug is 403, no session is 401, on every staff and admin route, including the new §6.2 routes in `http/staff-bookings.ts`).
+- [x] B2 nightly check on a seeded week: `velora.test.ts` (`checkEventCompleteness` on the seeded Velora nights finds `missing: 0`, `piiInProps: 0`) and `nightly-check.test.ts` pass. The job now runs five checks: the dead-letter check (`events_dead_letter` empty, §14.2) was added.
+- [x] A5 `console-created club: details read with a valid ID token` with no env var set (A4b + B5): `admin.test.ts` passes.
+- [x] B4b `emit-coverage.test.ts` passes.
+- [x] B8b every night in the booking window has a `nights` row: `nights.test.ts › job writes a row for every date in the booking window, open and closed` passes.
+- [x] Every §13.1 row closed, with the task that closed it and its test:
+
+| §13.1 | Closed by | Test |
+|---|---|---|
+| 1 Simulator open | B8 | `simulator-auth.test.ts` |
+| 2 Placeholder secrets | A3 | `config.test.ts` |
+| 3 Staff link code | B5 | `guest-staff-link.test.ts` |
+| 4 Shared password, no club check | A1, A2 | `auth.test.ts`, `isolation.test.ts` |
+| 5 Session not revocable | A1 | `auth.test.ts` |
+| 6 Login limit by client address | A1 | `auth.test.ts` |
+| 7 Details link leaks, never expires | B5, A4b | `flow.test.ts`, `shared-liff.test.ts`, `guest-staff-link.test.ts` |
+| 8 No cross-club test | A2 | `isolation.test.ts` |
+| 9 Webhook keeps nothing | B3 | `webhook-durability.test.ts` |
+| 10 Failures only on the console | B3 | `webhook-durability.test.ts` |
+| 11 State changes outside a transaction | B2 | `booking-history.test.ts`, `nightly-check.test.ts` |
+
+- [ ] **Open, human:** Velora demo script (§12.4) steps 1, 2 and 7, and step 4 in its Phase 1b form, on a phone. (The simulator side is covered by `velora.test.ts` and `flow.test.ts`; the phone run is not recorded.)
+- [ ] **Open, human:** device check that `liff.sendMessages()` works when the LIFF app's provider differs from the OA's provider (§16.1 q3). The `viaChat=false` fallback in `http/liff.ts` is in place and tested (`flow.test.ts`).
+- [x] Cross-review done: one session built both tracks, so the cross-review is the 2026-11-27 workflow review of the whole branch. Its findings and what happened to each are listed below.
+- [ ] Tag `phase-1b-done`: not made. The plan tags `main`, and this branch is not merged to `main` yet (merging is the owner's step). Tag `main` when it merges with the open human items above done.
+
+### Phase 1 gate (plan line 748)
+
+- [x] Before the first real guest: B10b removal and retention tests pass (`removal.test.ts`, `retention.test.ts`).
+- [x] Velora demo step 8 (the Velora-only board) has its data: B14 is merged and `analytics.test.ts` passes.
+- [ ] **Open, human:** G1–G8 measured on the pilot club; club agrees to continue; onboarding call timed against P1; Meta business verification and app review.
+
+### Phase 2 gate (plan line 976)
+
+- [x] The answer path is tested with fakes: `ai-answers.test.ts` (guard strips invented prices, extraction pre-fills date, pax and table) and `brain-eval.test.ts` (Thai-100 set, per-club test set) pass.
+- [ ] **Open, human:** ≥ 85% of free-text booking requests pre-filled, measured on real traffic; no AI-caused wrong price or availability on real traffic; G9 and G10 measured; three clubs onboarded at ≤ 15 minutes each; the Velora script end to end on a real phone.
+
+### Phase 3 gate (plan line 1189)
+
+- [x] The feed publishes a level for every live club on every open night: `busyness.test.ts › level for every live club on a night whose nights.status is not closed` passes.
+- [x] Instagram path tested with a fake Chatwoot: `instagram.test.ts` passes.
+- [ ] **Open, human:** 3 paying clubs; one club live on Instagram.
+
+### Cross-review findings (2026-11-27) and outcome
+
+- §7.1 `completed` was never set: fixed. `completeBookingTx` / `completeBooking` in `bookings/service.ts` (arrived to completed through `changeStatus`); job `completion` (every 15 min) in `jobs/completion.ts` at closing time + 2h; the POS bill close (`emitBookingCompleted`) also completes the booking on its transaction.
+- §6.2 Bookings / Payments missing parts: fixed in `http/staff-bookings.ts` (`GET /clubs/:slug/bookings` search by night, status, zone, promoter, source and text; `POST /bookings/:id/change` for party size, table, night and notes through `changeBooking`; `GET /payments` slips with amount read against expected; `GET /payments/deposits.csv`, managers only), cancel body `deposit: 'forfeit' | 'refund'` (writes `forfeited` / `refunded_manual`), manual booking `kind: 'phone' | 'walkin'` (source `manual_phone` / `manual_walkin`) and `guestId` + `sendLineConfirmation`. Web: `pages/staff/Bookings.tsx`, `pages/staff/Payments.tsx`, actions and history in `BookingDetail.tsx`, booking kind in `NewBooking.tsx`.
+- §6.2 Booking detail without history: fixed. The detail route returns `history` (status history with actor and reason), `audit`, `chatSummary` (handoff episodes) and `rulesVersion`.
+- §6.2 Settings / §7.2: fixed. `holdMinutes` capped at 30; new `PATCH /clubs/:slug/policy` (its own route so neither form's `club.settings_changed` codes pass 64 characters) for `arrivalGraceMinutes`, `reminderTime`, `cancellationPolicy {en,th}`, `requiredFields`, `tone`, `hostHours`, `afterVisitMessage`; `cancelAsk` uses `cancellationPolicy` (unset: the first rule). Web: "Guest policy and bot" form in `Settings.tsx`.
+- §12.3 three sensitive changes: fixed. `notifyOwners` in `http/admin/controls.ts` sends the staff-group text and raises a `needs_input` `sensitive_change` feed alert "For the owner: ..." that stays until resolved, so it is seen before a group is linked. Decision: no email sender exists and staff accounts hold no LINE user id on the club's provider, so the dashboard feed is the owner's direct channel.
+- §6.1 / §9 `staff_groups`: decision recorded, not built. Each club links one staff LINE group (`clubs.staff_group_id`) and every staff alert goes there; per-purpose groups (bookings, payments, handoff) are not built. The spec's `staff_groups(purpose)` table is a later change: it needs a migration, a linking flow per purpose and routing in `outbox.toStaff`. Nothing in the gates depends on it.
+- §9 `bookings.source`: fixed (see manual booking above).
+- B4b `message.sent` inside the send try: fixed. In `line/outbox.ts` only the LINE call is in a try; `mark`, `failed` and `sentEvents` run after it in `afterSend`, which only logs. Test: `outbox-bookkeeping.test.ts`.
+
+## 2026-11-27 · Final merge and whole-branch review
+
+One session built both tracks; this entry is the same in `track-a.md` and `track-b.md`.
+
+**What landed on `track-a`:**
+- B4b emit coverage: every type in `EVENT_TYPES` has an emitter in `src` and an asserting test (`emit-coverage.test.ts`, `RESERVED` empty); `message.sent` bookkeeping moved out of the send try (`outbox-bookkeeping.test.ts`).
+- Gaps closed: Instagram AI answers (`integrations/chatwoot/instagram-answer.ts`), `gap_waiting` alert in `jobs/brain-draft.ts`, founder LINE user id (`users.line_user_id`, migration `0010_a5_founder_line_user`, `test-message {to:'self'}` works, the 501 is gone).
+- Review fixes from the spec walk: §7.1 `completed` (`jobs/completion.ts`, POS bill close); §6.2 Bookings and Payments pages and routes (`http/staff-bookings.ts`, `pages/staff/Bookings.tsx`, `pages/staff/Payments.tsx`); booking detail history; guest policy settings (`PATCH /clubs/:slug/policy`); §12.3 owner notice of sensitive changes; push budget per booking (`push-budget.test.ts`); after-visit message (`jobs/after-visit.ts`); paused clubs; floor plan page (`pages/FloorPlan.tsx`); the other items listed in the two "Cross-review findings" sections and in "Review fixes (spec gaps)".
+
+**Merge notes:** track-c was merged into track-a before this work (`6537958`), so track-a holds every task of both tracks. The only migration added is `0010_a5_founder_line_user` (new file; no applied migration edited). Nothing is merged to `main`: merging and the `phase-1b-done` tag are the owner's step.
+
+**Checks at commit time:** `npm test` 70 files, 706 tests passed, 0 `it.todo` left; `npm run typecheck` clean (server and web); `npm run build -w @club/web` passes (warning only: one 603 kB chunk, over Vite's 500 kB hint).
+
+**Review findings:** fixed and decided items are listed under "Cross-review findings (2026-11-27)" in both sync files. Rejected or deferred, with reason:
+- Per-purpose `staff_groups` (§6.1, §9): not built; one staff group per club; needs a migration and a linking flow per purpose. No gate depends on it.
+- Rich menu cells from a per-club setting, demo reset deleting the step-7 club, and photo import (no OCR provider wired): not built.
+- The [Release] [Keep 30 min] no-show prompt stays replaced by automatic release (plan B10 assumption); with `autoNoShow` off one urgent `no_arrival` alert is raised.
+- Web bundle code splitting: not done; build warning only.
+
+**Gate checklists:** ticked in the plan ("Gate status 2026-11-27" under each phase gate) and in `track-a.md` "Phase gate record". Human-only items are left unticked.
+
+**Still needs a human:**
+- Browser walks of the staff dashboard, founder console, LIFF form, floor plan, Bookings and Payments pages (built and unit-tested, never opened in a browser this session).
+- Phone and device checks: Velora demo (§12.4) steps 1, 2, 7 and step 4 on a phone, the full script in Phase 2; `liff.sendMessages()` across providers (§16.1 q3); door screen on a real tablet.
+- Real accounts and keys, all faked in tests: LINE Messaging and Login channels and LIFF app (and the founder's real LINE user id per provider); Meta business verification and app review, Instagram via a real Chatwoot; POS (Papaya, Loyverse) live credentials; Opn Payments (`OPN_SECRET_KEY`, `OPN_WEBHOOK_SECRET`, sub-merchant payouts); SlipOK; Anthropic API key and cost cap on real traffic; Metabase on the `analytics` schema.
+- Native Thai review of every Thai string (`bot/i18n.ts`, `bot/messages.ts`, web copy) and of the Thai-100 evaluation set.
+- Real-club measurements: G1–G10, ≥ 85% pre-fill, onboarding at ≤ 15 minutes, 3 paying clubs, one club live on Instagram.
+- Spec open questions (§16) still open, including §16.1 q3 above; the owner decides them.
+- Owner: merge `track-a` to `main` and tag `phase-1b-done`.

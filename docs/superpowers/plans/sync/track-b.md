@@ -139,7 +139,13 @@ export async function exportObsidianFolder(db, clubId): Promise<{ path; content 
 export async function importObsidianFolder(db, clubId, files, actor, now): Promise<{ created; superseding; unchanged; skipped; rejected }>;
 export async function importPastedText(db, clubId, text, actor, now): Promise<{ created: BrainNote[]; rejected }>;
 export type OcrFn = (image: { bytes: Uint8Array; mimeType: string }) => Promise<string>;
-export async function importPhoto(db, clubId, image, ocr: OcrFn, actor, now);
+export async function importPhoto(db, clubId, image, ocr: OcrFn, actor, now); // throws OcrError; checks image first
+// brain/ocr.ts (spec gap, photo import OCR)
+export const OCR_MODEL = 'claude-haiku-5-5'; export const MAX_IMPORT_IMAGE_BYTES = 5 * 1024 * 1024;
+export class OcrError extends Error { code: 'unsupported_type' | 'too_large' | 'ocr_failed' | 'no_text' }
+export function checkImportImage(image): ImportImage; // sniffed type: jpeg | png | webp | gif
+export function anthropicOcr(client: OcrMessagesClient): OcrFn; export function configuredOcr(config): OcrFn | null;
+// AppContext.ocr: OcrFn | null; createApp(config, db, { ocr }); POST /api/staff/clubs/:slug/brain/import-photo (multipart file)
 // jobs/brain-expiry.ts
 export async function runBrainExpiry(db, now): Promise<{ expired: number }>;
 export async function brainDigest(db, clubId, now): Promise<{ expired: BrainNote[]; dueForReview: BrainNote[] }>;
@@ -152,11 +158,11 @@ export async function sendBrainDigests(db, now): Promise<void>;
 - `jobs/index.ts`: `s.register('brain-expiry', 15 * MINUTE, ...)` on B2's scheduler (runs `runBrainExpiry`, then `sendBrainDigests`). The interim `startBrainExpiry` stand-in was deleted (see the B2 entry below).
 - The layout note (slug `layout`, live, no prices) is regenerated after every zone and table write in `http/staff-settings.ts` and in onboarding apply.
 
-**Assumptions to match:** no real OCR provider (inject an `OcrFn`); the token count is an estimate, not the provider's tokenizer; "near the DJ" is not in the layout note until the floor plan has a DJ marker. B16 answers from `latestSnapshot(...).compiledText`; B18 creates learned notes with `createNote({ type: 'learned', source: 'takeover', sourceEpisodeId })`; B19 routes call `approveNote` / `rejectNote` / `updateNote` and show `BrainLintError.issues`.
+**Assumptions to match:** OCR is Anthropic vision (`claude-haiku-5-5`) when `ANTHROPIC_API_KEY` is set, else photo import answers 503 `ocr_not_configured`; tests always inject a fake `OcrFn` or fake client; the token count is an estimate, not the provider's tokenizer; "near the DJ" is not in the layout note until the floor plan has a DJ marker. B16 answers from `latestSnapshot(...).compiledText`; B18 creates learned notes with `createNote({ type: 'learned', source: 'takeover', sourceEpisodeId })`; B19 routes call `approveNote` / `rejectNote` / `updateNote` and show `BrainLintError.issues`.
 
 **A17 fallback removed:** onboarding apply writes each FAQ that has an answer as a draft note (`source: 'onboarding'`, title = question, body = EN then TH answer); an existing slug is skipped, a FAQ that fails the price lint is counted in `detail`. The step is `done` with the written count. `onboarding.test.ts › apply writes the baseline FAQs into the brain` replaces the todo.
 
-**Unverified against a real service:** photo import runs only against a fake `OcrFn` (no OCR provider chosen); the token estimate is not checked against the AI provider's tokenizer. No web change; the B19 approval screen is not built.
+**Unverified against a real service:** photo import OCR runs only against a fake client in tests (the `claude-haiku-5-5` prompt is not checked on real menu photos); the token estimate is not checked against the AI provider's tokenizer. No web change; the B19 approval screen is not built.
 
 **Tests:** `brain-store.test.ts` (9 pass); `onboarding.test.ts` (10 pass).
 
@@ -335,7 +341,7 @@ export async function setRunningLate(db: Db, clubId: string, bookingId: string, 
 - **New optional `ClubSettings` keys** (defaults in code, no migration): `reminderTime` ('18:00'), `arrivalGraceMinutes` (30), `runningLateExtendsRelease` (true), `autoNoShow` (true). A9's settings UI may expose them.
 - **For B7 (`demo/reset.ts`, not on this branch):** widen `fastForward`'s `what` to `'hold_expiry' | 'reminder' | 'release'`; `'reminder'` calls `remindNow(ctx, clubId, bookingId, now)`, `'release'` calls `releaseNow(ctx, clubId, bookingId, now)`. Both act on that one booking only.
 
-**Assumption in place of a human decision:** the spec's host prompt "17A not arrived — release table? [Release] [Keep 30 min]" is replaced by automatic release after arrival + running late + grace, with a staff alert; a club that wants to decide sets `autoNoShow: false` and marks no-shows from the dashboard. Guest cancel frees the table through the `cancelled` status (no `table.released` event; that event is the no-show release).
+**Superseded by B10c:** the spec's host prompt "17A not arrived — release table? [Release] [Keep 30 min]" is built (plan B10c). At the release time (arrival + running late + grace, or a Keep's `until`) the host gets the prompt; with `autoNoShow` on an unanswered prompt falls back to automatic release after `releasePromptMinutes` (default 15); with it off the booking waits for the host. Guest cancel frees the table through the `cancelled` status (no `table.released` event; that event is the no-show release).
 
 **Unverified against a real service:** reminder, running-late, cancel and no-show pushes go through the LINE client test fake only; no real LINE push or quick-reply rendering has been seen on a phone. Fast-forward wiring into `demo/reset.ts` waits on B7.
 
@@ -553,10 +559,10 @@ Routes (`http/demo.ts`, mounted at `/api/admin/demo`, `requirePlatformAdmin`): `
 
 Landed on `track-a` (one session builds both tracks). Tests: `test/alert-calls.test.ts` (9). Migration: none (`ClubSettings.urgentWords?` is a JSON field). `it.todo`: none.
 
-- **Published (`bot/alerts.ts`):** `DEFAULT_URGENT_WORDS`, `urgentWordIn(club, text): string | null`, `handoffAlertKind(trigger)`, and the B-side `raiseAlert` helpers: `alertBookingConfirmed(db, view, now)` (info), `alertPaymentReview(db, view, now, { conversationId?, extra? })` (urgent), `alertNoArrival(db, view, now)` (urgent), `alertRunningLate(db, view, now, conversationId?)` (info), `alertCancellation(db, view, now)` (info), `alertBrainWaiting(db, { clubId, kind: 'brain_draft_waiting' | 'gap_waiting', count }, now)` (needs input, one open per kind per club), `alertCostCap(db, clubId, spentSatang, capSatang, now)` (urgent `ai_cost_cap`), `alertBotError(db, clubId, now)` (urgent, one open per club).
+- **Published (`bot/alerts.ts`):** `DEFAULT_URGENT_WORDS`, `urgentWordIn(club, text): string | null`, `handoffAlertKind(trigger)`, and the B-side `raiseAlert` helpers: `alertBookingConfirmed(db, view, now)` (info), `alertPaymentReview(db, view, now, { conversationId?, extra? })` (urgent), `alertReleasePrompt(db, view, now): Promise<string>` (urgent `no_arrival` with [Release] [Keep 30 min] buttons; B10c, replaces `alertNoArrival`), `alertNoShowReleased(db, view, now)` (info `no_show_released`), `alertRunningLate(db, view, now, conversationId?)` (info), `alertCancellation(db, view, now)` (info), `alertBrainWaiting(db, { clubId, kind: 'brain_draft_waiting' | 'gap_waiting', count }, now)` (needs input, one open per kind per club), `alertCostCap(db, clubId, spentSatang, capSatang, now)` (urgent `ai_cost_cap`), `alertBotError(db, clubId, now)` (urgent, one open per club).
 - **Switched to `raiseAlert`:** bot pause (`bot_paused`), every handoff in `requestHandoff` (`guest_wants_human` for `guest_request`/`large_group`, `complaint`, `payment_review` for `paid_after_expiry`, `bot_unanswered` for any other trigger), slip waiting for review (`payment_review`; a lost table raises one alert, not two), confirmed booking in `flow.ts` and `Notifier.confirmed` (`booking_confirmed`, info: no group push unless the club switched info to LINE), club cancellation in `Notifier.cancelled` (`cancellation`, info), bot error in `processDelivery` (`bot_error`; the `ops_events` row stays). `bot/flow.ts` has no `outbox.toStaff` call left.
 - **Complaint or safety word:** checked before intent detection (not while the chat is with a host); case-insensitive substring of `club.settings.urgentWords` when non-empty, else `DEFAULT_URGENT_WORDS`. A hit starts a handoff with trigger `complaint`. Editable through `PATCH /api/staff/clubs/:slug/settings` `{ urgentWords: string[] }` (field code `words`; the settings route's joined field codes are now exactly 64 characters, so a new settings key needs a shorter scheme). No web editor yet.
-- **For `track-c` (B10, B16) and B18, which must match:** B10's no-show job calls `alertNoArrival`, running late calls `alertRunningLate`, guest cancel calls `alertCancellation`; B16's cost-cap warning calls `alertCostCap` instead of `outbox.toStaff`, and a "could not answer" handoff passes any trigger other than `guest_request`/`large_group`/`complaint`/`paid_after_expiry` (it becomes `bot_unanswered`); B18 calls `alertBrainWaiting` when a draft or gap is queued. None of these call `outbox.toStaff` for an alert.
+- **For `track-c` (B10, B16) and B18, which must match:** B10's no-show job calls `alertReleasePrompt` then `alertNoShowReleased` (B10c), running late calls `alertRunningLate`, guest cancel calls `alertCancellation`; B16's cost-cap warning calls `alertCostCap` instead of `outbox.toStaff`, and a "could not answer" handoff passes any trigger other than `guest_request`/`large_group`/`complaint`/`paid_after_expiry` (it becomes `bot_unanswered`); B18 calls `alertBrainWaiting` when a draft or gap is queued. None of these call `outbox.toStaff` for an alert.
 - **`alerts_line` (A17b):** `raiseAlert` (A15) reads it per call. Off = the alert is still written to the feed, but nothing goes to the staff LINE group (`sent_line_at` stays null). Test: `alerts_line switched off keeps the alert in the feed and sends nothing to the staff group`.
 - **B12 settings key:** `ClubSettings.crowdPromptHours?: number[]` is now in the type (JSON, no migration); no settings route or UI sets it yet.
 - **Unverified:** no external service; staff-group pushes are tested against the dev gateway only. The default urgent-word list (EN/TH) needs a native-speaker and owner read. No web editor for `urgentWords`.
@@ -641,9 +647,9 @@ One session built both tracks. The full checklist, with each automated item tick
 - **Paused clubs (§12.3):** `activePause` returns `status:paused` for `clubs.status = 'paused'` (bot silent, inbound stored, no staff alert); `requireClubRole` answers 403 `club_paused` to any non-GET staff route of a paused club.
 - **New optional `ClubSettings` keys, defaults in code (no migration):** `sameNightCutoffHour` (1), `maxBookingsPerGuestPerNight` (1, counts `payment_review`/`confirmed`/`arrived` on that night; `holdTable` throws `BookingError('guest_night_limit')`), `maxPushesPerBooking` (2). The first two are settable through `PATCH /clubs/:slug/settings`.
 - **Push budget (§11.1.4):** `Outbox.toGuest(..., opts.booking?: { id, optional? })`; `message.sent` now carries `booking_id` for those sends. Push requests per booking are counted from delivered push `message.sent` rows (one per send time); an `optional` push (reminder, hold expired) past the cap is stored `skipped`. Confirmation, slip rejected and club cancellation are never skipped.
-- **No-show with `autoNoShow` off:** the booking is kept and one urgent `no_arrival` alert is raised per booking. The [Release] [Keep 30 min] prompt stays replaced by automatic release (plan B10 assumption).
+- **No-show (B10c):** one urgent `no_arrival` prompt [Release] [Keep 30 min] per round (group card with postbacks `a=ns_release&b=<id>`, `a=ns_keep&b=<id>&al=<alert>`; dashboard `POST /api/staff/clubs/:slug/bookings/:id/release` and `/keep`; `GET .../bookings/:id` returns `releasePrompt: { alertId, createdAt } | null` and Booking detail shows the two buttons while it is open). Keep = audit `release_kept` `{ alertId, minutes: 30, until }`, re-prompt at `until`. No answer in `releasePromptMinutes` (default 15) with `autoNoShow` on releases; with it off the booking waits.
 - **Also added:** language switch quick reply (`a=lang&l=th|en`, sets `guests.lang`); `a=book_other` ([Book another night] on "already booked"); unfollow raises info alert `guest_unfollowed` when the guest has an upcoming booking, and `unfollowedAt` is on booking detail, `/night` rows and `/handoffs`; `/night` returns `totals { depositsCollected, minSpendBooked }`; rich menu fifth cell Privacy (`links.privacy()`); staff-group messages other than `link <code>` are stripped from the stored `raw_webhooks` body once processed; brain routes `GET .../brain/export`, `POST .../brain/import {files}`, `POST .../brain/import-text {text}`; public `GET /api/liff/floor?club&d` and the `/liff/floor` page behind [See floor plan]; demo reset retires takeover-sourced brain notes (chats are back with the bot because demo conversations and episodes are deleted; mode changes stay in `chat/episodes.ts`), with Reset and Fast-forward in the founder console.
-- **Not done:** rich menu cells from a per-club setting; demo reset deleting the step-7 club and clearing the spare account's webhook (no club delete exists); photo import (no OCR provider wired).
+- **Done afterwards:** rich menu cells from a per-club setting (A10b in `track-a.md`); demo reset deleting the step-7 club and parking the spare account's webhook (`demo/delete-club.ts`, B7 gap fix); photo import (`brain/ocr.ts`, B15).
 
 ## 2026-11-27 · Final merge and whole-branch review
 
@@ -659,9 +665,9 @@ One session built both tracks; this entry is the same in `track-a.md` and `track
 **Checks at commit time:** `npm test` 70 files, 706 tests passed, 0 `it.todo` left; `npm run typecheck` clean (server and web); `npm run build -w @club/web` passes (warning only: one 603 kB chunk, over Vite's 500 kB hint).
 
 **Review findings:** fixed and decided items are listed under "Cross-review findings (2026-11-27)" in both sync files. Rejected or deferred, with reason:
-- Per-purpose `staff_groups` (§6.1, §9): not built; one staff group per club; needs a migration and a linking flow per purpose. No gate depends on it.
-- Rich menu cells from a per-club setting, demo reset deleting the step-7 club, and photo import (no OCR provider wired): not built.
-- The [Release] [Keep 30 min] no-show prompt stays replaced by automatic release (plan B10 assumption); with `autoNoShow` off one urgent `no_arrival` alert is raised.
+- Per-purpose `staff_groups` (§6.1, §9): built afterwards as plan B5b (migration `0011_staff_groups`, `platform/staff-groups.ts`, `test/staff-groups.test.ts`). `Outbox.toStaff(gateway, club, msgs, author?, { purpose? })`; `StaffAlertSender(club, text, purpose?, actions?)`; `raiseAlert` routes by `purposeOfAlertKind(kind)` unless `input.purpose` is set; no purpose group = the main group (`clubs.staff_group_id`). `POST .../staff-link-code {purpose?}`; `DELETE /api/staff/clubs/:slug/staff-groups/:purpose`; settings adds `staffGroups: [{ purpose, linkedAt }]`.
+- Rich menu cells from a per-club setting, demo reset deleting the step-7 club, and photo import: built afterwards (A10b `line/setup.ts` + `http/staff-settings.ts`; B7 gap fix `demo/delete-club.ts`; B15 `brain/ocr.ts`).
+- The [Release] [Keep 30 min] no-show prompt is built (plan B10c): prompt first, automatic release only when unanswered with `autoNoShow` on.
 - Web bundle code splitting: not done; build warning only.
 
 **Gate checklists:** ticked in the plan ("Gate status 2026-11-27" under each phase gate) and in `track-a.md` "Phase gate record". Human-only items are left unticked.
@@ -674,3 +680,123 @@ One session built both tracks; this entry is the same in `track-a.md` and `track
 - Real-club measurements: G1–G10, ≥ 85% pre-fill, onboarding at ≤ 15 minutes, 3 paying clubs, one club live on Instagram.
 - Spec open questions (§16) still open, including §16.1 q3 above; the owner decides them.
 - Owner: merge `track-a` to `main` and tag `phase-1b-done`.
+
+## 2026-11-27 — B5b (staff LINE groups per purpose, spec gap G1), built by Session A on track-a
+
+Landed on `track-a`. Spec §6.1, §9 `staff_groups`. Plan: "B5b" under Task B5. Migration: yes, `0011_staff_groups` (table `staff_groups`, column `clubs.staff_link_code_purpose`). Tests: `test/staff-groups.test.ts` (7). Isolation fixture `staff-groups/:purpose` = `payments` in `test/helpers/track-b.ts`.
+
+```ts
+// db/schema/core.ts
+export const STAFF_GROUP_PURPOSES = ['bookings', 'payments', 'handoff'] as const; // spec purpose `all` = clubs.staff_group_id
+export type StaffGroupPurpose = (typeof STAFF_GROUP_PURPOSES)[number];
+staffGroups: staff_groups(id, club_id, line_group_id, purpose, linked_at), unique (club_id, purpose)
+clubs.staffLinkCodePurpose: StaffGroupPurpose | null
+// platform/staff-groups.ts
+export const isStaffGroupPurpose: (v: unknown) => v is StaffGroupPurpose;
+export function purposeOfAlertKind(kind: string): StaffGroupPurpose | undefined;
+export async function staffGroupFor(db: Db, club: Club, purpose?: StaffGroupPurpose): Promise<string | null>;
+export async function listStaffGroups(db: Db, clubId: string): Promise<StaffGroup[]>;
+export async function unlinkStaffGroup(db: Db, clubId: string, purpose: StaffGroupPurpose): Promise<StaffGroup | null>;
+// bot/staff-link.ts
+export async function issueStaffLinkCode(db: Db, clubId: string, userId: string, now: Date, purpose?: StaffGroupPurpose): Promise<{ code: string; expiresAt: Date }>;
+// line/outbox.ts
+Outbox.toStaff(gateway: LineGateway, club: Club, msgs: Message[], author: Actor = BOT, opts: { purpose?: StaffGroupPurpose } = {})
+// platform/alerts.ts
+AlertInput.purpose?: StaffGroupPurpose; // default purposeOfAlertKind(kind)
+export type StaffAlertSender = (club: Club, text: string, purpose?: StaffGroupPurpose, actions?: StaffAlertAction[]) => Promise<void>;
+```
+
+Routes: `POST /api/staff/clubs/:slug/staff-link-code {purpose?}` (400 `bad_purpose`); `DELETE /api/staff/clubs/:slug/staff-groups/:purpose` (owner, manager; 404 when none; audit `staff_group.unlinked`); `GET .../settings` adds `staffGroups: [{ purpose, linkedAt }]`. Audit on link: `staff_group.linked {purpose, groupId}` or `staff_group.replaced {purpose, from, to}`. Routing: `payment_*` to `payments`; `guest_wants_human`, `bot_unanswered`, `complaint`, `handoff_realert`, `bot_paused` to `handoff`; `booking_confirmed`, `running_late`, `cancellation`, `no_arrival`, `no_show_released`, `guest_unfollowed`, `daily_summary` and the B22 pre-order note to `bookings`; every other kind to the main group. No purpose group = main group.
+
+**Assumptions in place of a human decision:** the spec's purpose `all` is the existing main group, not a row; a purpose group links in one step (no second confirm code), because only an owner or manager issues a purpose code and it is single-use for 10 minutes; the kind-to-purpose map above is ours (the spec names the purposes, not the map).
+
+**Unverified against a real service:** group links, pushes and the "replaced" notice run against the LINE dev gateway and client fakes only; no real LINE group has been linked per purpose. Web: Setup page "Staff LINE group" purpose select and [Unlink] list in `pages/staff/Settings.tsx` typecheck and build; the browser walk is still to be done by a human.
+
+## 2026-11-27 — B7 gap fix (demo reset deletes the step-7 club, spec gap G3), built by Session A on track-a
+
+Landed on `track-a`. Spec §12.4. Plan: "Gap fix" under Task B7. Migration: none (`settings.demoOf` is JSON). Tests: `test/demo-delete-club.test.ts` (4).
+
+```ts
+// db/schema/core.ts
+ClubSettings.demoOf?: string; // demo club id, set only at creation
+// demo/delete-club.ts
+export class ClubDeleteError extends Error { readonly code: 'not_found' | 'not_demo_spare' }
+export const isDemoSpare: (club: Club) => boolean; // settings.demoOf set and status 'demo'
+export async function deleteClub(db: Db, clubId: string, actor: Actor, now: Date): Promise<{ club: Club; rows: Record<string, number> }>;
+export const PARKED_WEBHOOK_PATH = '/line/webhook/_parked';
+export const parkedWebhookUrl: (publicUrl: string) => string;
+export type WebhookClear = 'cleared' | 'no_credentials' | 'failed' | 'skipped';
+export async function clearClubWebhook(ctx: AppContext, club: Club): Promise<WebhookClear>; // never throws
+export async function demoSpareClubs(db: Db, demoClubId: string): Promise<Club[]>;
+// demo/reset.ts
+export async function resetDemoClub(db: Db, clubId: string, now: Date, opts: { actor?: Actor; clearWebhook?: (club: Club) => Promise<WebhookClear> } = {}): Promise<{ nightDate: string; deletedClubs: { id: string; slug: string; webhook: WebhookClear }[] }>;
+```
+
+Routes: `POST /api/admin/clubs {…, demoOf?: <demo slug>}` (400 `demo_club_not_found`; new club status `demo`, `isTest`); `POST /api/admin/demo/:slug/reset` returns `{ nightDate, deletedClubs: [{ slug, webhook }] }`; `POST /api/admin/demo/:slug/delete` returns `{ slug, webhook, rows }` (409 `not_demo_spare` for any other club). `deleteClub` deletes, in one transaction and children first, every table with `club_id` plus every table reached by a foreign key from them (read from the catalog), then the club's `platform_flags` and the `clubs` row; `audit_log` rows are kept and one `club.deleted` audit row is added; no event is emitted. Web: "Demo step 7" select in `pages/admin/Clubs.tsx`; the reset result in `pages/admin/ClubDetail.tsx` lists the deleted step-7 club and its webhook result.
+
+**Assumptions in place of a human decision:** LINE has no "remove webhook" call and refuses an empty URL, so "clear" points the spare account's webhook at `${PUBLIC_URL}/line/webhook/_parked` (404); only a club created with `demoOf` and still status `demo` can be deleted; audit rows survive the delete; Chatwoot accounts of a deleted club are not deprovisioned.
+
+**Unverified against a real service:** `setWebhookEndpoint` runs against the LINE setup client fake only; the parked URL has not been set on a real spare LINE account. Web: the browser walk (create a step-7 club, reset, see it gone) is still to be done by a human.
+
+## 2026-11-27 — B15 gap fix (photo import OCR, spec gap G4), built by Session A on track-a
+
+Landed on `track-a`. Spec §8.2. Plan: "Spec gap closed (photo import OCR)" under Task B15. Migration: none. Tests: `test/brain-photo-import.test.ts` (7); `brain-store.test.ts` updated.
+
+```ts
+// brain/ocr.ts
+export const OCR_MODEL = 'claude-haiku-5-5';
+export const MAX_IMPORT_IMAGE_BYTES = 5 * 1024 * 1024;
+export const IMPORT_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const;
+export type OcrErrorCode = 'unsupported_type' | 'too_large' | 'ocr_failed' | 'no_text';
+export class OcrError extends Error { constructor(readonly code: OcrErrorCode, message: string) }
+export function sniffImageType(bytes: Uint8Array): ImportImageType | null;
+export function checkImportImage(image: ImportImage): ImportImage & { mimeType: ImportImageType };
+export const NO_TEXT = 'NO_TEXT';
+export interface OcrMessagesClient { messages: { create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Pick<Anthropic.Message, 'content' | 'stop_reason'>> } }
+export function anthropicOcr(client: OcrMessagesClient): OcrFn;
+export function configuredOcr(config: Pick<Config, 'ANTHROPIC_API_KEY'>): OcrFn | null;
+// brain/import.ts
+export async function importPhoto(db: Db, clubId: string, image: ImportImage, ocr: OcrFn, actor: Actor, now: Date): Promise<TextImportResult>; // checks the image first, throws OcrError
+// http/context.ts, app.ts
+AppContext.ocr: OcrFn | null; createApp(config, db, { ocr? }) // default configuredOcr(config)
+```
+
+Route: `POST /api/staff/clubs/:slug/brain/import-photo` (owner, manager; multipart `file`): 200 `{ created, rejected }`, 400 no file, 413 too large, 415 not an image, 422 no text, 502 OCR failed, 503 `ocr_not_configured`. Notes are drafts only (`source: 'import'`). Web: "Import photo" button in `pages/staff/brain/Brain.tsx`.
+
+**Assumptions in place of a human decision:** the OCR provider is Anthropic vision `claude-haiku-5-5` on the existing `ANTHROPIC_API_KEY` (no separate OCR vendor); without the key the route answers 503; the prompt keeps the photo's language and leaves out prices, table codes and availability (§8.4 lint would reject them anyway).
+
+**Unverified against a real service:** the real model is never called in tests (fake client and fake `OcrFn`); the prompt has not been checked on real Thai/English menu photos. Web: the browser walk (upload a photo, see drafts) is still to be done by a human.
+
+## 2026-11-27 — B10c (host release prompt [Release] [Keep 30 min], spec gap G5), built by Session A on track-a
+
+Landed on `track-a`. Spec §5.2 step 9, §6.1, §6.4. Plan: "Task B10c". Migration: none (state in `alerts` and `audit_log`; `ClubSettings.releasePromptMinutes?: number` is JSON). Tests: `test/release-prompt.test.ts` (8); `reminders.test.ts` follows the new order.
+
+```ts
+// bookings/release-prompt.ts
+export const KEEP_MINUTES = 30;
+export const DEFAULT_RELEASE_PROMPT_MINUTES = 15;
+export const RELEASE_PROMPT_KIND = 'no_arrival';
+export async function latestKeep(db: Db, clubId: string, bookingId: string): Promise<{ at: Date; until: Date } | undefined>;
+export async function effectiveReleaseAt(db: Db, club: Club, booking: Booking): Promise<Date>;
+export async function latestPrompt(db: Db, clubId: string, bookingId: string, since?: Date): Promise<Alert | undefined>;
+export async function openReleasePrompt(db: Db, clubId: string, bookingId: string): Promise<Alert | undefined>;
+export async function releaseFromPrompt(db: Db, clubId: string, bookingId: string, actor: Actor, now: Date): Promise<Booking>;
+export async function autoReleaseFromPrompt(db: Db, clubId: string, bookingId: string, promptId: string, actor: Actor, now: Date): Promise<Booking | 'answered'>;
+export async function keepTable(db: Db, club: Club, bookingId: string, actor: Actor, now: Date, alertId?: string): Promise<{ until: Date } | 'answered'>;
+export async function isClubStaffGroup(db: Db, club: Club, groupId: string): Promise<boolean>;
+// bot/alerts.ts
+export async function alertReleasePrompt(db: Db, v: BookingView, now: Date): Promise<string>; // returns the alert id; replaces alertNoArrival
+export function alertNoShowReleased(db: Db, v: BookingView, now: Date): Promise<void>;
+// bot/messages.ts
+export function staffActionCard(textValue: string, actions: { label: string; data: string }[]): Message;
+// platform/alerts.ts
+export interface StaffAlertAction { label: string; data: string }
+AlertInput.actions?: StaffAlertAction[];
+export async function raiseAlert(db: Db, input: AlertInput, now: Date, opts: { id?: string } = {}): Promise<void>;
+```
+
+Group postbacks `a=ns_release&b=<booking>` and `a=ns_keep&b=<booking>&al=<alert>`, accepted only from a group linked to the club (main or B5b purpose group), actor `{ type: 'staff', id: 'line_group:<groupId>' }`. Dashboard: `POST /api/staff/clubs/:slug/bookings/:id/release` and `/keep`; `GET .../bookings/:id` returns `releasePrompt: { alertId, createdAt } | null`; Booking detail shows both buttons while it is open. Keep writes audit `release_kept {alertId, minutes: 30, until}` and re-prompts at `until`; a second tap gives "already answered". Demo `releaseNow` still releases at once.
+
+**Assumptions in place of a human decision:** the spec gives no answer window, so `releasePromptMinutes` defaults to 15; with `autoNoShow` on (default) an unanswered prompt releases the table, with it off the booking waits for a host; Keep extends from the current release time (or now, when that is past).
+
+**Unverified against a real service:** the Flex card with postback buttons and the group taps run against the LINE dev gateway and fakes only; the card has not been seen or tapped in a real LINE group. Web: the browser walk of the Booking detail [Release] [Keep 30 min] buttons is still to be done by a human.

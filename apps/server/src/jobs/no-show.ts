@@ -1,7 +1,15 @@
 import { and, eq, gte, lte } from 'drizzle-orm';
-import { BookingError, getBookingView, releaseNoShow, type Actor } from '../bookings/service.js';
-import { alertNoArrival } from '../bot/alerts.js';
-import { alerts, bookings, clubs, type Booking, type Club } from '../db/schema.js';
+import {
+  autoReleaseFromPrompt,
+  DEFAULT_RELEASE_PROMPT_MINUTES,
+  effectiveReleaseAt,
+  latestKeep,
+  latestPrompt,
+  releaseFromPrompt,
+} from '../bookings/release-prompt.js';
+import { BookingError, getBookingView, type Actor } from '../bookings/service.js';
+import { alertNoShowReleased, alertReleasePrompt } from '../bot/alerts.js';
+import { bookings, clubs, type Booking, type Club } from '../db/schema.js';
 import type { AppContext } from '../http/context.js';
 import { addDays, bangkokParts, toDateString } from '../lib/time.js';
 
@@ -39,11 +47,15 @@ function bangkokDate(at: Date): string {
 }
 
 /**
- * The `no-show` job (B10): every confirmed booking past its release time, in a club with
- * `autoNoShow` (default on), becomes `no_show` and its table is released (`releaseNoShow`, one
- * transaction), then an urgent `no_arrival` alert is raised. With `autoNoShow` off the booking is
- * kept and the urgent alert is raised once. With `only`, that one booking is released now
- * whatever its time (demo fast-forward). Returns the number released.
+ * The `no-show` job (B10, B10c). For every confirmed booking past its release time (`releaseAt`,
+ * moved by the newest [Keep 30 min]):
+ * - no prompt since the newest Keep: the host gets the urgent `no_arrival` prompt [Release] [Keep 30 min];
+ * - prompt unanswered for `releasePromptMinutes` (default 15) in a club with `autoNoShow` (default
+ *   on): the booking becomes `no_show` and its table is released (`releaseNoShow`, one transaction),
+ *   then the info `no_show_released` alert tells the host;
+ * - with `autoNoShow` off the booking waits for the host.
+ * With `only`, that one booking is released now whatever its time (demo fast-forward). Returns the
+ * number released.
  */
 export async function releaseNoShows(ctx: AppContext, now: Date, only?: { clubId: string; bookingId: string }): Promise<number> {
   const db = ctx.deps.db;
@@ -54,31 +66,36 @@ export async function releaseNoShows(ctx: AppContext, now: Date, only?: { clubId
   const rows = await db.select({ booking: bookings, club: clubs }).from(bookings).innerJoin(clubs, eq(bookings.clubId, clubs.id)).where(where);
   let released = 0;
   for (const { booking, club } of rows) {
-    if (!only && releaseAt(club, booking) > now) continue;
-    if (!only && club.settings.autoNoShow === false) {
-      // The club decides itself (plan B10): the table is kept, and the host is told once (spec §5.2
-      // step 9, §6.4 urgent "table not arrived at release time") to mark the no-show from the dashboard.
-      const [alerted] = await db
-        .select({ id: alerts.id })
-        .from(alerts)
-        .where(and(eq(alerts.clubId, club.id), eq(alerts.kind, 'no_arrival'), eq(alerts.bookingId, booking.id)))
-        .limit(1);
-      if (alerted) continue;
-      const view = await getBookingView(db, { clubId: club.id, id: booking.id });
-      if (view) await alertNoArrival(db, view, now);
-      continue;
+    let promptId: string | undefined;
+    if (!only) {
+      if ((await effectiveReleaseAt(db, club, booking)) > now) continue;
+      const keep = await latestKeep(db, club.id, booking.id);
+      const prompt = await latestPrompt(db, club.id, booking.id, keep?.at);
+      if (!prompt) {
+        const view = await getBookingView(db, { clubId: club.id, id: booking.id });
+        if (view) await alertReleasePrompt(db, view, now);
+        continue;
+      }
+      if (club.settings.autoNoShow === false) continue; // the host decides (group buttons or dashboard)
+      const window = club.settings.releasePromptMinutes ?? DEFAULT_RELEASE_PROMPT_MINUTES;
+      if (now.getTime() < prompt.createdAt.getTime() + window * 60_000) continue;
+      promptId = prompt.id;
     }
     let after: Booking;
     try {
-      after = await releaseNoShow(db, club.id, booking.id, SYSTEM, now);
+      // The prompt is claimed inside the release transaction, so a [Keep] tapped meanwhile wins.
+      const result = promptId
+        ? await autoReleaseFromPrompt(db, club.id, booking.id, promptId, SYSTEM, now)
+        : await releaseFromPrompt(db, club.id, booking.id, SYSTEM, now);
+      if (result === 'answered') continue;
+      after = result;
     } catch (err) {
       if (err instanceof BookingError) continue; // checked in or changed meanwhile
       throw err;
     }
     released++;
-    // B19b: urgent `no_arrival` through raiseAlert (inbox feed and staff group, §6.4).
     const view = await getBookingView(db, { clubId: club.id, id: after.id });
-    if (view) await alertNoArrival(db, view, now);
+    if (view) await alertNoShowReleased(db, view, now);
   }
   return released;
 }

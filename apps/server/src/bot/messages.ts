@@ -501,6 +501,34 @@ export function cancelAsk(club: Club, lang: Lang, view: BookingView): Message {
   ]);
 }
 
+/**
+ * B10c: a staff-group alert with postback buttons (the §5.2 step 9 [Release] [Keep 30 min] prompt).
+ * Flex rather than quick replies: quick replies vanish once anyone in the group types.
+ */
+export function staffActionCard(textValue: string, actions: { label: string; data: string }[]): Message {
+  return {
+    type: 'flex',
+    altText: textValue.slice(0, 400),
+    contents: {
+      type: 'bubble',
+      body: { type: 'box', layout: 'vertical', contents: [{ type: 'text', text: textValue, wrap: true, size: 'sm' }] },
+      footer: {
+        type: 'box',
+        layout: 'horizontal',
+        spacing: 'sm',
+        contents: actions.map(
+          (a, i): FlexComponent => ({
+            type: 'button',
+            style: i === 0 ? 'primary' : 'secondary',
+            height: 'sm',
+            action: { type: 'postback', label: a.label.slice(0, 40), data: a.data, displayText: a.label },
+          }),
+        ),
+      },
+    },
+  };
+}
+
 export function staffHandoff(guestName: string, summary: string): Message {
   return text(`🙋 Guest wants a host / ลูกค้าต้องการคุยกับพนักงาน\n${guestName}\n${summary}\nReply in LINE OA Manager, then mark it resolved in the dashboard.`);
 }

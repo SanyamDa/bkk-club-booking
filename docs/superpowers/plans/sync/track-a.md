@@ -1094,7 +1094,7 @@ One session built both tracks, so this section and the same one in `track-b.md` 
 - §6.2 Booking detail without history: fixed. The detail route returns `history` (status history with actor and reason), `audit`, `chatSummary` (handoff episodes) and `rulesVersion`.
 - §6.2 Settings / §7.2: fixed. `holdMinutes` capped at 30; new `PATCH /clubs/:slug/policy` (its own route so neither form's `club.settings_changed` codes pass 64 characters) for `arrivalGraceMinutes`, `reminderTime`, `cancellationPolicy {en,th}`, `requiredFields`, `tone`, `hostHours`, `afterVisitMessage`; `cancelAsk` uses `cancellationPolicy` (unset: the first rule). Web: "Guest policy and bot" form in `Settings.tsx`.
 - §12.3 three sensitive changes: fixed. `notifyOwners` in `http/admin/controls.ts` sends the staff-group text and raises a `needs_input` `sensitive_change` feed alert "For the owner: ..." that stays until resolved, so it is seen before a group is linked. Decision: no email sender exists and staff accounts hold no LINE user id on the club's provider, so the dashboard feed is the owner's direct channel.
-- §6.1 / §9 `staff_groups`: decision recorded, not built. Each club links one staff LINE group (`clubs.staff_group_id`) and every staff alert goes there; per-purpose groups (bookings, payments, handoff) are not built. The spec's `staff_groups(purpose)` table is a later change: it needs a migration, a linking flow per purpose and routing in `outbox.toStaff`. Nothing in the gates depends on it.
+- §6.1 / §9 `staff_groups`: built afterwards as plan B5b (see the final review entry below). The main group stays `clubs.staff_group_id`; per-purpose groups (bookings, payments, handoff) live in `staff_groups` and fall back to it.
 - §9 `bookings.source`: fixed (see manual booking above).
 - B4b `message.sent` inside the send try: fixed. In `line/outbox.ts` only the LINE call is in a try; `mark`, `failed` and `sentEvents` run after it in `afterSend`, which only logs. Test: `outbox-bookkeeping.test.ts`.
 
@@ -1112,9 +1112,9 @@ One session built both tracks; this entry is the same in `track-a.md` and `track
 **Checks at commit time:** `npm test` 70 files, 706 tests passed, 0 `it.todo` left; `npm run typecheck` clean (server and web); `npm run build -w @club/web` passes (warning only: one 603 kB chunk, over Vite's 500 kB hint).
 
 **Review findings:** fixed and decided items are listed under "Cross-review findings (2026-11-27)" in both sync files. Rejected or deferred, with reason:
-- Per-purpose `staff_groups` (§6.1, §9): not built; one staff group per club; needs a migration and a linking flow per purpose. No gate depends on it.
-- Rich menu cells from a per-club setting, demo reset deleting the step-7 club, and photo import (no OCR provider wired): not built.
-- The [Release] [Keep 30 min] no-show prompt stays replaced by automatic release (plan B10 assumption); with `autoNoShow` off one urgent `no_arrival` alert is raised.
+- Per-purpose `staff_groups` (§6.1, §9): built afterwards as plan B5b (migration `0011_staff_groups`, `platform/staff-groups.ts`, `test/staff-groups.test.ts`). `Outbox.toStaff(gateway, club, msgs, author?, { purpose? })`; `StaffAlertSender(club, text, purpose?, actions?)`; `raiseAlert` routes by `purposeOfAlertKind(kind)` unless `input.purpose` is set; no purpose group = the main group (`clubs.staff_group_id`). `POST .../staff-link-code {purpose?}`; `DELETE /api/staff/clubs/:slug/staff-groups/:purpose`; settings adds `staffGroups: [{ purpose, linkedAt }]`.
+- Rich menu cells from a per-club setting, demo reset deleting the step-7 club, and photo import: built afterwards (A10b `line/setup.ts` + `http/staff-settings.ts`; B7 gap fix `demo/delete-club.ts`; B15 `brain/ocr.ts` in `track-b.md`).
+- The [Release] [Keep 30 min] no-show prompt is built (plan B10c): prompt first, automatic release only when unanswered with `autoNoShow` on. `StaffAlertSender` takes a 4th argument `actions?: StaffAlertAction[]` (postback buttons; sent as a Flex card); `raiseAlert` takes `opts.id`.
 - Web bundle code splitting: not done; build warning only.
 
 **Gate checklists:** ticked in the plan ("Gate status 2026-11-27" under each phase gate) and in `track-a.md` "Phase gate record". Human-only items are left unticked.
@@ -1127,3 +1127,24 @@ One session built both tracks; this entry is the same in `track-a.md` and `track
 - Real-club measurements: G1–G10, ≥ 85% pre-fill, onboarding at ≤ 15 minutes, 3 paying clubs, one club live on Instagram.
 - Spec open questions (§16) still open, including §16.1 q3 above; the owner decides them.
 - Owner: merge `track-a` to `main` and tag `phase-1b-done`.
+
+## 2026-11-27 — A10b (rich menu cells per club, spec gap G2), built by Session A on track-a
+
+Landed on `track-a`. Closes the track-b.md "Not done: rich menu cells from a per-club setting". Tests: `test/rich-menu-cells.test.ts` (9). Migration: none.
+
+```ts
+// db/schema/core.ts
+ClubSettings.richMenuCells?: RichMenuCell[]
+export const RICH_MENU_CELLS = ['book', 'my', 'location', 'drinks', 'host', 'privacy'] as const;
+export type RichMenuCell = (typeof RICH_MENU_CELLS)[number];
+export const DEFAULT_RICH_MENU_CELLS: RichMenuCell[] = ['book', 'my', 'location', 'host', 'privacy'];
+// line/setup.ts
+export const RICH_MENU_CELL_LABELS: Record<RichMenuCell, { en: string; th: string }>;
+export function richMenuCellsOf(club: Club): RichMenuCell[]; // unset = default; drinks dropped while drinksMenuUrl unset
+```
+
+Routes: `GET /api/staff/clubs/:slug/rich-menu` → `{ cells, allowed: { id, en, th, available }[] }`; `PUT .../rich-menu {cells}` (owner, manager) → `{ cells, refreshed, report }`, 400 `invalid` for unknown/repeated cells, fewer than 2 or more than 6, missing `book` or `privacy`, or `drinks` without a drinks URL. Audit `club.rich_menu_changed`, event `club.settings_changed` fields `rich_menu`. Rebuild goes through `refreshRichMenuOnly({ club, clients, links, refresh: true })` in `line/setup.ts`, the rich menu step of `runLineSetup` on its own (it touches no webhook, LIFF, message check or PUBLIC_URL check; old menus of ours deleted, as the staff "Run LINE setup" does). New entry tag `rm_drinks`. Layout: Book a table 1000 px, the others share 1500 px in the chosen order; `chatBarText` stays `Book a table`.
+
+**Assumptions in place of a human decision:** the allowed cells are only actions the bot already handles (no free-form link cell); `book` and `privacy` are always present (§5.1, §5.5); 2 to 6 cells; `book` is 1000 px wide and the others share 1500 px; `chatBarText` stays `Book a table`. The menu image is the generated one, not a club-designed image.
+
+**Unverified against a real service:** the rich menu create, image upload, default-set and delete calls run against the LINE client test fake only; the new layouts (2 to 6 cells) have not been seen in the LINE app on a phone. Web: the `RichMenuEditor` card in `pages/staff/Settings.tsx` typechecks and builds; the browser walk (pick, reorder, save, see the menu on a phone) is still to be done by a human.

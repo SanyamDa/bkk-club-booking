@@ -41,8 +41,10 @@ import { describeLineError, runLineSetup } from '../line/setup.js';
 import { currentNightDate, formatNight } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
 import { openPosBillAtCheckIn } from '../integrations/pos/live.js';
+import { keepTable, openReleasePrompt, releaseFromPrompt } from '../bookings/release-prompt.js';
 import { issueStaffLinkCode } from '../bot/staff-link.js';
 import { auditClubChange } from '../platform/club-settings.js';
+import { isStaffGroupPurpose, listStaffGroups, unlinkStaffGroup } from '../platform/staff-groups.js';
 import { clientIp, requireClubRole, type AuthEnv, type Role } from './auth.js';
 import type { AppContext } from './context.js';
 import { staffAlertRoutes } from './staff-alerts.js';
@@ -236,6 +238,8 @@ export function staffRoutes(app: AppContext) {
           .orderBy(desc(handoffEpisodes.startedAt))
           .limit(5)
       : [];
+    // B10c: an open "not arrived, release?" prompt, so the dashboard can answer it like the group card.
+    const prompt = view.booking.status === 'confirmed' ? await openReleasePrompt(db, club.id, view.booking.id) : undefined;
     await staffEvent(c, {
       type: 'staff.booking_viewed',
       bookingId: view.booking.id,
@@ -254,6 +258,7 @@ export function staffRoutes(app: AppContext) {
         rulesVersion: view.booking.rulesVersion,
         rulesAcceptedAt: view.booking.rulesAcceptedAt?.toISOString() ?? null,
       },
+      releasePrompt: prompt ? { alertId: prompt.id, createdAt: prompt.createdAt.toISOString() } : null,
       history: history.map((h) => ({ from: h.fromStatus, to: h.toStatus, at: h.at.toISOString(), actorType: h.actorType, actorId: h.actorId, reasonCode: h.reasonCode })),
       audit: audit.map((a) => ({ action: a.action, at: a.at.toISOString(), actorType: a.actorType, actorId: a.actorId, reason: a.reason, before: a.before, after: a.after })),
       chatSummary: {
@@ -327,6 +332,12 @@ export function staffRoutes(app: AppContext) {
     app.track(openPosBillAtCheckIn(db, app.config.CREDENTIALS_KEY, club, id, { now: app.deps.now(), fetch: app.posFetch }));
   });
   act('no-show', staff, (club, id, actor) => markNoShow(db, club.id, id, actor, app.deps.now()));
+  // B10c (spec §5.2 step 9, §6.1 "actioned in the dashboard"): the no-arrival prompt's two answers.
+  act('release', staff, (club, id, actor) => releaseFromPrompt(db, club.id, id, actor, app.deps.now()));
+  act('keep', staff, async (club, id, actor) => {
+    const kept = await keepTable(db, club, id, actor, app.deps.now());
+    if (kept === 'answered') throw new BookingError('invalid_state', 'No open release prompt for this booking');
+  });
 
   // ----- Manual booking -----
   const manualSchema = z.object({
@@ -437,6 +448,8 @@ export function staffRoutes(app: AppContext) {
       // B5: no link code here; a manager issues a fresh one with POST /staff-link-code.
       staffGroupLinked: Boolean(club.staffGroupId),
       staffGroupPending: Boolean(club.pendingStaffGroupId),
+      // §9 staff_groups: the purposes with their own group (the LINE group id is not shown).
+      staffGroups: (await listStaffGroups(db, club.id)).map((g) => ({ purpose: g.purpose, linkedAt: g.linkedAt.toISOString() })),
       lineConnected: (await app.credentials.line(club)) !== null,
       webhookUrl: `${app.config.PUBLIC_URL.replace(/\/$/, '')}/line/webhook/${club.slug}`,
       liffEndpoint: `${app.config.PUBLIC_URL.replace(/\/$/, '')}/liff/details`,
@@ -451,20 +464,47 @@ export function staffRoutes(app: AppContext) {
   /**
    * B5: a fresh single-use staff link code, shown once (8 characters, 10-minute expiry, only its
    * hash stored). A founder uses this same route under a write-mode support grant.
+   * Body `{ purpose?: 'bookings' | 'payments' | 'handoff' }` (§9 staff_groups): the code links a group
+   * for that purpose; omitted, the main staff group. Another value is 400 `bad_purpose`.
    */
   r.post('/clubs/:slug/staff-link-code', managers, async (c) => {
     const club = c.var.club;
     const now = app.deps.now();
-    const issued = await issueStaffLinkCode(db, club.id, c.var.user.id, now);
+    const { purpose } = (await c.req.json().catch(() => ({}))) as { purpose?: unknown };
+    if (purpose !== undefined && purpose !== null && !isStaffGroupPurpose(purpose)) return c.json({ error: 'bad_purpose' }, 400);
+    const forPurpose = isStaffGroupPurpose(purpose) ? purpose : undefined;
+    const issued = await issueStaffLinkCode(db, club.id, c.var.user.id, now, forPurpose);
     // The code itself is never written to the audit row or a log line.
     await auditClubChange(
       db,
       club,
       { ...actorOf(c), ip: clientIp(c) },
-      { action: 'staff_link_code.issued', entity: 'club', entityId: club.id, after: { expiresAt: issued.expiresAt.toISOString() } },
+      {
+        action: 'staff_link_code.issued',
+        entity: 'club',
+        entityId: club.id,
+        after: { expiresAt: issued.expiresAt.toISOString(), ...(forPurpose ? { purpose: forPurpose } : {}) },
+      },
       now,
     );
     return c.json({ code: issued.code, expiresAt: issued.expiresAt.toISOString() });
+  });
+
+  /** §9 staff_groups: unlink the club's group for one purpose; its messages go to the main group again. */
+  r.delete('/clubs/:slug/staff-groups/:purpose', managers, async (c) => {
+    const club = c.var.club;
+    const purpose = c.req.param('purpose');
+    if (!isStaffGroupPurpose(purpose)) return c.json({ error: 'not_found' }, 404);
+    const removed = await unlinkStaffGroup(db, club.id, purpose);
+    if (!removed) return c.json({ error: 'not_found' }, 404);
+    await auditClubChange(
+      db,
+      club,
+      { ...actorOf(c), ip: clientIp(c) },
+      { action: 'staff_group.unlinked', entity: 'staff_group', entityId: removed.id, before: { purpose, lineGroupId: removed.lineGroupId } },
+      app.deps.now(),
+    );
+    return c.json({ ok: true });
   });
 
   // ----- LINE connection -----

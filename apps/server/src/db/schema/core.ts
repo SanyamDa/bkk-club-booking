@@ -68,6 +68,11 @@ export interface ClubSettings {
   runningLateExtendsRelease?: boolean;
   /** B10: the no-show job marks unarrived bookings no-show and releases the table (default true). */
   autoNoShow?: boolean;
+  /**
+   * B10c: minutes the host has to answer the [Release] [Keep 30 min] prompt before the no-show job
+   * releases the table itself (with `autoNoShow` on). Default 15 (the spec gives no window).
+   */
+  releasePromptMinutes?: number;
   /** Spec §7.2: same-night bookings close at this Bangkok hour after midnight (default 1, i.e. 01:00). */
   sameNightCutoffHour?: number;
   /** Spec §7.2: active bookings one guest may have on one night (default 1). */
@@ -91,7 +96,23 @@ export interface ClubSettings {
   hostHours?: { from: string; to: string };
   /** §5.2 step 10: the next-day "Thanks for coming" [Book again] push to arrived guests. Default off. */
   afterVisitMessage?: boolean;
+  /**
+   * Spec §12.4 step 7: set only at creation (POST /api/admin/clubs `demoOf`) to the id of the demo
+   * club whose demo made this club. Only such a club can be deleted (`deleteClub`), and resetting
+   * that demo club deletes it. No settings route writes this field.
+   */
+  demoOf?: string;
+  /**
+   * A10b (§6.2 Bot content, §11.1.1): the rich menu cells, left to right. Unset =
+   * DEFAULT_RICH_MENU_CELLS. Always holds `book` and `privacy`, 2 to 6 cells, no repeats.
+   */
+  richMenuCells?: RichMenuCell[];
 }
+
+/** A10b: the cells a club may put in its rich menu (each one an action the bot already handles). */
+export const RICH_MENU_CELLS = ['book', 'my', 'location', 'drinks', 'host', 'privacy'] as const;
+export type RichMenuCell = (typeof RICH_MENU_CELLS)[number];
+export const DEFAULT_RICH_MENU_CELLS: RichMenuCell[] = ['book', 'my', 'location', 'host', 'privacy'];
 
 /** Optional guest-details fields a club can make required (§5.2 step 4). Name and phone always are. */
 export const GUEST_FIELDS = ['nationality', 'birthDate', 'occasion'] as const;
@@ -119,6 +140,8 @@ export const clubs = pgTable('clubs', {
   staffLinkCodeExpiresAt: timestamp('staff_link_code_expires_at', { withTimezone: true }),
   /** A new staff group waiting for its replacement to be confirmed. */
   pendingStaffGroupId: text('pending_staff_group_id'),
+  /** The purpose the current link code links a group for (null = the main staff group). */
+  staffLinkCodePurpose: text('staff_link_code_purpose').$type<StaffGroupPurpose>(),
   status: text('status').$type<ClubStatus>().notNull().default('onboarding'),
   botPaused: boolean('bot_paused').notNull().default(false),
   /** Set together with botPaused; identifies one pause. Null on resume. */
@@ -126,6 +149,26 @@ export const clubs = pgTable('clubs', {
   createdBy: text('created_by'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Spec §6.1 / §9: extra staff LINE groups per purpose. The club's main group (`clubs.staff_group_id`,
+ * the spec's purpose `all`) gets every staff message whose purpose has no row here.
+ */
+export const STAFF_GROUP_PURPOSES = ['bookings', 'payments', 'handoff'] as const;
+export type StaffGroupPurpose = (typeof STAFF_GROUP_PURPOSES)[number];
+
+export const staffGroups = pgTable(
+  'staff_groups',
+  {
+    id: text('id').primaryKey(),
+    clubId: text('club_id').notNull().references(() => clubs.id),
+    lineGroupId: text('line_group_id').notNull(),
+    purpose: text('purpose').$type<StaffGroupPurpose>().notNull(),
+    linkedAt: timestamp('linked_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('staff_groups_club_purpose').on(t.clubId, t.purpose)],
+);
+export type StaffGroup = typeof staffGroups.$inferSelect;
 
 export const zones = pgTable('zones', {
   id: text('id').primaryKey(),

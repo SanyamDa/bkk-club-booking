@@ -78,6 +78,13 @@
       "when": 1795821356505,
       "tag": "0010_a5_founder_line_user",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795825374564,
+      "tag": "0011_staff_groups",
+      "breakpoints": true
     }
   ]
 }

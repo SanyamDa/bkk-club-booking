@@ -1,9 +1,10 @@
 import { and, eq, inArray, ne, or, sql, type SQL } from 'drizzle-orm';
-import { expireHold } from '../bookings/service.js';
+import { expireHold, type Actor } from '../bookings/service.js';
 import { compileSnapshot } from '../brain/compile.js';
 import { deactivateNoteCases } from '../brain/testset.js';
 import type { Db } from '../db/client.js';
 import {
+  alerts,
   bookingPreorders,
   bookings,
   brainNotes,
@@ -32,6 +33,7 @@ import type { AppContext } from '../http/context.js';
 import { releaseNow } from '../jobs/no-show.js';
 import { remindNow } from '../jobs/reminders.js';
 import { currentNightDate } from '../lib/time.js';
+import { deleteClub, demoSpareClubs, type WebhookClear } from './delete-club.js';
 import { SEED_HIST, seedTonight } from './seed-history.js';
 
 export class DemoError extends Error {
@@ -59,9 +61,24 @@ const notHist = (col: unknown): SQL => sql`left(${col}, ${SEED_HIST.length}) <> 
  * for `currentNightDate(now, nightEndHour)`. Content (zones, tables, prices, policies, brain notes,
  * profile) and the audit log are kept; a note learned from a takeover during a demo is retired (not
  * deleted) so its gap shows again. Only for clubs with `status = 'demo'`.
+ *
+ * Spec §12.4: before that, every club made in this demo's step 7 (`settings.demoOf = clubId`) is
+ * deleted with `deleteClub`, each after `opts.clearWebhook` (the console passes `clearClubWebhook`)
+ * has cleared its spare LINE account's webhook; without `clearWebhook` the webhook is `skipped`.
  */
-export async function resetDemoClub(db: Db, clubId: string, now: Date): Promise<{ nightDate: string }> {
+export async function resetDemoClub(
+  db: Db,
+  clubId: string,
+  now: Date,
+  opts: { actor?: Actor; clearWebhook?: (club: Club) => Promise<WebhookClear> } = {},
+): Promise<{ nightDate: string; deletedClubs: { id: string; slug: string; webhook: WebhookClear }[] }> {
   const club = await demoClub(db, clubId);
+  const deletedClubs: { id: string; slug: string; webhook: WebhookClear }[] = [];
+  for (const spare of await demoSpareClubs(db, clubId)) {
+    const webhook = opts.clearWebhook ? await opts.clearWebhook(spare) : 'skipped';
+    await deleteClub(db, spare.id, opts.actor ?? { type: 'system' }, now);
+    deletedClubs.push({ id: spare.id, slug: spare.slug, webhook });
+  }
   return db.transaction(async (tx) => {
     const doomedGuests = (await tx.select({ id: guests.id }).from(guests).where(and(eq(guests.clubId, clubId), notHist(guests.id)))).map((r) => r.id);
     const clubBookings = await tx.select({ id: bookings.id }).from(bookings).where(eq(bookings.clubId, clubId));
@@ -99,6 +116,9 @@ export async function resetDemoClub(db: Db, clubId: string, now: Date): Promise<
     if (doomedBookings.length) {
       await tx.delete(posBills).where(and(eq(posBills.clubId, clubId), inArray(posBills.bookingId, doomedBookings)));
       await tx.delete(promoterAttributions).where(and(eq(promoterAttributions.clubId, clubId), inArray(promoterAttributions.bookingId, doomedBookings)));
+      // B10c: the release prompts of reseeded bookings (same ids), so tonight starts with no prompt
+      // and, as a Keep counts only while its prompt exists (`latestKeep`), no Keep.
+      await tx.delete(alerts).where(and(eq(alerts.clubId, clubId), inArray(alerts.bookingId, doomedBookings)));
     }
     // B22: pre-orders and waitlist entries are activity rows (none is seeded history).
     await tx.delete(bookingPreorders).where(eq(bookingPreorders.clubId, clubId));
@@ -130,7 +150,7 @@ export async function resetDemoClub(db: Db, clubId: string, now: Date): Promise<
 
     const nightDate = await seedTonight(tx, club, now);
     if (nightDate !== currentNightDate(now, club.settings.nightEndHour)) throw new Error('resetDemoClub: tonight seeded for the wrong night');
-    return { nightDate };
+    return { nightDate, deletedClubs };
   });
 }
 

@@ -1,5 +1,5 @@
 import { and, eq } from 'drizzle-orm';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import {
   addPreorderItem,
@@ -12,7 +12,8 @@ import {
   updateMenuItem,
 } from '../src/bookings/preorders.js';
 import type { Db } from '../src/db/client.js';
-import { bookings, clubs, events, guests, messages, type Club } from '../src/db/schema.js';
+import { bookings, clubs, events, guests, messages, staffGroups, type Club } from '../src/db/schema.js';
+import type { LineGateway } from '../src/line/gateway.js';
 import { newId } from '../src/lib/util.js';
 import { FRIDAY, FRIDAY_AFTERNOON, setupTwoClubs } from './helpers.js';
 import { adminCookie, staffCookie, staffUrl, testConfig } from './helpers/track-a.js';
@@ -179,6 +180,26 @@ describe('bottle pre-orders (B22)', () => {
     // Another guest cannot touch this booking's pre-order.
     await sim('po2', { type: 'postback', data: add });
     expect((await getPreorder(db, clubA.id, b)).lines[0]!.qty).toBe(2);
+  });
+
+  it('the pre-order bar note on Done goes to the bookings group (B5b)', async () => {
+    await db.insert(staffGroups).values({ id: newId(), clubId: clubA.id, lineGroupId: 'Cbookings', purpose: 'bookings', linkedAt: clock });
+    const pushedTo: string[] = [];
+    vi.spyOn(app.ctx.gateways.dev as LineGateway, 'push').mockImplementation(async (to: string) => void pushedTo.push(to));
+    try {
+      const u = 'po_group';
+      const b = await simBooking(u);
+      const goose = await bottle(clubA, 'Grey Goose', 450_000);
+      await sim(u, { type: 'postback', data: `a=bottle_add&b=${b}&i=${goose.id}` });
+      await sim(u, { type: 'postback', data: `a=bottle_done&b=${b}` });
+      const note = await db.select().from(messages).where(and(eq(messages.clubId, clubA.id), eq(messages.target, 'staff')));
+      expect(note).toHaveLength(1);
+      expect((note[0]!.payload as { text: string }).text).toContain('Pre-order');
+      expect(pushedTo).toContain('Cbookings');
+      expect(pushedTo).not.toContain('Cstaff_demo');
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it('confirmation offers Pre-order bottles only when the club has a menu', async () => {

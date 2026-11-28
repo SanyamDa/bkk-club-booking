@@ -6,6 +6,7 @@ import { isTestContext } from '../data/test-flag.js';
 import type { Db } from '../db/client.js';
 import { channels, events, messages, type Club, type Guest } from '../db/schema.js';
 import { newId } from '../lib/util.js';
+import { staffGroupFor, type StaffGroupPurpose } from '../platform/staff-groups.js';
 import type { LineGateway, Message } from './gateway.js';
 import { describeLineError } from './setup.js';
 
@@ -218,8 +219,12 @@ export class Outbox {
     });
   }
 
-  /** Staff alerts go to the club's linked LINE group. Always logged so the dashboard can show them. */
-  async toStaff(gateway: LineGateway, club: Club, msgs: Message[], author: Actor = BOT) {
+  /**
+   * Staff alerts go to the club's linked LINE group. Always logged so the dashboard can show them.
+   * `opts.purpose` (spec §6.1 / §9 `staff_groups`): the club's group linked for that purpose, falling
+   * back to the main staff group.
+   */
+  async toStaff(gateway: LineGateway, club: Club, msgs: Message[], author: Actor = BOT, opts: { purpose?: StaffGroupPurpose } = {}) {
     if (msgs.length === 0) return;
     const stamp = await this.stamp(club, author);
     const rows = msgs.map((m) => ({
@@ -233,11 +238,12 @@ export class Outbox {
     }));
     await this.db.insert(messages).values(rows);
     const ids = rows.map((r) => r.id);
-    if (!club.staffGroupId) return this.mark(ids, 'skipped', 'none');
+    const groupId = await staffGroupFor(this.db, club, opts.purpose);
+    if (!groupId) return this.mark(ids, 'skipped', 'none');
     const sent = ids.slice(0, MAX_PER_CALL);
     if (ids.length > MAX_PER_CALL) await this.mark(ids.slice(MAX_PER_CALL), 'skipped', 'none');
     try {
-      await gateway.push(club.staffGroupId, msgs.slice(0, MAX_PER_CALL));
+      await gateway.push(groupId, msgs.slice(0, MAX_PER_CALL));
       await this.mark(sent, 'sent', 'push');
     } catch (err) {
       this.log(`LINE staff alert failed for club ${club.id}`, err);

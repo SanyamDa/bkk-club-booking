@@ -4,7 +4,8 @@ import { z } from 'zod';
 import type { Actor } from '../bookings/service.js';
 import { regenerateLayoutNote } from '../brain/layout.js';
 import type { Db } from '../db/client.js';
-import { clubProfile, clubs, GUEST_FIELDS, opsEvents, tables, zones, type ClubSettings } from '../db/schema.js';
+import { clubProfile, clubs, GUEST_FIELDS, opsEvents, RICH_MENU_CELLS, tables, zones, type ClubSettings } from '../db/schema.js';
+import { describeLineError, refreshRichMenuOnly, RICH_MENU_CELL_LABELS, richMenuCellsOf, type SetupReport } from '../line/setup.js';
 import { newId } from '../lib/util.js';
 import {
   auditClubChange,
@@ -67,7 +68,22 @@ export const SETTINGS_FIELD_CODES: Record<string, string> = {
   tone: 'tone',
   hostHours: 'hosts',
   afterVisitMessage: 'after',
+  // PUT /rich-menu (A10b).
+  richMenuCells: 'rich_menu',
 };
+
+/** A10b: 2 to 6 allowed cells, no repeats, Book a table and Privacy always there (§5.1, §5.5). */
+const richMenuBody = z
+  .object({
+    cells: z
+      .array(z.enum(RICH_MENU_CELLS))
+      .min(2)
+      .max(6)
+      .refine((c) => new Set(c).size === c.length, { message: 'a cell appears twice' })
+      .refine((c) => c.includes('book'), { message: 'book is required' })
+      .refine((c) => c.includes('privacy'), { message: 'privacy is required (spec §5.5)' }),
+  })
+  .strict();
 
 const settingsBody = z
   .object({
@@ -198,6 +214,45 @@ export function staffSettingsRoutes(app: AppContext) {
     if (hostHours !== undefined) patch.hostHours = hostHours ?? undefined;
     const settings = await saveSettings(c, db, patch, 'club.settings_changed');
     return c.json({ settings });
+  });
+
+  // ----- Rich menu cells (A10b, spec §6.2 Bot content, §11.1.1) -----
+  r.get('/clubs/:slug/rich-menu', managers, async (c) => {
+    const club = c.var.club;
+    return c.json({
+      cells: richMenuCellsOf(club),
+      allowed: RICH_MENU_CELLS.map((id) => ({ id, ...RICH_MENU_CELL_LABELS[id], available: id !== 'drinks' || Boolean(club.settings.drinksMenuUrl) })),
+    });
+  });
+
+  /**
+   * Saves the club's rich menu cells, then rebuilds the menu on LINE with `refreshRichMenuOnly`
+   * (with the counted links, so every cell keeps its `s=rm_*` tag). Without a
+   * LINE connection the cells are saved and the next setup run installs them.
+   */
+  r.put('/clubs/:slug/rich-menu', managers, async (c) => {
+    const club = c.var.club;
+    const parsed = richMenuBody.safeParse(await jsonBody(c));
+    if (!parsed.success) return c.json({ error: 'invalid', issues: issues(parsed.error) }, 400);
+    const { cells } = parsed.data;
+    if (cells.includes('drinks') && !club.settings.drinksMenuUrl) {
+      return c.json({ error: 'invalid', issues: [{ field: 'cells', message: 'set the drinks menu link before adding the Drinks menu cell' }] }, 400);
+    }
+    const settings = await saveSettings(c, db, { richMenuCells: cells }, 'club.rich_menu_changed');
+    const fresh = { ...club, settings };
+    const creds = await app.credentials.line(fresh);
+    if (!creds) return c.json({ cells, refreshed: false, report: null });
+    let report: SetupReport;
+    try {
+      // Only the rich menu step: the webhook, LIFF, sample messages and PUBLIC_URL are left alone.
+      const clients = app.lineSetupClients(creds.accessToken, await app.credentials.login(fresh));
+      const menu = await refreshRichMenuOnly({ club: fresh, clients, links: app.deps.links, refresh: true });
+      report = { ok: menu.step.ok, steps: [menu.step], ...(menu.richMenu ? { richMenu: menu.richMenu } : {}) };
+    } catch (err) {
+      report = { ok: false, steps: [{ name: 'Rich menu', ok: false, detail: describeLineError(err) }] };
+    }
+    // `refreshed` is true only when LINE took the new menu; the report says why otherwise.
+    return c.json({ cells, refreshed: Boolean(report.richMenu), report });
   });
 
   // ----- Sensitive changes: fresh TOTP, audit, staff-group notice (spec §12.3) -----

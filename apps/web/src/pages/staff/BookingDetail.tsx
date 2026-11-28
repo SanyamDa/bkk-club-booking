@@ -11,6 +11,7 @@ interface Detail {
     statusReason: string | null; rulesAcceptedAt: string | null; createdAt: string;
     tableId?: string; occasion?: string | null; rulesVersion?: string | null;
   };
+  releasePrompt?: { alertId: string; createdAt: string } | null;
   history?: { from: string | null; to: string; at: string; actorType: string; actorId: string | null; reasonCode: string | null }[];
   audit?: { action: string; at: string; actorType: string; actorId: string | null; reason: string | null }[];
   chatSummary?: { mode: string | null; handoffReason: string | null; handoffs: { startedAt: string; trigger: string; topic: string | null; summary: string | null }[] };
@@ -144,6 +145,17 @@ export function BookingDetail() {
                   <button className="btn danger" disabled={busy} onClick={() => act('reject', { askReason: 'Why is the slip rejected? (sent to the guest)' })}>Reject</button>
                 </div>
               ) : null}
+            </div>
+          )}
+
+          {b.status === 'confirmed' && d.releasePrompt && (
+            <div className="card stack">
+              <h2>Not arrived at release time</h2>
+              <p className="faint" style={{ margin: 0 }}>Asked {new Date(d.releasePrompt.createdAt).toLocaleTimeString()}. Release {b.table}, or keep it 30 more minutes.</p>
+              <div className="row wrap">
+                <button className="btn danger" disabled={busy} onClick={() => act('release', { confirm: `Release ${b.table}? The booking becomes a no-show.` })}>Release</button>
+                <button className="btn" disabled={busy} onClick={() => act('keep')}>Keep 30 min</button>
+              </div>
             </div>
           )}
 

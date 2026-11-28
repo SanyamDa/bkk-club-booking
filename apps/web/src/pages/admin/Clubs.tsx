@@ -31,6 +31,8 @@ export function Clubs() {
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
   const [template, setTemplate] = useState<'blank' | 'velora-like'>('blank');
+  /** Spec §12.4 step 7: the demo club whose demo this is; resetting that demo deletes the new club. */
+  const [demoOf, setDemoOf] = useState('');
   const [busy, setBusy] = useState(false);
   const [createError, setCreateError] = useState('');
 
@@ -42,7 +44,7 @@ export function Clubs() {
     setBusy(true);
     setCreateError('');
     try {
-      await adminApi.createClub({ name: name.trim(), slug: slug.trim(), template });
+      await adminApi.createClub({ name: name.trim(), slug: slug.trim(), template, ...(demoOf ? { demoOf } : {}) });
       navigate(`/admin/clubs/${slug.trim()}`);
     } catch (err) {
       setCreateError(errText(err));
@@ -88,7 +90,18 @@ export function Clubs() {
             <option value="velora-like">Velora-like (demo zones, tables and prices)</option>
           </select>
         </div>
-        <p className="faint" style={{ margin: 0 }}>The club starts as onboarding.</p>
+        {clubs && clubs.some((c) => c.status === 'demo') && (
+          <div className="field">
+            <label htmlFor="cdemo">Demo step 7</label>
+            <select id="cdemo" className="input" value={demoOf} onChange={(e) => setDemoOf(e.target.value)}>
+              <option value="">No, a real club</option>
+              {clubs.filter((c) => c.status === 'demo').map((c) => (
+                <option key={c.slug} value={c.slug}>Yes, for the {c.name} demo (deleted on its reset)</option>
+              ))}
+            </select>
+          </div>
+        )}
+        <p className="faint" style={{ margin: 0 }}>{demoOf ? 'The club is demo data: resetting the demo deletes it and clears its LINE webhook.' : 'The club starts as onboarding.'}</p>
         {createError && <div className="error">{createError}</div>}
         <button className="btn primary" disabled={busy || !name.trim() || slug.length < 2}>{busy ? 'Creating…' : 'Create club'}</button>
       </form>

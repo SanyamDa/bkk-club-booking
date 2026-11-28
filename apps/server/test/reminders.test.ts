@@ -258,7 +258,12 @@ describe('no-show job (B10)', () => {
     await run('no-show', at('23:59'));
     expect((await bookingOf(b.id)).status).toBe('confirmed');
 
-    const release = at('00:00', addDays(FRIDAY, 1));
+    // B10c: at the release time the host is asked first [Release] [Keep 30 min]; with no answer
+    // the table is released after `releasePromptMinutes` (default 15).
+    const prompt = at('00:00', addDays(FRIDAY, 1));
+    await run('no-show', prompt);
+    expect((await bookingOf(b.id)).status).toBe('confirmed');
+    const release = at('00:15', addDays(FRIDAY, 1));
     await run('no-show', release);
     const after = await bookingOf(b.id);
     expect(after.status).toBe('no_show');
@@ -288,7 +293,9 @@ describe('no-show job (B10)', () => {
     await db().update(bookings).set({ runningLateMinutes: 60 }).where(eq(bookings.id, b.id));
     await run('no-show', at('00:30', addDays(FRIDAY, 1)));
     expect((await bookingOf(b.id)).status).toBe('confirmed');
-    await run('no-show', at('01:00', addDays(FRIDAY, 1)));
+    await run('no-show', at('01:00', addDays(FRIDAY, 1))); // B10c: the prompt
+    expect((await bookingOf(b.id)).status).toBe('confirmed');
+    await run('no-show', at('01:15', addDays(FRIDAY, 1)));
     expect((await bookingOf(b.id)).status).toBe('no_show');
 
     const kept = await confirmedFor('n3', 'table_demo_B2');

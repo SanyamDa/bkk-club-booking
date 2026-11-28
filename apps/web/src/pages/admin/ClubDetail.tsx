@@ -219,8 +219,9 @@ function DemoControls({ slug }: { slug: string }) {
   const reset = () =>
     run(async () => {
       if (!window.confirm('Reset the demo club? Everything from the last demo is cleared.')) return '';
-      const r = await api<{ nightDate: string }>(`/api/admin/demo/${encodeURIComponent(slug)}/reset`, { body: {} });
-      return `Reset done. Tonight is ${r.nightDate}.`;
+      const r = await api<{ nightDate: string; deletedClubs?: { slug: string; webhook: string }[] }>(`/api/admin/demo/${encodeURIComponent(slug)}/reset`, { body: {} });
+      const deleted = (r.deletedClubs ?? []).map((d) => `${d.slug} (LINE webhook ${d.webhook.replace('_', ' ')})`);
+      return `Reset done. Tonight is ${r.nightDate}.${deleted.length ? ` Deleted step-7 club: ${deleted.join(', ')}.` : ''}`;
     });
   const fastForward = () =>
     run(async () => {

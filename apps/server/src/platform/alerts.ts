@@ -3,6 +3,7 @@ import type { Db } from '../db/client.js';
 import { alerts, clubAlertSettings, clubs, type Alert, type AlertLevel, type Club } from '../db/schema.js';
 import { newId } from '../lib/util.js';
 import { isFeatureOn } from './features.js';
+import { purposeOfAlertKind, type StaffGroupPurpose } from './staff-groups.js';
 
 export type { AlertLevel };
 
@@ -13,13 +14,25 @@ export interface AlertInput {
   conversationId?: string;
   bookingId?: string;
   text: { en: string; th: string };
+  /** The staff group to send to (§9 `staff_groups`); defaults to `purposeOfAlertKind(kind)`. */
+  purpose?: StaffGroupPurpose;
+  /** B10c: postback buttons under the staff-group copy (e.g. [Release] [Keep 30 min]). */
+  actions?: StaffAlertAction[];
+}
+
+/** B10c: one postback button on a staff-group alert; `data` is the postback string. */
+export interface StaffAlertAction {
+  label: string;
+  data: string;
 }
 
 /**
  * Sends one text to the club's staff LINE group. Wired once per app in `createApp` to `outbox.toStaff`.
+ * `purpose` picks the club's group for it, falling back to the main group.
+ * With `actions` (B10c) the text goes as a card with those postback buttons.
  * Throws when the club's LINE channel is unavailable; `raiseAlert` catches it.
  */
-export type StaffAlertSender = (club: Club, text: string) => Promise<void>;
+export type StaffAlertSender = (club: Club, text: string, purpose?: StaffGroupPurpose, actions?: StaffAlertAction[]) => Promise<void>;
 
 /** Keyed by database so several apps in one process (tests) each keep their own sender. */
 const senders = new WeakMap<Db, StaffAlertSender>();
@@ -63,8 +76,8 @@ export async function setInfoToLine(db: Db, clubId: string, on: boolean, updated
  * switched LINE on), sends it to the staff LINE group through the sender `createApp` wired.
  * Needs-input alerts never go to the group. A failed send is logged by the outbox, never thrown.
  */
-export async function raiseAlert(db: Db, input: AlertInput, now: Date): Promise<void> {
-  const id = newId();
+export async function raiseAlert(db: Db, input: AlertInput, now: Date, opts: { id?: string } = {}): Promise<void> {
+  const id = opts.id ?? newId();
   await db.insert(alerts).values({
     id,
     clubId: input.clubId,
@@ -84,7 +97,7 @@ export async function raiseAlert(db: Db, input: AlertInput, now: Date): Promise<
   const club = await db.query.clubs.findFirst({ where: eq(clubs.id, input.clubId) });
   if (!club) return;
   try {
-    await sender(club, alertLineText(input.level, input.text));
+    await sender(club, alertLineText(input.level, input.text), input.purpose ?? purposeOfAlertKind(input.kind), input.actions);
   } catch {
     // The sender recorded and logged the failure; the alert stays in the feed with no sent_line_at.
     return;

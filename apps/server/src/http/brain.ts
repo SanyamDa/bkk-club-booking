@@ -4,7 +4,9 @@ import { z } from 'zod';
 import { BRAIN_TOKEN_CAP, BRAIN_TOKEN_WARN, BrainCapError, latestSnapshot } from '../brain/compile.js';
 import { listGaps } from '../brain/gaps.js';
 import { exportObsidianFolder } from '../brain/export.js';
-import { importObsidianFolder, importPastedText } from '../brain/import.js';
+import { bodyLimit } from 'hono/body-limit';
+import { importObsidianFolder, importPastedText, importPhoto } from '../brain/import.js';
+import { MAX_IMPORT_IMAGE_BYTES, OcrError } from '../brain/ocr.js';
 import { BrainLintError } from '../brain/lint.js';
 import { approveNote, createNote, listNotes, noteVersions, rejectNote, updateNote } from '../brain/notes.js';
 import { brainNotes, type BrainNote } from '../db/schema.js';
@@ -183,6 +185,29 @@ export function brainRoutes(app: AppContext) {
     if (!body.success) return c.json({ error: 'bad_request' }, 400);
     const res = await importPastedText(db, c.var.club.id, body.data.text, actorOf(c), app.deps.now());
     return c.json({ created: res.created.map(view), rejected: res.rejected });
+  });
+
+  // Spec §8.2 photo import: a menu or house-rules photo (multipart `file`) is read by OCR and
+  // split into draft notes like pasted text. 503 when no OCR provider is configured; 413 / 415
+  // for size and type; 502 when OCR fails (no note created); 422 when no text was found.
+  const photoLimit = bodyLimit({
+    maxSize: MAX_IMPORT_IMAGE_BYTES + 64 * 1024,
+    onError: (c) => c.json({ error: 'too_large', message: 'The photo is too large (5 MB at most).' }, 413),
+  });
+  r.post(`${base}/import-photo`, managers, photoLimit, async (c) => {
+    if (!app.ocr) return c.json({ error: 'ocr_not_configured', message: 'Photo import is not set up yet. Paste the text instead.' }, 503);
+    if (!(c.req.header('content-type') ?? '').startsWith('multipart/form-data')) return c.json({ error: 'bad_request', message: 'Attach the photo as "file".' }, 400);
+    const file = (await c.req.parseBody()).file;
+    if (!(file instanceof File)) return c.json({ error: 'bad_request', message: 'Attach the photo as "file".' }, 400);
+    try {
+      const image = { bytes: new Uint8Array(await file.arrayBuffer()), mimeType: file.type };
+      const res = await importPhoto(db, c.var.club.id, image, app.ocr, actorOf(c), app.deps.now());
+      return c.json({ created: res.created.map(view), rejected: res.rejected });
+    } catch (err) {
+      if (!(err instanceof OcrError)) throw err;
+      const status = err.code === 'too_large' ? 413 : err.code === 'unsupported_type' ? 415 : err.code === 'ocr_failed' ? 502 : 422;
+      return c.json({ error: err.code, message: err.message }, status);
+    }
   });
 
   return r;

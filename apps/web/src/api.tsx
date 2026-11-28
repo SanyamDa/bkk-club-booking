@@ -132,7 +132,7 @@ const qs = (o: Record<string, string | number | undefined>) => {
 export const adminApi = {
   me: () => api<{ user: { id: string; email: string; name: string; platformRole: string | null } }>('/api/auth/me'),
   clubs: () => api<{ clubs: AdminClub[] }>('/api/admin/clubs'),
-  createClub: (b: { name: string; slug: string; template: 'blank' | 'velora-like' }) => api('/api/admin/clubs', { body: b }),
+  createClub: (b: { name: string; slug: string; template: 'blank' | 'velora-like'; demoOf?: string }) => api('/api/admin/clubs', { body: b }),
   /** Optional detail route (profile + credential summary); pages tolerate 404. */
   club: (slug: string) => api<{ health?: AdminClub; profile?: Record<string, unknown> | null; credentials?: CredentialSummary[] }>(adm(slug)),
   setStatus: (slug: string, status: AdminClub['status']) => api(adm(slug), { method: 'PATCH', body: { status } }),

@@ -27,6 +27,7 @@ import { inviteAcceptRoutes } from './http/team.js';
 import { webhookRoutes } from './http/webhook.js';
 import { dbCredentialStore, envCredentialStore, onlyDemoClubs } from './line/credentials.js';
 import { GatewayRegistry, type LineGateway, type Message } from './line/gateway.js';
+import { staffActionCard } from './bot/messages.js';
 import { lineIdTokenVerifier } from './line/idtoken.js';
 import { registerStaffAlertSender } from './platform/alerts.js';
 import { fakeLiffEndpointUpdater, fakeSetupClients, realLiffEndpointUpdater, realSetupClients } from './line/setup.js';
@@ -34,6 +35,7 @@ import { fakeLineTokenIssuer, realLineTokenIssuer } from './line/tokens.js';
 import { chatwootClient } from './integrations/chatwoot/provision.js';
 import { configuredPaymentGateways } from './integrations/payments/opn.js';
 import { paymentWebhookRoutes } from './http/payments.js';
+import { configuredOcr } from './brain/ocr.js';
 import { busynessFeedRoutes } from './http/data.js';
 
 /** What `opts.onResponse` sees for every JSON response (test hook: secret-leak checks). */
@@ -63,6 +65,8 @@ export function createApp(
     posFetch?: AppContext['posFetch'];
     /** Payment gateways (A20b); default: Opn from config when both Opn keys are set. */
     payments?: AppContext['payments'];
+    /** Brain photo import OCR; default: Anthropic vision when ANTHROPIC_API_KEY is set. `null` turns it off. */
+    ocr?: AppContext['ocr'];
   } = {},
 ) {
   // Structured JSON log lines on stdout (A7) unless the caller (tests) passes its own logger.
@@ -100,24 +104,26 @@ export function createApp(
     chatwoot: chatwootClient(config, opts.chatwootFetch),
     posFetch: opts.posFetch,
     payments,
+    ocr: opts.ocr !== undefined ? opts.ocr : configuredOcr(config),
   };
 
   // A15: urgent alerts (and info ones the club switched on) reach the staff LINE group through the outbox.
   // When the club's LINE token cannot be issued (bad credentials: the line_disconnected case), the
   // staff row is still recorded and the outbox logs the failed push; the throw tells raiseAlert
   // the alert was not sent, and raiseAlert never passes it on.
-  registerStaffAlertSender(db, async (club, text) => {
-    const msgs = [{ type: 'text', text } as Message];
+  registerStaffAlertSender(db, async (club, text, purpose, actions) => {
+    // B10c: an alert with actions (the [Release] [Keep 30 min] prompt) goes as a card with buttons.
+    const msgs = [actions?.length ? staffActionCard(text, actions) : ({ type: 'text', text } as Message)];
     let gateway: LineGateway;
     try {
       gateway = await gateways.forClub(club);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       const down = { push: async () => { throw new Error(`club LINE channel unavailable: ${reason}`); } } as unknown as LineGateway;
-      await deps.outbox.toStaff(down, club, msgs);
+      await deps.outbox.toStaff(down, club, msgs, undefined, { purpose });
       throw err;
     }
-    await deps.outbox.toStaff(gateway, club, msgs);
+    await deps.outbox.toStaff(gateway, club, msgs, undefined, { purpose });
   });
 
   const app = new Hono();

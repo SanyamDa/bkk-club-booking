@@ -9,6 +9,7 @@ import type { LineTokenIssuer } from '../line/tokens.js';
 import type { ChatwootClient } from '../integrations/chatwoot/provision.js';
 import type { FetchLike } from '../integrations/pos/papaya.js';
 import type { PaymentGateways } from '../integrations/payments/gateway.js';
+import type { OcrFn } from '../brain/import.js';
 
 export interface AppContext {
   config: Config;
@@ -32,4 +33,6 @@ export interface AppContext {
   posFetch?: FetchLike;
   /** Payment gateways by provider (A20b): Opn from config when its keys are set; tests pass a fake. */
   payments: PaymentGateways;
+  /** Brain photo import OCR: Anthropic vision when ANTHROPIC_API_KEY is set; tests pass a fake; null turns photo import off (503). */
+  ocr: OcrFn | null;
 }

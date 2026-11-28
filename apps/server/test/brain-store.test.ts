@@ -196,7 +196,7 @@ describe('B15 brain store', () => {
       seen.push(img.mimeType);
       return '# House rules\nAge 20+ with ID.';
     };
-    const res = await importPhoto(db, clubB.id, { bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/jpeg' }, fakeOcr, staffActor, NOW);
+    const res = await importPhoto(db, clubB.id, { bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]), mimeType: 'image/jpeg' }, fakeOcr, staffActor, NOW);
     expect(seen).toEqual(['image/jpeg']);
     expect(res.created).toHaveLength(1);
     expect(res.created[0]).toMatchObject({ title: 'House rules', status: 'draft', source: 'import' });

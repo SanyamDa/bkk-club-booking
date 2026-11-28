@@ -2,7 +2,7 @@ import type { BookingView } from '../bookings/service.js';
 import type { Db } from '../db/client.js';
 import type { Club } from '../db/schema.js';
 import { formatNight } from '../lib/time.js';
-import { formatBaht } from '../lib/util.js';
+import { formatBaht, newId } from '../lib/util.js';
 import { openAlert, raiseAlert } from '../platform/alerts.js';
 
 /**
@@ -122,16 +122,43 @@ export function alertGuestUnfollowed(db: Db, v: BookingView, now: Date): Promise
   );
 }
 
-/** B10 no-show job: release time passed and the table has not arrived. Urgent. */
-export function alertNoArrival(db: Db, v: BookingView, now: Date): Promise<void> {
-  return raiseAlert(
+/**
+ * B10c (spec §5.2 step 9): release time passed and the table has not arrived. Urgent, and the
+ * staff-group copy carries [Release] [Keep 30 min]. Returns the alert id (the Keep button names it,
+ * so one tap answers one prompt).
+ */
+export async function alertReleasePrompt(db: Db, v: BookingView, now: Date): Promise<string> {
+  const id = newId();
+  const b = v.booking.id;
+  await raiseAlert(
     db,
     {
       clubId: v.booking.clubId,
       level: 'urgent',
       kind: 'no_arrival',
+      bookingId: b,
+      text: bookingText(v, 'Not arrived at release time: release table?', 'ยังไม่มาถึงเวลาปล่อยโต๊ะ: ปล่อยโต๊ะไหม?'),
+      actions: [
+        { label: 'Release / ปล่อยโต๊ะ', data: new URLSearchParams({ a: 'ns_release', b }).toString() },
+        { label: 'Keep 30 min / รอ 30 นาที', data: new URLSearchParams({ a: 'ns_keep', b, al: id }).toString() },
+      ],
+    },
+    now,
+    { id },
+  );
+  return id;
+}
+
+/** B10c: the host did not answer the prompt in time, so the job released the table. Information. */
+export function alertNoShowReleased(db: Db, v: BookingView, now: Date): Promise<void> {
+  return raiseAlert(
+    db,
+    {
+      clubId: v.booking.clubId,
+      level: 'info',
+      kind: 'no_show_released',
       bookingId: v.booking.id,
-      text: bookingText(v, 'Not arrived at release time', 'ยังไม่มาถึงเวลาปล่อยโต๊ะ'),
+      text: bookingText(v, 'Not arrived, table released', 'ลูกค้าไม่มา ปล่อยโต๊ะแล้ว'),
     },
     now,
   );

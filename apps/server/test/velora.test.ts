@@ -1,10 +1,12 @@
 import { and, eq, inArray, like, sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
+import { keepTable, latestKeep, latestPrompt, openReleasePrompt } from '../src/bookings/release-prompt.js';
 import { holdTable } from '../src/bookings/service.js';
 import { approveNote, createNote } from '../src/brain/notes.js';
 import { openDb, type Db } from '../src/db/client.js';
 import {
+  alerts,
   bookings,
   brainNotes,
   channels,
@@ -180,6 +182,27 @@ describe('B7 Velora seeded club', () => {
     // The seeded onboarding notes stay live.
     const live = await db.select().from(brainNotes).where(and(eq(brainNotes.clubId, DEMO_CLUB_ID), eq(brainNotes.status, 'live')));
     expect(live).toHaveLength(VELORA.faqs.length);
+  });
+
+  it('reset clears release prompts and Keeps of reseeded tonight bookings (B10c)', async () => {
+    const { db, velora } = await veloraDb(WED);
+    const [tonight] = await db
+      .select()
+      .from(bookings)
+      .where(and(eq(bookings.clubId, DEMO_CLUB_ID), like(bookings.id, `${SEED_TONIGHT}%`), eq(bookings.status, 'confirmed')))
+      .limit(1);
+    expect(tonight).toBeDefined();
+    const promptId = newId();
+    await db.insert(alerts).values({ id: promptId, clubId: DEMO_CLUB_ID, level: 'urgent', kind: 'no_arrival', bookingId: tonight!.id, textEn: 'p', textTh: 'p', createdAt: WED });
+    expect(await keepTable(db, velora, tonight!.id, { type: 'staff', id: 'u1' }, WED, promptId)).toMatchObject({ until: expect.any(Date) });
+    expect(await latestKeep(db, DEMO_CLUB_ID, tonight!.id)).toBeDefined();
+
+    await resetDemoClub(db, DEMO_CLUB_ID, FRI);
+    // Same id, a fresh booking: no prompt, no open prompt, no Keep moving its release time.
+    expect(await db.query.bookings.findFirst({ where: eq(bookings.id, tonight!.id) })).toBeDefined();
+    expect(await latestPrompt(db, DEMO_CLUB_ID, tonight!.id)).toBeUndefined();
+    expect(await openReleasePrompt(db, DEMO_CLUB_ID, tonight!.id)).toBeUndefined();
+    expect(await latestKeep(db, DEMO_CLUB_ID, tonight!.id)).toBeUndefined();
   });
 
   it('reset refuses a non-demo club', async () => {

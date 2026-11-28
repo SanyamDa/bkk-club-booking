@@ -7,6 +7,8 @@ interface SettingsData {
   staffGroupLinked: boolean;
   /** A new group typed a code while another group is linked; a second code there replaces it (B5). */
   staffGroupPending: boolean;
+  /** §9 staff_groups: purposes with their own LINE group; the rest go to the main group. */
+  staffGroups?: { purpose: StaffPurpose; linkedAt: string }[];
   lineConnected: boolean;
   webhookUrl: string;
   liffEndpoint: string;
@@ -121,13 +123,30 @@ function LinePanel({ club }: { club: string }) {
  * B5: "Issue link code" makes a fresh single-use code (10 minutes) and shows it once; the server
  * keeps only its hash. Replacing an already linked group needs a second code typed in the new group.
  */
-function StaffLinkHint({ club, pending }: { club: string; pending: boolean }) {
+type StaffPurpose = 'bookings' | 'payments' | 'handoff';
+const STAFF_PURPOSES: { value: StaffPurpose; label: string }[] = [
+  { value: 'bookings', label: 'Bookings (new, late, cancelled, not arrived, pre-orders)' },
+  { value: 'payments', label: 'Payments (slips to check)' },
+  { value: 'handoff', label: 'Guest chats (wants a host, complaints)' },
+];
+
+function StaffLinkHint({ club, pending, groups = [], onChanged }: { club: string; pending: boolean; groups?: { purpose: StaffPurpose; linkedAt: string }[]; onChanged?: () => void }) {
   const [issued, setIssued] = useState<{ code: string; expiresAt: string } | null>(null);
   const [err, setErr] = useState('');
+  const [purpose, setPurpose] = useState<'' | StaffPurpose>('');
+  const unlink = async (p: StaffPurpose) => {
+    setErr('');
+    try {
+      await api(staffPath(club, `/staff-groups/${p}`), { method: 'DELETE' });
+      onChanged?.();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed');
+    }
+  };
   const issue = async () => {
     setErr('');
     try {
-      setIssued(await api<{ code: string; expiresAt: string }>(staffPath(club, '/staff-link-code'), { method: 'POST', body: {} }));
+      setIssued(await api<{ code: string; expiresAt: string }>(staffPath(club, '/staff-link-code'), { method: 'POST', body: purpose ? { purpose } : {} }));
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Failed');
     }
@@ -140,10 +159,26 @@ function StaffLinkHint({ club, pending }: { club: string; pending: boolean }) {
         {pending && ' A new group is waiting: issue a second code and type it in that new group to move alerts there.'}
       </span>
       <span>
+        <select value={purpose} onChange={(e) => setPurpose(e.target.value as '' | StaffPurpose)} aria-label="Group for">
+          <option value="">Main staff group (everything)</option>
+          {STAFF_PURPOSES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+        </select>{' '}
         <button className="btn" type="button" onClick={issue}>Issue link code</button>
         {issued && <> <code className="mono">link {issued.code}</code> <span className="faint">works once, until {until}</span></>}
         {err && <span className="error"> {err}</span>}
       </span>
+      {groups.length > 0 && (
+        <span className="stack" style={{ gap: 4 }}>
+          <span className="faint">Own groups (other alerts still go to the main group):</span>
+          {groups.map((g) => (
+            <span key={g.purpose}>
+              <b>{STAFF_PURPOSES.find((p) => p.value === g.purpose)?.label ?? g.purpose}</b>{' '}
+              <span className="faint">linked {new Date(g.linkedAt).toLocaleDateString()}</span>{' '}
+              <button className="btn" type="button" onClick={() => unlink(g.purpose)}>Unlink</button>
+            </span>
+          ))}
+        </span>
+      )}
     </span>
   );
 }
@@ -163,12 +198,13 @@ export function Settings() {
       <div className="card stack">
         <Check ok={s.lineConnected} label="LINE Messaging API connected" hint={<>Set the channel secret and access token in <code>apps/server/.env</code>, then run <code>npm run live</code>. It points LINE’s webhook here for you (currently <code>{s.webhookUrl}</code>).</>} />
         <Check ok={s.liffConfigured} label="Booking form inside LINE (LIFF)" hint={<>Create a LIFF app (endpoint <code>{s.liffEndpoint}</code>), put its ID in <code>DEMO_LIFF_ID</code> and the LINE Login channel ID/secret in <code>.env</code>, so the endpoint follows the tunnel automatically. Until then the form opens in the browser.</>} />
-        <Check ok={s.staffGroupLinked} label="Staff LINE group" hint={<StaffLinkHint club={club} pending={s.staffGroupPending} />} />
+        <Check ok={s.staffGroupLinked} label="Staff LINE group" hint={<StaffLinkHint club={club} pending={s.staffGroupPending} groups={s.staffGroups} onChanged={reload} />} />
         <Check ok={s.promptpayConfigured} label="PromptPay deposits" hint={<>Set <code>DEMO_PROMPTPAY_ID</code> to the account deposits are paid to. Without it the bot runs in demo mode (no real QR).</>} />
       </div>
       <QuotaPanel club={club} />
       <RulesEditor club={club} settings={s.settings} onSaved={reload} />
       <PolicyEditor club={club} settings={s.settings} onSaved={reload} />
+      <RichMenuEditor club={club} />
       <TablesEditor club={club} />
       {s.secondFactorEnrolled ? (
         <SensitiveEditor club={club} settings={s.settings} promptpayConfigured={s.promptpayConfigured} onSaved={reload} />
@@ -352,6 +388,72 @@ function PolicyEditor({ club, settings, onSaved }: { club: string; settings: Set
       <label className="check"><input type="checkbox" checked={after} onChange={(e) => setAfter(e.target.checked)} /><span>Send “Thanks for coming” the day after a visit (uses LINE quota)</span></label>
       {status}
       <button className="btn primary" disabled={busy} style={{ alignSelf: 'flex-start' }}>{busy ? 'Saving…' : 'Save policy'}</button>
+    </form>
+  );
+}
+
+interface RichMenuCellOption { id: string; en: string; th: string; available: boolean }
+interface RichMenuSaved { cells: string[]; refreshed: boolean; report: { steps: { name: string; ok: boolean; detail: string }[] } | null }
+/** Always in the menu: Book a table (§5.1) and the Privacy link (§5.5). */
+const REQUIRED_CELLS = ['book', 'privacy'];
+
+/** A10b (§6.2 Bot content, §11.1.1): which rich menu buttons the club shows, left to right. Saving rebuilds the menu on LINE. */
+function RichMenuEditor({ club }: { club: string }) {
+  const [allowed, setAllowed] = useState<RichMenuCellOption[]>([]);
+  const [cells, setCells] = useState<string[]>([]);
+  const [note, setNote] = useState('');
+  const { busy, run, status } = useSave();
+  useEffect(() => {
+    api<{ cells: string[]; allowed: RichMenuCellOption[] }>(staffPath(club, '/rich-menu'))
+      .then((r) => { setAllowed(r.allowed); setCells(r.cells); })
+      .catch(() => setAllowed([]));
+  }, [club]);
+  if (allowed.length === 0) return null;
+  const label = (id: string) => allowed.find((a) => a.id === id)?.en ?? id;
+  const move = (i: number, d: -1 | 1) => {
+    const next = [...cells];
+    [next[i], next[i + d]] = [next[i + d]!, next[i]!];
+    setCells(next);
+  };
+
+  function save(e: FormEvent) {
+    e.preventDefault();
+    setNote('');
+    void run(async () => {
+      const r = await api<RichMenuSaved>(staffPath(club, '/rich-menu'), { method: 'PUT', body: { cells } });
+      const step = r.report?.steps.find((s) => s.name === 'Rich menu');
+      setNote(r.refreshed ? 'Updated in LINE.' : r.report ? `LINE update failed: ${step?.detail ?? 'run LINE setup'}` : 'It goes live when LINE is connected.');
+    }, 'Menu saved.');
+  }
+
+  return (
+    <form className="card stack" onSubmit={save}>
+      <h2>LINE menu buttons</h2>
+      <p className="faint" style={{ margin: 0 }}>Up to 6 buttons. Book a table and Privacy are always shown.</p>
+      <div className="row wrap">
+        {allowed.map((a) => (
+          <label key={a.id} className="row" title={a.available ? a.th : 'Add a drinks menu link first'}>
+            <input
+              type="checkbox"
+              disabled={REQUIRED_CELLS.includes(a.id) || (!a.available && !cells.includes(a.id))}
+              checked={cells.includes(a.id)}
+              onChange={(e) => setCells(e.target.checked ? [...cells, a.id] : cells.filter((x) => x !== a.id))}
+            /> {a.en}
+          </label>
+        ))}
+      </div>
+      <ol className="stack" style={{ margin: 0, paddingLeft: 20 }}>
+        {cells.map((id, i) => (
+          <li key={id} className="row">
+            <span style={{ minWidth: 140 }}>{label(id)}</span>
+            <button type="button" className="btn" disabled={i === 0} onClick={() => move(i, -1)} aria-label={`Move ${label(id)} left`}>←</button>
+            <button type="button" className="btn" disabled={i === cells.length - 1} onClick={() => move(i, 1)} aria-label={`Move ${label(id)} right`}>→</button>
+          </li>
+        ))}
+      </ol>
+      {status}
+      {note && <div className="faint">{note}</div>}
+      <button className="btn primary" disabled={busy || cells.length > 6} style={{ alignSelf: 'flex-start' }}>{busy ? 'Saving…' : 'Save menu'}</button>
     </form>
   );
 }

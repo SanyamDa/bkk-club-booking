@@ -22,6 +22,12 @@ const createBody = z.object({
   name: z.string().trim().min(1).max(120),
   slug: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/),
   template: z.enum(['blank', 'velora-like']),
+  /**
+   * Spec §12.4 step 7: the slug of the demo club whose demo is creating this club. The club is
+   * then status `demo` (its rows are test data) and marked `settings.demoOf`, so resetting that
+   * demo deletes it. Only at creation; nothing else sets the mark.
+   */
+  demoOf: z.string().trim().min(1).max(40).optional(),
 });
 
 const statusBody = z.object({ status: z.enum(STATUSES) });
@@ -68,10 +74,18 @@ export function clubsRoutes(app: AppContext) {
     if (!parsed.success) return c.json({ error: 'bad_request', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400);
     const { name, slug, template } = parsed.data;
     if (await clubBySlug(db, slug)) return c.json({ error: 'slug_taken' }, 409);
+    let demoOf: string | undefined;
+    if (parsed.data.demoOf) {
+      const demo = await clubBySlug(db, parsed.data.demoOf);
+      // The demo club itself must be a demo, and not a step-7 club of another demo.
+      if (!demo || demo.status !== 'demo' || demo.settings.demoOf) return c.json({ error: 'demo_club_not_found' }, 400);
+      demoOf = demo.id;
+    }
+    const status: ClubStatus = demoOf ? 'demo' : 'onboarding';
     const now = app.deps.now();
     const id = `club_${newId()}`;
     const platform = await platformLoginSummary(db);
-    const settings = { ...newClubSettings(slug, now), refPrefix: uniqueRefPrefix(slug, await takenPrefixes(db)) };
+    const settings = { ...newClubSettings(slug, now), refPrefix: uniqueRefPrefix(slug, await takenPrefixes(db)), ...(demoOf ? { demoOf } : {}) };
     await db.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Db;
       await tx.insert(clubs).values({
@@ -79,7 +93,7 @@ export function clubsRoutes(app: AppContext) {
         slug,
         name,
         settings,
-        status: 'onboarding',
+        status,
         liffId: platform?.liffId ?? null,
         createdBy: c.var.user.id,
         createdAt: now,
@@ -95,14 +109,14 @@ export function clubsRoutes(app: AppContext) {
         actorId: c.var.user.id,
         dataOrigin: 'first_party',
         props: { template },
-        isTest: false,
+        isTest: Boolean(demoOf),
       });
-      await adminAudit(tx, c, { clubId: id, action: 'club.created', entity: 'clubs', entityId: id, after: { slug, name, template, refPrefix: settings.refPrefix } }, now);
+      await adminAudit(tx, c, { clubId: id, action: 'club.created', entity: 'clubs', entityId: id, after: { slug, name, template, refPrefix: settings.refPrefix, ...(demoOf ? { demoOf } : {}) } }, now);
     });
     // A13: one Chatwoot account + API inbox + agent bot per club. Skipped when Chatwoot is not
     // configured; a failure leaves the club created and is retried with POST .../inbox/provision.
     const inbox = await tryProvisionClubInbox(db, app.chatwoot, app.config.CREDENTIALS_KEY, { id, name, slug }, { publicUrl: app.config.PUBLIC_URL, by: c.var.user.id, now, log: app.deps.log });
-    return c.json({ id, slug, name, status: 'onboarding', refPrefix: settings.refPrefix, inbox }, 201);
+    return c.json({ id, slug, name, status, refPrefix: settings.refPrefix, inbox }, 201);
   });
 
   /** A13: (re)runs Chatwoot provisioning for a club; idempotent, completed steps are skipped. */

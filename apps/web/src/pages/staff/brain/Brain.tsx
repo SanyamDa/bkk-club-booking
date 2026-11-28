@@ -267,6 +267,23 @@ function BrainImportExport({ club, run }: { club: string; run: (fn: () => Promis
       setText('');
     });
   }
+  // Spec §8.2 photo import: a menu or house-rules photo is read by OCR into draft notes; a section
+  // with a price fails the lint and is listed as rejected. The server checks type and size again.
+  async function importPhoto(file: File | undefined) {
+    if (!file) return;
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) return setMsg('Only JPEG, PNG, WebP or GIF photos can be imported.');
+    if (file.size > 5 * 1024 * 1024) return setMsg('The photo is too large (5 MB at most).');
+    setMsg('Reading the photo… · กำลังอ่านรูป');
+    await run(async () => {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch(staffPath(club, '/brain/import-photo'), { method: 'POST', body: form, credentials: 'same-origin' });
+      const data = (await res.json().catch(() => ({}))) as { created?: unknown[]; rejected?: unknown[]; message?: string };
+      if (res.status === 403) return setMsg('Only an owner or manager can import a photo.');
+      if (!res.ok) return setMsg(data.message ?? `Photo import failed (HTTP ${res.status}).`);
+      setMsg(`Imported ${data.created?.length ?? 0} draft(s) from the photo, ${data.rejected?.length ?? 0} rejected (prices are left out).`);
+    });
+  }
 
   return (
     <section className="card stack">
@@ -281,6 +298,18 @@ function BrainImportExport({ club, run }: { club: string; run: (fn: () => Promis
         <label className="btn small">
           Import export file · นำเข้าไฟล์
           <input type="file" accept=".json,.md" multiple style={{ display: 'none' }} onChange={(e) => void importFiles(e.target.files)} />
+        </label>
+        <label className="btn small">
+          Import photo · นำเข้ารูปภาพ
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              void importPhoto(e.target.files?.[0]);
+              e.target.value = '';
+            }}
+          />
         </label>
       </div>
       <textarea className="input" rows={5} placeholder="Paste a pinned message or a rules page · วางข้อความ" value={text} onChange={(e) => setText(e.target.value)} />

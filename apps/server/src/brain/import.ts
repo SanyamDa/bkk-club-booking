@@ -5,6 +5,7 @@ import { brainNotes, type BrainNote } from '../db/schema.js';
 import { parseNoteFile, type NoteFile } from './export.js';
 import { BrainLintError, lintNote, NOTE_TYPES, type LintIssue, type NoteType } from './lint.js';
 import { createNote, stableSlug } from './notes.js';
+import { checkImportImage, OcrError } from './ocr.js';
 
 /**
  * Imports into the brain (spec §8.2, §10 Phase 2 baseline). Everything imported is a **draft**:
@@ -123,9 +124,23 @@ export interface ImportImage {
   bytes: Uint8Array;
   mimeType: string;
 }
-/** Reads the text in a menu or house-rules photo. No provider is wired yet; callers inject one. */
+/** Reads the text in a menu or house-rules photo. Production: `anthropicOcr` (`brain/ocr.ts`); tests inject a fake. */
 export type OcrFn = (image: ImportImage) => Promise<string>;
 
+/**
+ * Photo import: checks size and type, reads the text, then imports it like pasted text (draft
+ * notes, lint-failing sections rejected). Throws `OcrError` (no note created) when the image is
+ * refused, OCR fails, or no text is found.
+ */
 export async function importPhoto(db: Db, clubId: string, image: ImportImage, ocr: OcrFn, actor: Actor, now: Date): Promise<TextImportResult> {
-  return importPastedText(db, clubId, await ocr(image), actor, now);
+  const checked = checkImportImage(image);
+  let text: string;
+  try {
+    text = await ocr(checked);
+  } catch (err) {
+    if (err instanceof OcrError) throw err;
+    throw new OcrError('ocr_failed', `The photo could not be read right now (${(err as Error).message}). Try again, or paste the text instead.`.slice(0, 300));
+  }
+  if (!text.trim()) throw new OcrError('no_text', 'No text was found in the photo. Try a sharper photo, or paste the text instead.');
+  return importPastedText(db, clubId, text, actor, now);
 }

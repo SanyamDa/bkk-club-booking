@@ -1,7 +1,7 @@
 import { channelAccessToken, HTTPFetchError, liff, messagingApi } from '@line/bot-sdk';
 import { Resvg } from '@resvg/resvg-js';
 import type { TrackedLinks } from '../bot/messages.js';
-import type { Club } from '../db/schema.js';
+import { DEFAULT_RICH_MENU_CELLS, type Club, type RichMenuCell } from '../db/schema.js';
 import type { LoginChannel } from './credentials.js';
 import type { Message } from './gateway.js';
 
@@ -26,26 +26,64 @@ interface MenuCell {
   action: messagingApi.Action;
 }
 
+/** A10b: each allowed cell's labels (the staff Settings editor shows them too). */
+export const RICH_MENU_CELL_LABELS: Record<RichMenuCell, { en: string; th: string }> = {
+  book: { en: 'Book a table', th: 'จองโต๊ะ' },
+  my: { en: 'My booking', th: 'การจองของฉัน' },
+  location: { en: 'Location', th: 'แผนที่' },
+  drinks: { en: 'Drinks menu', th: 'เมนูเครื่องดื่ม' },
+  host: { en: 'Talk to a host', th: 'คุยกับพนักงาน' },
+  privacy: { en: 'Privacy', th: 'ความเป็นส่วนตัว' },
+};
+
+const BOOK_CELL_W = 1000;
+
+/** A10b: the club's chosen cells, left to right (unset = the default menu; `drinks` needs its URL). */
+export function richMenuCellsOf(club: Club): RichMenuCell[] {
+  const chosen = club.settings.richMenuCells?.length ? club.settings.richMenuCells : DEFAULT_RICH_MENU_CELLS;
+  return chosen.filter((c) => c !== 'drinks' || Boolean(club.settings.drinksMenuUrl));
+}
+
+function cellAction(club: Club, cell: RichMenuCell, links?: MenuLinks): messagingApi.Action {
+  const label = RICH_MENU_CELL_LABELS[cell].en;
+  const postback = (data: string): messagingApi.Action => ({ type: 'postback', label, data, displayText: label });
+  switch (cell) {
+    case 'book':
+      return postback('a=book&s=rm_book');
+    case 'my':
+      return postback('a=my&s=rm_my');
+    case 'host':
+      return postback('a=host&s=rm_host');
+    case 'location':
+      return { type: 'uri', label, uri: links ? links.tracked(club, 'map', 'rm_location') : club.settings.mapUrl };
+    case 'drinks':
+      return { type: 'uri', label, uri: links ? links.tracked(club, 'drinks', 'rm_drinks') : club.settings.drinksMenuUrl! };
+    case 'privacy':
+      // Spec §5.5: a permanent Privacy link to the data notice. Without links (the image preview) the
+      // cell opens the "My data" menu instead.
+      return links?.privacy ? { type: 'uri', label, uri: links.privacy() } : postback('a=privacy');
+  }
+}
+
 /**
- * B4: `links` sends the Location cell through the counted `/r/` redirect (`rm_location`). Without it
- * (the SVG preview) the cell holds the club's map URL.
+ * B4: `links` sends the Location and Drinks cells through the counted `/r/` redirect (`rm_location`,
+ * `rm_drinks`). Without it (the SVG preview) the cells hold the club's own URLs. A10b: the cells
+ * follow `settings.richMenuCells`; Book a table is 1000 px wide and the others share the rest.
  */
 function menuCells(club: Club, links?: MenuLinks): MenuCell[] {
-  return [
-    { x: 0, w: 1000, en: 'Book a table', th: 'จองโต๊ะ', primary: true, action: { type: 'postback', label: 'Book a table', data: 'a=book&s=rm_book', displayText: 'Book a table' } },
-    { x: 1000, w: 375, en: 'My booking', th: 'การจองของฉัน', action: { type: 'postback', label: 'My booking', data: 'a=my&s=rm_my', displayText: 'My booking' } },
-    { x: 1375, w: 375, en: 'Location', th: 'แผนที่', action: { type: 'uri', label: 'Location', uri: links ? links.tracked(club, 'map', 'rm_location') : club.settings.mapUrl } },
-    { x: 1750, w: 375, en: 'Talk to a host', th: 'คุยกับพนักงาน', action: { type: 'postback', label: 'Talk to a host', data: 'a=host&s=rm_host', displayText: 'Talk to a host' } },
-    // Spec §5.5: a permanent Privacy link to the data notice. Without links (the image preview) the
-    // cell opens the "My data" menu instead.
-    {
-      x: 2125,
-      w: 375,
-      en: 'Privacy',
-      th: 'ความเป็นส่วนตัว',
-      action: links?.privacy ? { type: 'uri', label: 'Privacy', uri: links.privacy() } : { type: 'postback', label: 'Privacy', data: 'a=privacy', displayText: 'Privacy' },
-    },
-  ];
+  const chosen = richMenuCellsOf(club);
+  const others = chosen.filter((c) => c !== 'book').length;
+  const bookW = chosen.includes('book') ? BOOK_CELL_W : 0;
+  const otherW = others ? Math.floor((MENU_W - bookW) / others) : 0;
+  let x = 0;
+  return chosen.map((cell, i) => {
+    const primary = cell === 'book';
+    // The last cell takes any rounding remainder so the areas cover the full width.
+    const w = i === chosen.length - 1 ? MENU_W - x : primary ? bookW : otherW;
+    const c: MenuCell = { x, w, ...RICH_MENU_CELL_LABELS[cell], primary, action: cellAction(club, cell, links) };
+    x += w;
+    return c;
+  });
 }
 
 /** The links the rich menu needs: counted redirects, and the data notice page when known. */
@@ -68,20 +106,25 @@ const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 
 export function richMenuSvg(club: Club): string {
   const accent = club.settings.accentColor;
-  const cells = menuCells(club)
+  const list = menuCells(club);
+  const cells = list
     .map((c) => {
       const cx = c.x + c.w / 2;
       const bg = c.primary ? accent : '#141316';
       const fg = c.primary ? '#141008' : '#F3EFE6';
       const sub = c.primary ? '#3A2D12' : '#A8A39A';
+      // Narrower cells (five beside Book a table) get smaller type so the labels fit.
+      const [enSize, thSize] = c.primary ? [104, 80] : c.w >= 370 ? [46, 40] : [36, 32];
       return `
         <rect x="${c.x}" y="0" width="${c.w}" height="${MENU_H}" fill="${bg}"/>
-        <text x="${cx}" y="${MENU_H / 2 - 10}" text-anchor="middle" font-size="${c.primary ? 104 : 46}" font-weight="600" fill="${fg}" font-family="Helvetica Neue, Arial, sans-serif">${esc(c.en)}</text>
-        <text x="${cx}" y="${MENU_H / 2 + 100}" text-anchor="middle" font-size="${c.primary ? 80 : 40}" fill="${sub}" font-family="Thonburi, Noto Sans Thai, Tahoma, sans-serif">${esc(c.th)}</text>`;
+        <text x="${cx}" y="${MENU_H / 2 - 10}" text-anchor="middle" font-size="${enSize}" font-weight="600" fill="${fg}" font-family="Helvetica Neue, Arial, sans-serif">${esc(c.en)}</text>
+        <text x="${cx}" y="${MENU_H / 2 + 100}" text-anchor="middle" font-size="${thSize}" fill="${sub}" font-family="Thonburi, Noto Sans Thai, Tahoma, sans-serif">${esc(c.th)}</text>`;
     })
     .join('');
-  const dividers = [1375, 1750, 2125]
-    .map((x) => `<rect x="${x - 1}" y="120" width="2" height="${MENU_H - 240}" fill="#2C2A30"/>`)
+  // A divider between two plain cells side by side.
+  const dividers = list
+    .filter((c, i) => i > 0 && !c.primary && !list[i - 1]!.primary)
+    .map((c) => `<rect x="${c.x - 1}" y="120" width="2" height="${MENU_H - 240}" fill="#2C2A30"/>`)
     .join('');
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${MENU_W}" height="${MENU_H}" viewBox="0 0 ${MENU_W} ${MENU_H}">${cells}${dividers}</svg>`;
 }
@@ -269,6 +312,43 @@ export async function rollbackRichMenu(clients: SetupClients, change: RichMenuCh
   await clients.api.deleteRichMenu(change.richMenuId);
 }
 
+/**
+ * Step 3 of `runLineSetup` on its own: installs the club's rich menu (or, with `refresh`, rebuilds
+ * it from `settings.richMenuCells`). Touches nothing else (no webhook, LIFF, sample messages or
+ * PUBLIC_URL check), so the Settings menu editor (A10b) can call it directly.
+ */
+export async function refreshRichMenuOnly(opts: {
+  club: Club;
+  clients: SetupClients;
+  links?: MenuLinks;
+  /** Rebuild even when a menu of the club is already installed. */
+  refresh?: boolean;
+  /** Keep the menus already there (the old default is kept for rollback). */
+  keepOldRichMenu?: boolean;
+}): Promise<{ step: SetupStep; richMenu?: RichMenuChange }> {
+  const { club, clients } = opts;
+  try {
+    const { richmenus } = await clients.api.getRichMenuList();
+    const ours = richmenus.filter((m) => m.name.startsWith(`${RICH_MENU_PREFIX}:${club.slug}`));
+    if (ours.length > 0 && !opts.refresh) {
+      return { step: { name: 'Rich menu', ok: true, detail: 'Already installed (use --refresh-menu to rebuild it).' } };
+    }
+    const previousRichMenuId = await currentDefaultRichMenuId(clients);
+    if (!opts.keepOldRichMenu) for (const m of ours) await clients.api.deleteRichMenu(m.richMenuId);
+    const { richMenuId } = await clients.api.createRichMenu(richMenuRequest(club, opts.links));
+    const png = renderRichMenuPng(club);
+    await clients.blob.setRichMenuImage(richMenuId, new Blob([new Uint8Array(png)], { type: 'image/png' }));
+    await clients.api.setDefaultRichMenu(richMenuId);
+    const deleted = !opts.keepOldRichMenu && ours.some((m) => m.richMenuId === previousRichMenuId);
+    return {
+      step: { name: 'Rich menu', ok: true, detail: `Installed: ${richMenuCellsOf(club).map((c) => RICH_MENU_CELL_LABELS[c].en).join(' · ')}.` },
+      richMenu: { richMenuId, previousRichMenuId: deleted ? null : previousRichMenuId },
+    };
+  } catch (err) {
+    return { step: { name: 'Rich menu', ok: false, detail: describeLineError(err) } };
+  }
+}
+
 export async function runLineSetup(opts: {
   club: Club;
   clients: SetupClients;
@@ -339,25 +419,9 @@ export async function runLineSetup(opts: {
   }
 
   // 3. Rich menu (the button panel under the chat).
-  try {
-    const { richmenus } = await clients.api.getRichMenuList();
-    const ours = richmenus.filter((m) => m.name.startsWith(`${RICH_MENU_PREFIX}:${club.slug}`));
-    if (ours.length > 0 && !opts.refreshRichMenu) {
-      step('Rich menu', true, 'Already installed (use --refresh-menu to rebuild it).');
-    } else {
-      const previousRichMenuId = await currentDefaultRichMenuId(clients);
-      if (!opts.keepOldRichMenu) for (const m of ours) await clients.api.deleteRichMenu(m.richMenuId);
-      const { richMenuId } = await clients.api.createRichMenu(richMenuRequest(club, opts.links));
-      const png = renderRichMenuPng(club);
-      await clients.blob.setRichMenuImage(richMenuId, new Blob([new Uint8Array(png)], { type: 'image/png' }));
-      await clients.api.setDefaultRichMenu(richMenuId);
-      const deleted = !opts.keepOldRichMenu && ours.some((m) => m.richMenuId === previousRichMenuId);
-      report.richMenu = { richMenuId, previousRichMenuId: deleted ? null : previousRichMenuId };
-      step('Rich menu', true, 'Installed: Book a table · My booking · Location · Talk to a host.');
-    }
-  } catch (err) {
-    step('Rich menu', false, describeLineError(err));
-  }
+  const menu = await refreshRichMenuOnly({ club, clients, links: opts.links, refresh: opts.refreshRichMenu, keepOldRichMenu: opts.keepOldRichMenu });
+  steps.push(menu.step);
+  if (menu.richMenu) report.richMenu = menu.richMenu;
 
   // 4. LIFF (the booking form inside LINE) must point at the current URL.
   const liffUrl = liffEndpointUrl(opts.publicUrl);

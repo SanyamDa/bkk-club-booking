@@ -61,6 +61,7 @@ import { isTestContext, isTestGuestAtCreate, redeemTesterCode } from '../data/te
 import type { Links } from './links.js';
 import * as M from './messages.js';
 import { handleStaffLink } from './staff-link.js';
+import { isClubStaffGroup, keepTable, releaseFromPrompt } from '../bookings/release-prompt.js';
 import { answerGuestMessage, extractContext, type ModelClient } from '../brain/answer.js';
 import { extractBookingDetails, hasBookingDetails, looksLikeBookingRequest, paxKeyFor, type BookingDetails } from '../brain/extract.js';
 import { alertBookingConfirmed, alertCancellation, alertGuestUnfollowed, alertPaymentReview, alertRunningLate, handoffAlertKind, urgentWordIn } from './alerts.js';
@@ -460,6 +461,10 @@ async function handleGroupEvent(deps: BotDeps, club: Club, gateway: LineGateway,
     ]);
     return;
   }
+  if (event.type === 'postback' && event.source?.type === 'group') {
+    await handleGroupPostback(deps, club, gateway, event.source.groupId, event.postback.data, event.replyToken);
+    return;
+  }
   if (event.type !== 'message' || event.message.type !== 'text' || event.source?.type !== 'group') return;
   const intent = detectIntent(event.message.text);
   if (intent.kind !== 'staff_link') return;
@@ -472,6 +477,41 @@ async function handleGroupEvent(deps: BotDeps, club: Club, gateway: LineGateway,
     deps.now(),
   );
   if (result !== 'ignored') deps.log(`Staff group link ${result} for club ${club.id}`);
+}
+
+/**
+ * B10c (spec §5.2 step 9): [Release] / [Keep 30 min] tapped on the no-arrival prompt in a staff
+ * group. Counts only from a group linked to this club, for a booking of this club; anything else
+ * is ignored. The tap has no staff user, so the actor names the group.
+ */
+async function handleGroupPostback(deps: BotDeps, club: Club, gateway: LineGateway, groupId: string, data: string, replyToken?: string) {
+  const params = new URLSearchParams(data);
+  const a = params.get('a');
+  const bookingId = params.get('b');
+  if ((a !== 'ns_release' && a !== 'ns_keep') || !bookingId) return;
+  if (!(await isClubStaffGroup(deps.db, club, groupId))) return;
+  const booking = await deps.db.query.bookings.findFirst({ where: and(eq(bookings.id, bookingId), eq(bookings.clubId, club.id)) });
+  if (!booking) return;
+  const actor = { type: 'staff' as const, id: `line_group:${groupId}` };
+  const now = deps.now();
+  const code = (await deps.db.query.tables.findFirst({ where: eq(tablesTable.id, booking.tableId) }))?.code ?? '';
+  let reply: string;
+  try {
+    if (a === 'ns_release') {
+      await releaseFromPrompt(deps.db, club.id, bookingId, actor, now);
+      reply = `ปล่อยโต๊ะ ${code} แล้ว (ไม่มา)\nReleased ${code} (no-show)`;
+    } else {
+      const kept = await keepTable(deps.db, club, bookingId, actor, now, params.get('al') ?? undefined);
+      reply =
+        kept === 'answered'
+          ? `ตอบคำถามนี้แล้ว\nThis prompt was already answered`
+          : `เก็บโต๊ะ ${code} ถึง ${formatClock(kept.until)}\nKeeping ${code} until ${formatClock(kept.until)}`;
+    }
+  } catch (err) {
+    if (!(err instanceof BookingError)) throw err;
+    reply = `โต๊ะ ${code} ไม่ได้รอลูกค้าแล้ว\n${code} is no longer waiting for its guest`;
+  }
+  if (replyToken) await gateway.reply(replyToken, [M.plain(reply)]);
 }
 
 // ---------- Text ----------
@@ -1113,7 +1153,7 @@ async function handleExtras(turn: Turn, p: URLSearchParams) {
     // bottle_done (plan B22): the staff group gets "Pre-order · table · night · lines · total" on every
     // Done. A bar note, not a §6.4 alert, so it goes to the group directly (a cleared order says so).
     const summary = await getPreorder(db, turn.club.id, view.booking.id);
-    await turn.deps.outbox.toStaff(turn.gateway, turn.club, [M.staffPreorder(view, summary)]);
+    await turn.deps.outbox.toStaff(turn.gateway, turn.club, [M.staffPreorder(view, summary)], undefined, { purpose: 'bookings' });
     await send(turn, [M.plain(t(turn.lang, summary.lines.length ? 'preorderSent' : 'preorderEmpty'), M.menuQuickReplies(turn.club, turn.lang, turn.deps.links))]);
   } catch (err) {
     if (!(err instanceof PreorderError)) throw err;

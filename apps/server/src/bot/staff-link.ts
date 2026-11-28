@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { and, eq, gt } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { auditLog, clubs, type Club } from '../db/schema.js';
+import { auditLog, clubs, staffGroups, type Club, type StaffGroupPurpose } from '../db/schema.js';
 import type { LineGateway } from '../line/gateway.js';
 import { newId } from '../lib/util.js';
 import * as M from './messages.js';
@@ -20,17 +20,34 @@ function newCode(): string {
   return s;
 }
 
+/** What a purpose group receives, for the bot's confirmation in the group. */
+const PURPOSE_LABEL: Record<StaffGroupPurpose, { en: string; th: string }> = {
+  bookings: { en: 'booking', th: 'การจอง' },
+  payments: { en: 'payment', th: 'การชำระเงิน' },
+  handoff: { en: 'guest chat', th: 'แชทลูกค้า' },
+};
+
 /**
  * Makes a fresh single-use staff link code for the club and returns it once. Only its hash and a
  * 10-minute expiry are stored; a new code replaces any earlier unused one. The code is never
  * logged. The caller (the staff route) writes the `audit_log` row with the full actor; `userId`
- * names who asked and is kept for that caller's record.
+ * names who asked and is kept for that caller's record. `purpose` (spec §9 `staff_groups`): the
+ * code links a group for that purpose only; omitted, it links the club's main staff group.
  */
-export async function issueStaffLinkCode(db: Db, clubId: string, userId: string, now: Date): Promise<{ code: string; expiresAt: Date }> {
+export async function issueStaffLinkCode(
+  db: Db,
+  clubId: string,
+  userId: string,
+  now: Date,
+  purpose?: StaffGroupPurpose,
+): Promise<{ code: string; expiresAt: Date }> {
   void userId;
   const code = newCode();
   const expiresAt = new Date(now.getTime() + STAFF_LINK_CODE_TTL_MS);
-  await db.update(clubs).set({ staffLinkCodeHash: hashStaffLinkCode(code), staffLinkCodeExpiresAt: expiresAt }).where(eq(clubs.id, clubId));
+  await db
+    .update(clubs)
+    .set({ staffLinkCodeHash: hashStaffLinkCode(code), staffLinkCodeExpiresAt: expiresAt, staffLinkCodePurpose: purpose ?? null })
+    .where(eq(clubs.id, clubId));
   return { code, expiresAt };
 }
 
@@ -41,6 +58,8 @@ export type StaffLinkResult = 'ignored' | 'linked' | 'pending' | 'replaced';
  * next. A club with no staff group (or this same group) gets it linked at once. A club already
  * linked to another group keeps that group: this group is stored as pending, and a second fresh
  * code typed here completes the replacement, tells the old group, and is audited.
+ * A code issued for a purpose links this group as the club's group for that purpose at once
+ * (the dashboard login that issued it for that purpose is the check); a group it replaces is told.
  */
 export async function handleStaffLink(
   db: Db,
@@ -50,12 +69,32 @@ export async function handleStaffLink(
   now: Date,
 ): Promise<StaffLinkResult> {
   const outcome = await db.transaction(async (tx) => {
+    const codeMatches = and(eq(clubs.id, club.id), eq(clubs.staffLinkCodeHash, hashStaffLinkCode(input.code)), gt(clubs.staffLinkCodeExpiresAt, now));
+    // The purpose the code was issued for; `.returning()` below gives the row after it is cleared.
+    const [issued] = await tx.select({ purpose: clubs.staffLinkCodePurpose }).from(clubs).where(codeMatches);
     const [row] = await tx
       .update(clubs)
-      .set({ staffLinkCodeHash: null, staffLinkCodeExpiresAt: null })
-      .where(and(eq(clubs.id, club.id), eq(clubs.staffLinkCodeHash, hashStaffLinkCode(input.code)), gt(clubs.staffLinkCodeExpiresAt, now)))
+      .set({ staffLinkCodeHash: null, staffLinkCodeExpiresAt: null, staffLinkCodePurpose: null })
+      .where(codeMatches)
       .returning();
     if (!row) return { result: 'ignored' as const };
+    const purpose = issued?.purpose ?? null;
+    if (purpose) {
+      const [prev] = await tx.select().from(staffGroups).where(and(eq(staffGroups.clubId, club.id), eq(staffGroups.purpose, purpose)));
+      await tx
+        .insert(staffGroups)
+        .values({ id: newId(), clubId: club.id, lineGroupId: input.groupId, purpose, linkedAt: now })
+        .onConflictDoUpdate({ target: [staffGroups.clubId, staffGroups.purpose], set: { lineGroupId: input.groupId, linkedAt: now } });
+      const old = prev && prev.lineGroupId !== input.groupId ? prev.lineGroupId : undefined;
+      await tx
+        .insert(auditLog)
+        .values(
+          old
+            ? groupAudit(club.id, 'staff_group.replaced', input.groupId, { purpose, from: old, to: input.groupId }, now)
+            : groupAudit(club.id, 'staff_group.linked', input.groupId, { purpose, groupId: input.groupId }, now),
+        );
+      return { result: old ? ('replaced' as const) : ('linked' as const), old, purpose };
+    }
     const old = row.staffGroupId;
     if (!old || old === input.groupId) {
       await tx.update(clubs).set({ staffGroupId: input.groupId, pendingStaffGroupId: null }).where(eq(clubs.id, club.id));
@@ -83,10 +122,11 @@ export async function handleStaffLink(
     );
     return 'pending';
   }
-  await say(`✅ This group will now receive ${club.name} booking alerts.\nกลุ่มนี้จะได้รับการแจ้งเตือนการจองแล้ว`);
+  const label = 'purpose' in outcome && outcome.purpose ? PURPOSE_LABEL[outcome.purpose] : { en: 'booking', th: 'การจอง' };
+  await say(`✅ This group will now receive ${club.name} ${label.en} alerts.\nกลุ่มนี้จะได้รับการแจ้งเตือน${label.th}แล้ว`);
   if (outcome.result === 'replaced' && outcome.old) {
     await gateway.push(outcome.old, [
-      M.plain(`${club.name} booking alerts now go to another LINE group. This group no longer receives them.\nการแจ้งเตือนการจองของ ${club.name} ย้ายไปที่กลุ่ม LINE อื่นแล้ว กลุ่มนี้จะไม่ได้รับอีก`),
+      M.plain(`${club.name} ${label.en} alerts now go to another LINE group. This group no longer receives them.\nการแจ้งเตือน${label.th}ของ ${club.name} ย้ายไปที่กลุ่ม LINE อื่นแล้ว กลุ่มนี้จะไม่ได้รับอีก`),
     ]);
   }
   return outcome.result;

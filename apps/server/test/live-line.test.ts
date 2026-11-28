@@ -76,7 +76,7 @@ describe('LINE setup', () => {
     expect(report.steps.filter((s) => !s.ok)).toEqual([]);
     expect(report.ok).toBe(true);
     expect(calls.webhook).toBe('https://demo-tunnel.example.com/line/webhook/demo');
-    expect(calls.menu?.areas).toHaveLength(4);
+    expect(calls.menu?.areas).toHaveLength(5); // Book, My booking, Location, Talk to a host, Privacy (spec §5.5)
     expect(calls.image).toBe(1);
     expect(calls.defaultMenu).toBe('richmenu-1');
     expect(calls.liff).toBe('https://demo-tunnel.example.com/liff/details');

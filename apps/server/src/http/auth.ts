@@ -219,6 +219,11 @@ export function requireClubRole(app: AppContext, ...roles: Role[]): MiddlewareHa
         c.res = c.json({ error: 'forbidden' }, 403);
         return;
       }
+      // Spec §12.3: a paused club's dashboard is read-only. The founder console changes the status.
+      if (club.status === 'paused' && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
+        c.res = c.json({ error: 'club_paused' }, 403);
+        return;
+      }
       c.set('club', club);
       c.set('membership', access.membership);
       if (access.supportGrant) {

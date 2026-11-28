@@ -126,7 +126,7 @@ export function OnboardingPanel({ slug }: { slug: string }) {
         <div className="stack" style={{ gap: 4 }}>
           {applied.map((a) => (
             <div key={a.name} className="row">
-              <Ok ok={a.status === 'done' ? true : a.status === 'skipped' ? undefined : false} yes="Done" no={a.status === 'not_ready' ? 'Not ready' : 'By hand'} />
+              <Ok ok={a.status === 'done' ? true : a.status === 'skipped' ? undefined : false} yes="Done" no={a.status === 'failed' ? 'Failed' : 'By hand'} />
               <span><b>{a.name}</b>{a.count != null ? ` (${a.count})` : ''}{a.detail ? ` · ${a.detail}` : ''}</span>
             </div>
           ))}

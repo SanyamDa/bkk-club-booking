@@ -30,16 +30,28 @@ interface MenuCell {
  * B4: `links` sends the Location cell through the counted `/r/` redirect (`rm_location`). Without it
  * (the SVG preview) the cell holds the club's map URL.
  */
-function menuCells(club: Club, links?: TrackedLinks): MenuCell[] {
+function menuCells(club: Club, links?: MenuLinks): MenuCell[] {
   return [
     { x: 0, w: 1000, en: 'Book a table', th: 'จองโต๊ะ', primary: true, action: { type: 'postback', label: 'Book a table', data: 'a=book&s=rm_book', displayText: 'Book a table' } },
-    { x: 1000, w: 500, en: 'My booking', th: 'การจองของฉัน', action: { type: 'postback', label: 'My booking', data: 'a=my&s=rm_my', displayText: 'My booking' } },
-    { x: 1500, w: 500, en: 'Location', th: 'แผนที่', action: { type: 'uri', label: 'Location', uri: links ? links.tracked(club, 'map', 'rm_location') : club.settings.mapUrl } },
-    { x: 2000, w: 500, en: 'Talk to a host', th: 'คุยกับพนักงาน', action: { type: 'postback', label: 'Talk to a host', data: 'a=host&s=rm_host', displayText: 'Talk to a host' } },
+    { x: 1000, w: 375, en: 'My booking', th: 'การจองของฉัน', action: { type: 'postback', label: 'My booking', data: 'a=my&s=rm_my', displayText: 'My booking' } },
+    { x: 1375, w: 375, en: 'Location', th: 'แผนที่', action: { type: 'uri', label: 'Location', uri: links ? links.tracked(club, 'map', 'rm_location') : club.settings.mapUrl } },
+    { x: 1750, w: 375, en: 'Talk to a host', th: 'คุยกับพนักงาน', action: { type: 'postback', label: 'Talk to a host', data: 'a=host&s=rm_host', displayText: 'Talk to a host' } },
+    // Spec §5.5: a permanent Privacy link to the data notice. Without links (the image preview) the
+    // cell opens the "My data" menu instead.
+    {
+      x: 2125,
+      w: 375,
+      en: 'Privacy',
+      th: 'ความเป็นส่วนตัว',
+      action: links?.privacy ? { type: 'uri', label: 'Privacy', uri: links.privacy() } : { type: 'postback', label: 'Privacy', data: 'a=privacy', displayText: 'Privacy' },
+    },
   ];
 }
 
-export function richMenuRequest(club: Club, links?: TrackedLinks): messagingApi.RichMenuRequest {
+/** The links the rich menu needs: counted redirects, and the data notice page when known. */
+export type MenuLinks = TrackedLinks & { privacy?: () => string };
+
+export function richMenuRequest(club: Club, links?: MenuLinks): messagingApi.RichMenuRequest {
   return {
     size: { width: MENU_W, height: MENU_H },
     selected: true,
@@ -64,11 +76,11 @@ export function richMenuSvg(club: Club): string {
       const sub = c.primary ? '#3A2D12' : '#A8A39A';
       return `
         <rect x="${c.x}" y="0" width="${c.w}" height="${MENU_H}" fill="${bg}"/>
-        <text x="${cx}" y="${MENU_H / 2 - 10}" text-anchor="middle" font-size="${c.primary ? 104 : 60}" font-weight="600" fill="${fg}" font-family="Helvetica Neue, Arial, sans-serif">${esc(c.en)}</text>
-        <text x="${cx}" y="${MENU_H / 2 + 100}" text-anchor="middle" font-size="${c.primary ? 80 : 54}" fill="${sub}" font-family="Thonburi, Noto Sans Thai, Tahoma, sans-serif">${esc(c.th)}</text>`;
+        <text x="${cx}" y="${MENU_H / 2 - 10}" text-anchor="middle" font-size="${c.primary ? 104 : 46}" font-weight="600" fill="${fg}" font-family="Helvetica Neue, Arial, sans-serif">${esc(c.en)}</text>
+        <text x="${cx}" y="${MENU_H / 2 + 100}" text-anchor="middle" font-size="${c.primary ? 80 : 40}" fill="${sub}" font-family="Thonburi, Noto Sans Thai, Tahoma, sans-serif">${esc(c.th)}</text>`;
     })
     .join('');
-  const dividers = [1500, 2000]
+  const dividers = [1375, 1750, 2125]
     .map((x) => `<rect x="${x - 1}" y="120" width="2" height="${MENU_H - 240}" fill="#2C2A30"/>`)
     .join('');
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${MENU_W}" height="${MENU_H}" viewBox="0 0 ${MENU_W} ${MENU_H}">${cells}${dividers}</svg>`;
@@ -266,7 +278,7 @@ export async function runLineSetup(opts: {
   sampleMessages: Message[];
   refreshRichMenu?: boolean;
   /** B4: counted links for the rich menu's Location cell (`Links`); the app's callers always pass it. */
-  links?: TrackedLinks;
+  links?: MenuLinks;
   /** With `refreshRichMenu`: keep the menus already there (the old default is kept for rollback). */
   keepOldRichMenu?: boolean;
   webhookRetries?: number;

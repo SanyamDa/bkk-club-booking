@@ -129,7 +129,7 @@ async function seedWeek(d: Db) {
   await ev('availability.searched', { attemptId: 'a5', isTest: true, props: { night_date: N1, pax_range: 'p5_8', result_count: 0 } });
   await ev('booking.started', { attemptId: 'a6', dataOrigin: 'line_chat' });
   // A sold-out night shown, outside any attempt.
-  await ev('night.sold_out_shown', { nightDate: N2, props: { pax_range: 'p1_4' } });
+  await ev('night.sold_out_shown', { nightDate: N2 }); // shown before the party size is asked: no pax range
   // Velora.
   await ev('booking.started', { clubId: FIXTURE_CLUB_ID, attemptId: 'v1', isTest: true });
   await ev('availability.searched', { clubId: FIXTURE_CLUB_ID, attemptId: 'v1', isTest: true, props: { night_date: N1, pax_range: 'p1_4', result_count: 0 } });
@@ -170,7 +170,7 @@ describe('analytics views (B14)', () => {
     );
     expect(r).toEqual([
       { night_date: N1, pax_range: 'p5_8', zero_result_searches: 1, sold_out_shown: 0 },
-      { night_date: N2, pax_range: 'p1_4', zero_result_searches: 0, sold_out_shown: 1 },
+      { night_date: N2, pax_range: null, zero_result_searches: 0, sold_out_shown: 1 },
     ]);
   });
 

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { bookings, posBills, tables, type Club } from '../../db/schema.js';
+import { completeBookingTx } from '../../bookings/service.js';
 import { emit } from '../../data/events.js';
 import { currentNightDate } from '../../lib/time.js';
 import type { PosAdapter, PosBill } from './adapter.js';
@@ -160,6 +161,34 @@ export function csvReportAdapter(map: PosColumnMap = WONGNAI_FOODSTORY_COLUMN_MA
 export const posBillId = (clubId: string, ref: string) =>
   `pos_${createHash('sha256').update(`${clubId}\0${ref}`).digest('hex').slice(0, 32)}`;
 
+/**
+ * B4b (§14.2, §11.3): `booking.completed` when a closed bill is tied to a booking, with its spend.
+ * Once per booking, whichever path (report import or live webhook) sees the closed bill first.
+ * Call it on the caller's transaction. An `arrived` booking also moves to `completed` (§7.1) on
+ * that transaction, with its history row and `booking.status_changed`.
+ */
+export async function emitBookingCompleted(tx: Db, club: Club, bookingId: string, billRef: string, totalSatang: number | null, closedAt: Date, source: string): Promise<void> {
+  const booking = await tx.query.bookings.findFirst({ where: and(eq(bookings.id, bookingId), eq(bookings.clubId, club.id)) });
+  if (!booking) return;
+  await completeBookingTx(tx, club.id, bookingId, { type: 'system' }, closedAt);
+  await emit(tx, {
+    clubId: club.id,
+    type: 'booking.completed',
+    occurredAt: closedAt,
+    actorType: 'system',
+    dataOrigin: 'pos',
+    source,
+    bookingId,
+    guestId: booking.guestId,
+    tableId: booking.tableId,
+    nightDate: booking.nightDate,
+    attemptId: booking.attemptId ?? undefined,
+    props: { billRef, totalSatang },
+    isTest: club.status === 'demo' || booking.isTest,
+    dedupeKey: `booking.completed:${bookingId}`,
+  });
+}
+
 /** Bookings a bill can belong to: the guest got (or was due) a table that night. */
 const MATCHABLE = ['confirmed', 'arrived', 'completed'] as const;
 
@@ -266,6 +295,7 @@ export async function importPosReport(
           props: { billRef: bill.ref, method: 'table_night' },
           dedupeKey: `pos.bill_matched:${bill.ref}:${booking.id}`,
         });
+        if (bill.closedAt) await emitBookingCompleted(tx as unknown as Db, club, booking.id, bill.ref, bill.totalSatang, bill.closedAt, base.source);
       }
     }
   });

@@ -1,9 +1,12 @@
-import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, inArray, ne, or, sql, type SQL } from 'drizzle-orm';
 import { expireHold } from '../bookings/service.js';
+import { compileSnapshot } from '../brain/compile.js';
+import { deactivateNoteCases } from '../brain/testset.js';
 import type { Db } from '../db/client.js';
 import {
   bookingPreorders,
   bookings,
+  brainNotes,
   bookingStatusHistory,
   clubs,
   conversations,
@@ -54,7 +57,8 @@ const notHist = (col: unknown): SQL => sql`left(${col}, ${SEED_HIST.length}) <> 
  * conversations, messages, bookings, deposits, status history, events, handoffs, door counts,
  * crowd ratings, and the rows that hang off a deleted guest or booking), then seeds tonight again
  * for `currentNightDate(now, nightEndHour)`. Content (zones, tables, prices, policies, brain notes,
- * profile) and the audit log are kept. Only for clubs with `status = 'demo'`.
+ * profile) and the audit log are kept; a note learned from a takeover during a demo is retired (not
+ * deleted) so its gap shows again. Only for clubs with `status = 'demo'`.
  */
 export async function resetDemoClub(db: Db, clubId: string, now: Date): Promise<{ nightDate: string }> {
   const club = await demoClub(db, clubId);
@@ -111,6 +115,18 @@ export async function resetDemoClub(db: Db, clubId: string, now: Date): Promise<
     await tx.delete(events).where(and(eq(events.clubId, clubId), notHist(events.id)));
     await tx.delete(doorCounts).where(and(eq(doorCounts.clubId, clubId), notHist(doorCounts.id)));
     await tx.delete(crowdRatings).where(and(eq(crowdRatings.clubId, clubId), notHist(crowdRatings.id)));
+
+    // Spec §12.4: the note approved in demo step 5 is retired so its gap exists again. Seeded brain
+    // notes come from onboarding; a takeover-sourced (learned) note was made during a demo.
+    const learned = await tx
+      .select({ id: brainNotes.id, status: brainNotes.status })
+      .from(brainNotes)
+      .where(and(eq(brainNotes.clubId, clubId), eq(brainNotes.source, 'takeover'), ne(brainNotes.status, 'retired')));
+    if (learned.length) {
+      await tx.update(brainNotes).set({ status: 'retired', updatedAt: now }).where(and(eq(brainNotes.clubId, clubId), inArray(brainNotes.id, learned.map((n) => n.id))));
+      await deactivateNoteCases(tx, clubId, learned.map((n) => n.id));
+      if (learned.some((n) => n.status === 'live')) await compileSnapshot(tx, clubId, now);
+    }
 
     const nightDate = await seedTonight(tx, club, now);
     if (nightDate !== currentNightDate(now, club.settings.nightEndHour)) throw new Error('resetDemoClub: tonight seeded for the wrong night');

@@ -10,7 +10,7 @@ import { credentialFailure, probeLine, readQuota, recordLineSetup } from '../../
 import { quotaView } from '../../platform/health.js';
 import type { AuthEnv } from '../auth.js';
 import type { AppContext } from '../context.js';
-import { adminAudit, clubBySlug, freshTotpRefusal, jsonBody, notifyStaffGroup } from './controls.js';
+import { adminAudit, clubBySlug, freshTotpRefusal, jsonBody, notifyOwners } from './controls.js';
 
 const migrateBody = z.object({
   greeting: z.object({ en: z.string().trim().min(1).max(2000).optional(), th: z.string().trim().min(1).max(2000).optional() }).optional(),
@@ -85,7 +85,7 @@ export function lineWizardRoutes(app: AppContext) {
       );
     }
     const fresh = (await clubBySlug(db, club.slug))!;
-    await notifyStaffGroup(app, fresh, `LINE credentials for ${fresh.name} were changed by the platform team (secret ending ${saved.last4}).`);
+    await notifyOwners(app, fresh, `LINE credentials for ${fresh.name} were changed by the platform team (secret ending ${saved.last4}).`);
 
     let found: Awaited<ReturnType<typeof clientsFor>>;
     let report: SetupReport;
@@ -237,7 +237,7 @@ export function lineWizardRoutes(app: AppContext) {
     if (report.richMenu) {
       await adminAudit(db, c, { clubId: club.id, action: RICH_MENU_REPLACED, entity: 'rich_menu', entityId: report.richMenu.richMenuId, after: report.richMenu }, now);
     }
-    await notifyStaffGroup(app, fresh, 'The greeting message was imported and the LINE menu was replaced by the platform team.');
+    await notifyOwners(app, fresh, 'The greeting message was imported and the LINE menu was replaced by the platform team.');
     return c.json({ greeting, report, richMenu: report.richMenu ?? null });
   });
 

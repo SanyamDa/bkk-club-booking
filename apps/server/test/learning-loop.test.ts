@@ -14,6 +14,7 @@ import { alerts, brainNotes, brainTestCases, conversations, events, guests, hand
 import { buildScheduler } from '../src/jobs/index.js';
 import { runBrainLint } from '../src/jobs/brain-lint.js';
 import { newId } from '../src/lib/util.js';
+import { featuresFlagKey } from '../src/platform/features.js';
 import { FRIDAY_AFTERNOON, setupDb } from './helpers.js';
 import { adminCookie, testConfig } from './helpers/track-a.js';
 
@@ -43,6 +44,7 @@ beforeEach(async () => {
   learn = fakeLearnClient((req) => drafting(req));
   app = createApp(config, ctx.db, { bot: { now: () => clock, log: () => {}, ai: model, learn } });
   cookie = undefined;
+  await ctx.db.insert(platformFlags).values({ key: featuresFlagKey(ctx.club.id), value: { ai_answers: true }, updatedBy: 'test', updatedAt: FRIDAY_AFTERNOON });
 });
 afterEach(async () => {
   await ctx.close();
@@ -148,6 +150,22 @@ describe('B18 learning loop', () => {
     expect((await convOf('g2')).mode).toBe('bot');
     const answered = (await ctx.db.select().from(events).where(eq(events.type, 'ai.answered'))).at(-1)!;
     expect((answered.raw as { noteIds: string[] }).noteIds).toEqual([draft!.id]);
+  });
+
+  it('with the learning_loop switch off, a takeover drafts nothing and is not drafted later (A17b)', async () => {
+    drafting = () => goodDraft();
+    await takeover('g-off', 'can I bring a birthday cake?', 'Yes you can bring your own cake.');
+    await ctx.db
+      .update(platformFlags)
+      .set({ value: { ai_answers: true, learning_loop: false } })
+      .where(eq(platformFlags.key, featuresFlagKey(ctx.club.id)));
+    const res = await runLearning({ db: ctx.db, client: learn, log: () => {} }, clock);
+    expect(res.episodes.map((e) => e.outcome)).toEqual(['learning_off']);
+    expect(learn.drafts).toHaveLength(0);
+    expect(await drafts()).toHaveLength(0);
+    // Switching it back on does not draft the takeover that ended while it was off.
+    await ctx.db.update(platformFlags).set({ value: { ai_answers: true } }).where(eq(platformFlags.key, featuresFlagKey(ctx.club.id)));
+    expect((await runLearning({ db: ctx.db, client: learn, log: () => {} }, clock)).episodes).toHaveLength(0);
   });
 
   it('draft with a phone number is discarded', async () => {

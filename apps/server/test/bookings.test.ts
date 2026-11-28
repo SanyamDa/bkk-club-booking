@@ -13,6 +13,8 @@ import {
   upcomingNights,
 } from '../src/bookings/service.js';
 import { FRIDAY, FRIDAY_AFTERNOON, makeGuest, setupDb } from './helpers.js';
+import { eq } from 'drizzle-orm';
+import { events } from '../src/db/schema.js';
 
 let ctx: Awaited<ReturnType<typeof setupDb>>;
 beforeEach(async () => {
@@ -78,6 +80,15 @@ describe('holds', () => {
     const free = await availableTables(ctx.db, ctx.club.id, FRIDAY, { min: 2, max: 4 }, FRIDAY_AFTERNOON);
     expect(free.map((o) => o.table.code)).toContain('T1');
     expect(free.map((o) => o.table.code)).not.toContain('T2');
+  });
+
+  it('records the released hold’s last_step as a funnel step, not "held" (B4b)', async () => {
+    const g = await makeGuest(ctx.db);
+    await holdTable(ctx.db, ctx.club, { guestId: g.id, tableId: 'table_demo_T1', nightDate: FRIDAY, pax: 2 }, FRIDAY_AFTERNOON);
+    await holdTable(ctx.db, ctx.club, { guestId: g.id, tableId: 'table_demo_T2', nightDate: FRIDAY, pax: 2 }, FRIDAY_AFTERNOON);
+    const rows = await ctx.db.select().from(events).where(eq(events.type, 'booking.abandoned'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.props).toMatchObject({ last_step: 'details' });
   });
 });
 

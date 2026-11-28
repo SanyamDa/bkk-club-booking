@@ -160,10 +160,16 @@ Rules:
 
 const WEEKDAY_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
+/** §5.4: the club's voice, from Settings (unset = formal). */
+const TONE_LINE: Record<'formal' | 'casual', string> = {
+  formal: 'Club voice: formal and polite (in Thai, end sentences with ค่ะ/ครับ).',
+  casual: 'Club voice: casual and friendly (in Thai, relaxed wording is fine).',
+};
+
 /** The per-message part of the live call (after the cache breakpoint). B17's test runner sends the same. */
-export function aiUserContent(today: string, lang: 'th' | 'en', text: string): string {
+export function aiUserContent(today: string, lang: 'th' | 'en', text: string, tone: 'formal' | 'casual' = 'formal'): string {
   return (
-    `Tonight's club night: ${today} (${WEEKDAY_EN[weekdayOf(today)]}). Guest language: ${lang}.\n` +
+    `Tonight's club night: ${today} (${WEEKDAY_EN[weekdayOf(today)]}). Guest language: ${lang}. ${TONE_LINE[tone]}\n` +
     `<guest_message>\n${text.slice(0, 2000)}\n</guest_message>`
   );
 }
@@ -173,6 +179,8 @@ export interface AnswerSession {
   guest: Guest;
   conv: Conversation;
   lang: 'th' | 'en';
+  /** Where the guest wrote. A18: an Instagram message's events are tagged `instagram` (§14.8). Default `line`. */
+  channel?: 'line' | 'instagram';
 }
 
 export type HandoffReason = 'ai_cost_cap' | 'ai_unavailable' | 'faq_missed' | 'guard' | 'guest_request';
@@ -213,8 +221,8 @@ export async function answerGuestMessage(deps: AnswerDeps, s: AnswerSession, tex
     clubId: s.club.id,
     occurredAt: now,
     actorType: 'bot' as const,
-    channel: 'line',
-    dataOrigin: 'first_party' as const,
+    channel: s.channel ?? 'line',
+    dataOrigin: s.channel === 'instagram' ? ('instagram' as const) : ('first_party' as const),
     guestId: s.guest.id,
     conversationId: s.conv.id,
     isTest: isTestContext({ club: s.club, guest: s.guest }),
@@ -230,7 +238,7 @@ export async function answerGuestMessage(deps: AnswerDeps, s: AnswerSession, tex
   const ctx = await extractContext(db, s.club, now);
   const snapshot = await latestSnapshot(db, s.club.id);
   const brain = snapshot?.compiledText ?? '# Club brain\n\n(no notes yet)\n';
-  const userContent = aiUserContent(ctx.today, s.lang, text);
+  const userContent = aiUserContent(ctx.today, s.lang, text, s.club.settings.tone);
 
   let reply: ModelReply | null = null;
   for (const model of [AI_PRIMARY_MODEL, AI_FALLBACK_MODEL] as const) {

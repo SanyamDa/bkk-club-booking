@@ -99,7 +99,7 @@ export async function sampleMessages(db: Db, club: Club, links: Links, now: Date
       M.menu(club, lang, links),
       M.askNight(club, lang, nights, now),
       M.askPax(lang, night),
-      ...M.tablesCarousel(club, lang, options, night, '5–8'),
+      ...M.tablesCarousel(club, lang, options, night, '5–8', links.floor(club, night)),
       M.noTables(lang, night, '5–8'),
       M.held(club, lang, view, links.details(club, booking, now)),
       M.review(club, lang, view),

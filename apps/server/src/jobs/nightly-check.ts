@@ -14,7 +14,7 @@ import { addDays, bangkokParts, currentNightDate, weekdayOf } from '../lib/time.
  * history, completeness and props checks. The silent-club check uses each club's own opening hours.
  */
 
-export type NightlyCheckResult = { missing: number; silentClubs: string[]; piiInProps: number; testInAggregates: number };
+export type NightlyCheckResult = { missing: number; silentClubs: string[]; piiInProps: number; testInAggregates: number; deadLetters: number };
 
 /** Hour (Bangkok) the business day starts; the nightly job runs from `NIGHTLY_RUN_HOUR`. */
 const DAY_CUT_HOUR = 6;
@@ -43,14 +43,16 @@ async function wasOpen(db: Db, club: Club, nightDate: string): Promise<boolean> 
 }
 
 /**
- * Runs the four nightly checks for `nightDate` and records each finding in `ops_events`:
+ * Runs the five nightly checks for `nightDate` and records each finding in `ops_events`:
  * - `missing`: `booking_status_history` rows of that day with no `booking.status_changed` event for
  *   the same booking, `to` status and time;
  * - `silentClubs`: live clubs that were open and wrote no event during their opening hours;
  * - `piiInProps`: events of that day with a props value that looks like a phone, email or Thai text;
  * - `testInAggregates`: `is_test` rows visible in any view of the `analytics` schema that has an
  *   `is_test` column, plus B14's `testRowsInAnalytics` (demo-club rows in any B14 view, and
- *   `analytics.events` rows whose event is `is_test`).
+ *   `analytics.events` rows whose event is `is_test`);
+ * - `deadLetters`: `events_dead_letter` rows received that day (§14.2 "events_dead_letter is empty"),
+ *   reported per club from the payload's `clubId`.
  */
 export async function checkEventCompleteness(db: Db, nightDate: string, now: Date = new Date()): Promise<NightlyCheckResult> {
   const start = at(nightDate, DAY_CUT_HOUR);
@@ -159,7 +161,21 @@ export async function checkEventCompleteness(db: Db, nightDate: string, now: Dat
     await report(db, null, 'test_in_aggregates', { nightDate, analyticsRows: leaked }, now);
   }
 
-  return { missing: missingRows.length, silentClubs, piiInProps, testInAggregates };
+  // 5. events_dead_letter is empty: every event that failed validation or insert that day.
+  const deadRows = rowsOf<{ club_id: string | null; n: number }>(
+    await db.execute(sql`
+      select payload->>'clubId' as club_id, count(*)::int as n
+      from events_dead_letter
+      where received_at >= ${start.toISOString()}::timestamptz and received_at < ${end.toISOString()}::timestamptz
+      group by payload->>'clubId'`),
+  );
+  let deadLetters = 0;
+  for (const r of deadRows) {
+    deadLetters += Number(r.n);
+    await report(db, r.club_id, 'dead_letter', { nightDate, rows: Number(r.n) }, now);
+  }
+
+  return { missing: missingRows.length, silentClubs, piiInProps, testInAggregates, deadLetters };
 }
 
 /**

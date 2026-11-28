@@ -3,8 +3,11 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import './styles.css';
 import { Details } from './pages/Details';
+import { FloorPlan } from './pages/FloorPlan';
 import { Simulator } from './pages/Simulator';
 import { BookingDetail } from './pages/staff/BookingDetail';
+import { Bookings } from './pages/staff/Bookings';
+import { Payments } from './pages/staff/Payments';
 import { Handoffs } from './pages/staff/Handoffs';
 import { Feed } from './pages/staff/Feed';
 import { StaffLayout } from './pages/staff/Layout';
@@ -42,6 +45,7 @@ createRoot(document.getElementById('root')!).render(
       <Routes>
         <Route path="/" element={<Navigate to="/staff" replace />} />
         <Route path="/liff/details" element={<Details />} />
+        <Route path="/liff/floor" element={<FloorPlan />} />
         <Route path="/dev/simulator" element={<Simulator />} />
         <Route path="/staff/login" element={<Login />} />
         <Route path="/invite" element={<AcceptInvite />} />
@@ -50,7 +54,9 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/door" element={<Door />} />
         <Route path="/staff" element={<StaffLayout />}>
           <Route index element={<Night />} />
+          <Route path="bookings" element={<Bookings />} />
           <Route path="bookings/:id" element={<BookingDetail />} />
+          <Route path="payments" element={<Payments />} />
           <Route path="handoffs" element={<Handoffs />} />
           <Route path="feed" element={<Feed />} />
           <Route path="new" element={<NewBooking />} />

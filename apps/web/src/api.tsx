@@ -151,6 +151,9 @@ export const adminApi = {
   messages: (slug: string, p: { limit?: number; before?: string } = {}) => api<{ messages: any[] }>(adm(slug) + '/messages' + qs(p)),
   timeline: (slug: string, kind: 'conversations' | 'bookings', id: string) => api<{ items?: any[]; history?: any[] }>(adm(slug) + `/${kind}/${encodeURIComponent(id)}/timeline`),
   testMessage: (slug: string, to: 'self' | 'staff_group') => api(adm(slug) + '/test-message', { body: { to } }),
+  /** A5: the signed-in admin's own LINE user id, the target of test-message `self`. */
+  myLine: () => api<{ lineUserId: string | null }>('/api/admin/me/line'),
+  setMyLine: (lineUserId: string | null) => api<{ lineUserId: string | null }>('/api/admin/me/line', { method: 'PUT', body: { lineUserId } }),
   pause: (slug: string, paused: boolean) => api(adm(slug) + '/pause', { body: { paused } }),
   /** A17b per-club feature switches. */
   features: (slug: string) => api<{ features: Record<string, boolean> }>(adm(slug) + '/features'),

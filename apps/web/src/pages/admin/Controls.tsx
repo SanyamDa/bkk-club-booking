@@ -43,10 +43,36 @@ export function ClubControls({ club, onChange }: { club: AdminClub; onChange: ()
         <button className="btn small" disabled={busy} onClick={() => run(() => adminApi.testMessage(club.slug, 'self'), 'Test message sent to our LINE account.')}>Test message to us</button>
         <button className="btn small" disabled={busy} onClick={() => run(() => adminApi.testMessage(club.slug, 'staff_group'), 'Test message sent to the staff group.')}>Test message to staff group</button>
       </div>
+      <MyLineUserId />
       {error && <div className="error">{error}</div>}
       {msg && <div className="faint">{msg}</div>}
       <ClubFeatures slug={club.slug} />
     </div>
+  );
+}
+
+/** A5: the founder's own LINE user id, where "Test message to us" goes. */
+function MyLineUserId() {
+  const [value, setValue] = useState('');
+  const [note, setNote] = useState('');
+  useEffect(() => {
+    adminApi.myLine().then((d) => setValue(d.lineUserId ?? '')).catch((e) => setNote(errText(e)));
+  }, []);
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    try {
+      await adminApi.setMyLine(value.trim() || null);
+      setNote(value.trim() ? 'Saved.' : 'Cleared.');
+    } catch (err) {
+      setNote(errText(err));
+    }
+  }
+  return (
+    <form className="row wrap" onSubmit={save}>
+      <input className="input" placeholder="Your LINE user id (U + 32 hex)" value={value} onChange={(e) => setValue(e.target.value)} />
+      <button className="btn small" type="submit">Save my LINE id</button>
+      {note && <span className="faint">{note}</span>}
+    </form>
   );
 }
 

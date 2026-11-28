@@ -177,7 +177,7 @@ async function liveChecks(app: AppContext, club: Club) {
   };
 }
 
-type ApplyStep = { name: string; status: 'done' | 'skipped' | 'not_ready' | 'manual' | 'failed'; count?: number; detail?: string };
+type ApplyStep = { name: string; status: 'done' | 'skipped' | 'manual' | 'failed'; count?: number; detail?: string };
 
 /** Loads one submission into the club: zones, tables, prices (price_rules), rules, profile. Idempotent. */
 async function applyForm(db: Db, club: Club, form: OnboardingForm, actor: SettingsActor, now: Date): Promise<ApplyStep[]> {

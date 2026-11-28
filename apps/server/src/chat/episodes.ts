@@ -3,7 +3,7 @@ import type { Actor } from '../bookings/service.js';
 import { emit } from '../data/events.js';
 import { isTestContext } from '../data/test-flag.js';
 import type { Db } from '../db/client.js';
-import { alerts, clubs, conversations, guests, handoffEpisodes, messages, type HandoffEpisode } from '../db/schema.js';
+import { alerts, channels, clubs, conversations, guests, handoffEpisodes, messages, type Guest, type HandoffEpisode } from '../db/schema.js';
 import type { GatewayRegistry, Message } from '../line/gateway.js';
 import type { Outbox } from '../line/outbox.js';
 import { newId } from '../lib/util.js';
@@ -53,6 +53,8 @@ export interface StaffReplyInput {
   occurredAt: Date;
   /** The inbox's own message id; a repeated id is stored and sent once. Null for dashboard replies. */
   externalId: string | null;
+  /** The guest's channel row, for a reply on a channel other than LINE (A18 Instagram). */
+  channelId?: string | null;
 }
 
 /** How a staff reply reaches the guest. `AppContext` provides both (`ctx.deps.outbox`, `ctx.gateways`). */
@@ -91,7 +93,19 @@ async function lockConversation(tx: Db, clubId: string, conversationId: string) 
   if (!conv) throw new EpisodeError('not_found');
   const club = (await tx.query.clubs.findFirst({ where: eq(clubs.id, clubId) }))!;
   const guest = await tx.query.guests.findFirst({ where: and(eq(guests.id, conv.guestId), eq(guests.clubId, clubId)) });
-  return { conv, club, guest };
+  return { conv, club, guest, origin: await originOf(tx, clubId, guest) };
+}
+
+/**
+ * Channel and data origin of the guest's events: an Instagram contact's (A18) are tagged
+ * `instagram` at the source (spec §14.8); everyone else is a LINE guest.
+ */
+async function originOf(tx: Db, clubId: string, guest: Guest | undefined): Promise<{ channel: string; dataOrigin: 'first_party' | 'instagram' }> {
+  if (guest?.channelId && !guest.lineUserId) {
+    const [ch] = await tx.select({ kind: channels.kind }).from(channels).where(and(eq(channels.id, guest.channelId), eq(channels.clubId, clubId))).limit(1);
+    if (ch?.kind === 'instagram') return { channel: 'instagram', dataOrigin: 'instagram' };
+  }
+  return { channel: 'line', dataOrigin: 'first_party' };
 }
 
 /**
@@ -99,7 +113,7 @@ async function lockConversation(tx: Db, clubId: string, conversationId: string) 
  * When the conversation already has an open episode, returns it and changes nothing.
  */
 export async function startEpisode(tx: Db, input: StartEpisodeInput): Promise<HandoffEpisode> {
-  const { conv, club, guest } = await lockConversation(tx, input.clubId, input.conversationId);
+  const { conv, club, guest, origin } = await lockConversation(tx, input.clubId, input.conversationId);
   const open = await openEpisode(tx, input.clubId, conv.id);
   if (open) return open;
   const [episode] = await tx
@@ -125,8 +139,7 @@ export async function startEpisode(tx: Db, input: StartEpisodeInput): Promise<Ha
     type: 'handoff.requested',
     occurredAt: input.now,
     actorType: input.trigger === 'guest_request' ? 'guest' : input.trigger === 'staff_reply' ? 'staff' : 'bot',
-    channel: 'line',
-    dataOrigin: 'first_party',
+    ...origin,
     guestId: conv.guestId,
     conversationId: conv.id,
     props: { trigger: input.trigger },
@@ -145,7 +158,7 @@ export async function endEpisode(tx: Db, input: EndEpisodeInput): Promise<Handof
   // order deadlocks a host reply against the handoff-timeout job.
   const [found] = await tx.select().from(handoffEpisodes).where(eq(handoffEpisodes.id, input.episodeId)).limit(1);
   if (!found || found.endedAt) return undefined;
-  const { conv, club, guest } = await lockConversation(tx, found.clubId, found.conversationId);
+  const { conv, club, guest, origin } = await lockConversation(tx, found.clubId, found.conversationId);
   const [episode] = await tx
     .update(handoffEpisodes)
     .set({ endedAt: input.now, endedBy: input.endedBy, resolverUserId: input.resolverUserId ?? null })
@@ -161,8 +174,7 @@ export async function endEpisode(tx: Db, input: EndEpisodeInput): Promise<Handof
     occurredAt: input.now,
     actorType: actor.type,
     actorId: actor.id,
-    channel: 'line',
-    dataOrigin: 'first_party',
+    ...origin,
     guestId: conv.guestId,
     conversationId: conv.id,
     props: { durationSec: seconds(episode.startedAt, input.now) },
@@ -192,7 +204,7 @@ export async function endOpenEpisode(
   tx: Db,
   input: { clubId: string; conversationId: string; resolverUserId: string; actor?: Actor; now: Date },
 ): Promise<void> {
-  const { conv, club, guest } = await lockConversation(tx, input.clubId, input.conversationId);
+  const { conv, club, guest, origin } = await lockConversation(tx, input.clubId, input.conversationId);
   const open = await openEpisode(tx, input.clubId, conv.id);
   if (open) {
     await endEpisode(tx, { episodeId: open.id, endedBy: 'staff', resolverUserId: input.resolverUserId, actor: input.actor, now: input.now });
@@ -207,8 +219,7 @@ export async function endOpenEpisode(
     occurredAt: input.now,
     actorType: actor.type,
     actorId: actor.id,
-    channel: 'line',
-    dataOrigin: 'first_party',
+    ...origin,
     guestId: conv.guestId,
     conversationId: conv.id,
     props: { durationSec: conv.handoffRequestedAt ? seconds(conv.handoffRequestedAt, input.now) : null },
@@ -220,12 +231,13 @@ export async function endOpenEpisode(
  * A host's reply (dashboard now, Chatwoot callback in A14). Stores it as a `messages` row with
  * `author_type='staff'`, starts a takeover if the bot had the chat, emits `host.replied`, then sends
  * it to the guest through the outbox. A repeated `externalId` returns the first row and sends nothing.
+ * `send: null` records a reply the channel already delivered (a host typing on Instagram, A18).
  * Throws `EpisodeError('not_found')` when the conversation is not this club's.
  */
-export async function recordStaffReply(db: Db, input: StaffReplyInput, send: StaffReplySend): Promise<{ messageId: string }> {
+export async function recordStaffReply(db: Db, input: StaffReplyInput, send: StaffReplySend | null): Promise<{ messageId: string }> {
   const payload: Message = { type: 'text', text: input.text };
   const result = await db.transaction(async (tx) => {
-    const { conv, club, guest } = await lockConversation(tx, input.clubId, input.conversationId);
+    const { conv, club, guest, origin } = await lockConversation(tx, input.clubId, input.conversationId);
     const [row] = await tx
       .insert(messages)
       .values({
@@ -239,6 +251,7 @@ export async function recordStaffReply(db: Db, input: StaffReplyInput, send: Sta
         authorId: input.userId,
         occurredAt: input.occurredAt,
         externalId: input.externalId,
+        ...(input.channelId ? { channelId: input.channelId, sentVia: 'none' as const, deliveryStatus: 'sent' as const } : {}),
       })
       .onConflictDoNothing()
       .returning();
@@ -272,9 +285,8 @@ export async function recordStaffReply(db: Db, input: StaffReplyInput, send: Sta
       occurredAt: input.occurredAt,
       actorType: 'staff',
       actorId: input.userId,
-      channel: 'line',
+      ...origin,
       source: input.channel,
-      dataOrigin: 'first_party',
       guestId: conv.guestId,
       conversationId: conv.id,
       props: { latency_ms: lastIn ? Math.max(0, input.occurredAt.getTime() - lastIn.at.getTime()) : null },
@@ -282,7 +294,7 @@ export async function recordStaffReply(db: Db, input: StaffReplyInput, send: Sta
     });
     return { messageId: row.id, fresh: true as const, club, guest };
   });
-  if (result.fresh && result.guest) {
+  if (send && result.fresh && result.guest) {
     const gateway = await send.gateways.forClub(result.club, result.guest.lineUserId);
     await send.outbox.deliver(gateway, result.club, result.guest, result.messageId, [payload]);
   }

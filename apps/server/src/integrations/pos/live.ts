@@ -7,7 +7,7 @@ import { currentNightDate } from '../../lib/time.js';
 import { readClubCredential } from '../../platform/credentials.js';
 import { isFeatureOn } from '../../platform/features.js';
 import type { PosAdapter, PosBill } from './adapter.js';
-import { importPosReport, posBillId, type PosImportResult } from './csv-import.js';
+import { emitBookingCompleted, importPosReport, posBillId, type PosImportResult } from './csv-import.js';
 import { loyverseAdapter, type LoyverseCredentials } from './loyverse.js';
 import { papayaAdapter, type FetchLike, type PapayaAdapter, type PapayaCredentials } from './papaya.js';
 
@@ -157,6 +157,8 @@ export async function applyLiveBill(
         props: { billRef: bill.ref, covers: next.covers, totalSatang: next.totalSatang },
         dedupeKey: `pos.bill_closed:${bill.ref}`,
       });
+      // B4b (§11.3 L3): a bill closed on a booking completes the booking with its spend.
+      if (before?.bookingId) await emitBookingCompleted(t, club, before.bookingId, bill.ref, next.totalSatang, next.closedAt, opts.source);
     }
     return before ? 'updated' : 'created';
   });

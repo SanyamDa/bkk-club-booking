@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { Actor } from '../bookings/service.js';
 import { regenerateLayoutNote } from '../brain/layout.js';
 import type { Db } from '../db/client.js';
-import { clubProfile, clubs, opsEvents, tables, zones, type ClubSettings } from '../db/schema.js';
+import { clubProfile, clubs, GUEST_FIELDS, opsEvents, tables, zones, type ClubSettings } from '../db/schema.js';
 import { newId } from '../lib/util.js';
 import {
   auditClubChange,
@@ -23,7 +23,7 @@ import {
 import { quotaView, type LineSetupDetail } from '../platform/health.js';
 import { clientIp, requireClubRole, type AuthEnv, type Role } from './auth.js';
 import { profileBody } from './admin/clubs.js';
-import { freshTotpRefusal, jsonBody, notifyStaffGroup } from './admin/controls.js';
+import { freshTotpRefusal, jsonBody, notifyOwners } from './admin/controls.js';
 import type { AppContext } from './context.js';
 
 const MANAGER_ROLES: Role[] = ['owner', 'manager'];
@@ -55,15 +55,25 @@ export const SETTINGS_FIELD_CODES: Record<string, string> = {
   address: 'address',
   drinksMenuUrl: 'menu',
   urgentWords: 'words',
+  sameNightCutoffHour: 'cutoff',
+  maxBookingsPerGuestPerNight: 'per_night',
   greeting: 'greeting',
   mapUrl: 'map',
+  // PATCH /policy (its own route, so neither form's codes pass the 64-character limit).
+  arrivalGraceMinutes: 'grace',
+  reminderTime: 'remind',
+  cancellationPolicy: 'cancel',
+  requiredFields: 'fields',
+  tone: 'tone',
+  hostHours: 'hosts',
+  afterVisitMessage: 'after',
 };
 
 const settingsBody = z
   .object({
     openWeekdays: z.array(z.number().int().min(0).max(6)).max(7),
     bookingWindowDays: z.number().int().min(1).max(365),
-    holdMinutes: z.number().int().min(5).max(120),
+    holdMinutes: z.number().int().min(5).max(30), // §7.2: 5–30
     arrivalBy: hhmm,
     handoffTimeoutMinutes: z.number().int().min(5).max(240),
     accentColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
@@ -72,6 +82,24 @@ const settingsBody = z
     drinksMenuUrl: z.string().url().max(2000),
     // B19b: complaint and safety words (§6.4); an empty list falls back to the platform list.
     urgentWords: z.array(z.string().trim().min(2).max(60)).max(200),
+    // Spec §7.2: the same-night cut-off hour (after midnight, before the night ends) and the per-night limit.
+    sameNightCutoffHour: z.number().int().min(0).max(12),
+    maxBookingsPerGuestPerNight: z.number().int().min(1).max(10),
+  })
+  .partial()
+  .strict()
+  .refine((b) => Object.keys(b).length > 0, { message: 'nothing to change' });
+
+/** §6.2 Settings, Rules and Bot content keys beyond the booking rules (PATCH /clubs/:slug/policy). */
+const policyBody = z
+  .object({
+    arrivalGraceMinutes: z.number().int().min(0).max(180),
+    reminderTime: hhmm,
+    cancellationPolicy: z.object({ en: z.string().trim().max(500), th: z.string().trim().max(500) }),
+    requiredFields: z.array(z.enum(GUEST_FIELDS)).max(GUEST_FIELDS.length),
+    tone: z.enum(['formal', 'casual']),
+    hostHours: z.object({ from: hhmm, to: hhmm }).nullable(),
+    afterVisitMessage: z.boolean(),
   })
   .partial()
   .strict()
@@ -158,6 +186,20 @@ export function staffSettingsRoutes(app: AppContext) {
     return c.json({ settings });
   });
 
+  // Grace period, reminder time, cancellation policy, required guest fields, tone, host hours and the
+  // after-visit message (spec §6.2 Settings: Rules and Bot content).
+  r.patch('/clubs/:slug/policy', managers, async (c) => {
+    const parsed = policyBody.safeParse(await jsonBody(c));
+    if (!parsed.success) return c.json({ error: 'invalid', issues: issues(parsed.error) }, 400);
+    const { hostHours, requiredFields, ...rest } = parsed.data;
+    const patch: Partial<ClubSettings> = { ...rest };
+    if (requiredFields) patch.requiredFields = [...new Set(requiredFields)];
+    // null clears host hours (hosts always available).
+    if (hostHours !== undefined) patch.hostHours = hostHours ?? undefined;
+    const settings = await saveSettings(c, db, patch, 'club.settings_changed');
+    return c.json({ settings });
+  });
+
   // ----- Sensitive changes: fresh TOTP, audit, staff-group notice (spec §12.3) -----
   r.put('/clubs/:slug/promptpay', managers, async (c) => {
     const club = c.var.club;
@@ -171,7 +213,7 @@ export function staffSettingsRoutes(app: AppContext) {
     await db.update(clubs).set(after).where(eq(clubs.id, club.id));
     await auditClubChange(db, club, actorOf(c), { action: 'club.promptpay_changed', entity: 'clubs', entityId: club.id, before: { promptpayId: club.promptpayId, promptpayName: club.promptpayName }, after }, now);
     await clubChangeEvent(db, club, actorOf(c), now, { type: 'club.settings_changed', props: { fields: 'promptpay' } });
-    await notifyStaffGroup(app, club, `PromptPay ID changed by ${c.var.user.name ?? 'a manager'} to the account ending ${after.promptpayId.slice(-4)}. Deposits now go to this account. If the owner did not expect this, change it back in Settings now.`);
+    await notifyOwners(app, club, `PromptPay ID changed by ${c.var.user.name ?? 'a manager'} to the account ending ${after.promptpayId.slice(-4)}. Deposits now go to this account. If the owner did not expect this, change it back in Settings now.`);
     return c.json({ ok: true, promptpayEnding: after.promptpayId.slice(-4) });
   });
 
@@ -186,7 +228,7 @@ export function staffSettingsRoutes(app: AppContext) {
     if (parsed.data.greeting) patch.greeting = parsed.data.greeting;
     if (parsed.data.mapUrl) patch.mapUrl = parsed.data.mapUrl;
     await saveSettings(c, db, patch, 'club.greeting_changed');
-    await notifyStaffGroup(app, club, `The greeting message or map link was changed by ${c.var.user.name ?? 'a manager'}.`);
+    await notifyOwners(app, club, `The greeting message or map link was changed by ${c.var.user.name ?? 'a manager'}.`);
     return c.json({ ok: true });
   });
 

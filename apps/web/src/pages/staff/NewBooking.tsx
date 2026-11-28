@@ -12,7 +12,7 @@ export function NewBooking() {
   const [params] = useSearchParams();
   const [date, setDate] = useState(params.get('date') ?? '');
   const [tables, setTables] = useState<TableRow[]>([]);
-  const [form, setForm] = useState({ tableId: params.get('table') ?? '', pax: 4, name: '', phone: '', notes: '', depositPaid: false });
+  const [form, setForm] = useState({ tableId: params.get('table') ?? '', pax: 4, name: '', phone: '', notes: '', depositPaid: false, kind: 'phone' as 'phone' | 'walkin', guestId: params.get('guest') ?? '', sendLineConfirmation: true });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -31,7 +31,7 @@ export function NewBooking() {
     setBusy(true);
     setError('');
     try {
-      const res = await api<{ id: string }>(staffPath(club, '/bookings'), { body: { ...form, nightDate: date } });
+      const res = await api<{ id: string }>(staffPath(club, '/bookings'), { body: { ...form, guestId: form.guestId || undefined, nightDate: date } });
       navigate(`/staff/bookings/${res.id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not create the booking');
@@ -71,6 +71,19 @@ export function NewBooking() {
         <label htmlFor="notes">Notes (promoter, VIP, special requests)</label>
         <textarea id="notes" className="input" rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
       </div>
+      <div className="field">
+        <label htmlFor="kind">Booked by</label>
+        <select id="kind" className="input" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as 'phone' | 'walkin' })}>
+          <option value="phone">Phone call</option>
+          <option value="walkin">Walk-in</option>
+        </select>
+      </div>
+      {form.guestId && (
+        <label className="check">
+          <input type="checkbox" checked={form.sendLineConfirmation} onChange={(e) => setForm({ ...form, sendLineConfirmation: e.target.checked })} />
+          <span>Send the guest a LINE confirmation</span>
+        </label>
+      )}
       <label className="check">
         <input type="checkbox" checked={form.depositPaid} onChange={(e) => setForm({ ...form, depositPaid: e.target.checked })} />
         <span>Deposit already paid{selected ? ` (${selected.deposit})` : ''}</span>

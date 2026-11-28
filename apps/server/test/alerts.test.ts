@@ -181,6 +181,26 @@ describe('A15 alerts', () => {
     expect(row!.textTh).toContain(`${z1.nameTh} 2`);
   });
 
+  it('the Tonight page totals deposits collected and minimum spend booked (spec §6.2)', async () => {
+    const ts = await db.select().from(tables).where(eq(tables.clubId, clubA.id));
+    const guest = await makeGuest(db, { clubId: clubA.id });
+    const book = async (tableId: string, status: 'confirmed' | 'cancelled', minSpend: number, deposit?: number) => {
+      const id = newId();
+      await db.insert(bookings).values({
+        id, clubId: clubA.id, guestId: guest.id, tableId, nightDate: '2026-11-27', pax: 4, status, source: 'line',
+        refCode: `N${id.slice(0, 6)}`, minSpendSatang: minSpend, depositSatang: deposit ?? 0,
+      } as typeof bookings.$inferInsert);
+      if (deposit) await db.insert(deposits).values({ id: newId(), clubId: clubA.id, bookingId: id, amountSatang: deposit, method: 'promptpay_slip', status: 'verified' });
+    };
+    await book(ts[0]!.id, 'confirmed', 1_000_000, 300_000);
+    await book(ts[1]!.id, 'confirmed', 2_000_000);
+    await book(ts[2]!.id, 'cancelled', 5_000_000, 500_000); // not counted
+    const host = await staffCookie(app, clubA, 'host');
+    const res = await app.app.request(staffUrl(clubA.slug, '/night?date=2026-11-27'), { headers: { cookie: host } });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { totals: unknown }).totals).toEqual({ depositsCollected: '฿3,000', minSpendBooked: '฿30,000' });
+  });
+
   it('a LINE disconnect is found by the timed probe, with no setup row written by hand', async () => {
     const line = { ok: true, quota: { used: 10, limit: 500 } };
     const probed = createApp(testConfig({ PUBLIC_URL: 'https://club.test' }), db, {
@@ -254,6 +274,15 @@ describe('A15 alerts', () => {
     const staffMsgs = await db.select().from(messages).where(and(eq(messages.clubId, clubA.id), eq(messages.target, 'staff')));
     expect(staffMsgs).toHaveLength(1);
     expect(pushes).toHaveLength(0);
+  });
+
+  it("a paused club's dashboard is read-only: reads work, writes answer 403 club_paused (spec §12.3)", async () => {
+    const manager = await staffCookie(app, clubA, 'manager');
+    await db.update(clubs).set({ status: 'paused' }).where(eq(clubs.id, clubA.id));
+    expect((await app.app.request(staffUrl(clubA.slug, '/alert-settings'), json(manager))).status).toBe(200);
+    const res = await app.app.request(staffUrl(clubA.slug, '/alert-settings'), json(manager, 'PUT', { infoToLine: true }));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'club_paused' });
   });
 
   it('the per-club "also send to LINE" switch sends info alerts to the staff group', async () => {

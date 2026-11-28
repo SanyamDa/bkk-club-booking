@@ -5,6 +5,7 @@ import type { Db } from '../../db/client.js';
 import { auditLog, clubs, platformFlags, sessions, users, type Club } from '../../db/schema.js';
 import { newId } from '../../lib/util.js';
 import type { LineGateway, Message } from '../../line/gateway.js';
+import { raiseAlert } from '../../platform/alerts.js';
 import { featureSwitches, featuresFlagKey, isFeatureKey } from '../../platform/features.js';
 import { GLOBAL_STOP_FLAG } from '../../platform/support.js';
 import { base32Decode, verifyTotp } from '../../platform/totp.js';
@@ -96,6 +97,22 @@ export async function notifyStaffGroup(app: AppContext, club: Club, text: string
     await app.deps.outbox.toStaff(gateway, club, messages);
   } catch (err) {
     app.deps.log(`Staff notice for club ${club.id} was not recorded`, err);
+  }
+}
+
+/**
+ * Spec §12.3 "three sensitive changes" (PromptPay, greeting/map, LINE credentials) notify the club's
+ * owner. The staff group gets the text (when linked), and the club's feed gets a `needs_input`
+ * alert addressed to the owner that stays until someone resolves it, so the notice is seen even
+ * before a staff group is linked (onboarding). There is no email sender and staff accounts hold no
+ * LINE user id on the club's provider, so the dashboard feed is the owner's direct channel.
+ */
+export async function notifyOwners(app: AppContext, club: Club, text: string) {
+  await notifyStaffGroup(app, club, text);
+  try {
+    await raiseAlert(app.deps.db, { clubId: club.id, level: 'needs_input', kind: 'sensitive_change', text: { en: `For the owner: ${text}`, th: `ถึงเจ้าของร้าน: ${text}` } }, app.deps.now());
+  } catch (err) {
+    app.deps.log(`Owner notice for club ${club.id} was not recorded`, err);
   }
 }
 
@@ -211,7 +228,7 @@ export function controlsRoutes(app: AppContext) {
     const after = { promptpayId: parsed.data.promptpayId, promptpayName: parsed.data.promptpayName ?? club.promptpayName };
     await db.update(clubs).set(after).where(eq(clubs.id, club.id));
     await adminAudit(db, c, { clubId: club.id, action: 'club.promptpay_changed', entity: 'clubs', entityId: club.id, before: { promptpayId: club.promptpayId, promptpayName: club.promptpayName }, after }, now);
-    await notifyStaffGroup(app, club, `PromptPay ID changed by the platform team to ending ${after.promptpayId.slice(-4)}. Deposits now go to this account.`);
+    await notifyOwners(app, club, `PromptPay ID changed by the platform team to ending ${after.promptpayId.slice(-4)}. Deposits now go to this account.`);
     return c.json({ ok: true });
   });
 
@@ -239,7 +256,7 @@ export function controlsRoutes(app: AppContext) {
       },
       now,
     );
-    await notifyStaffGroup(app, club, 'The greeting message or map link was changed by the platform team.');
+    await notifyOwners(app, club, 'The greeting message or map link was changed by the platform team.');
     return c.json({ ok: true });
   });
 

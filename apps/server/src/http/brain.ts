@@ -3,6 +3,8 @@ import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { BRAIN_TOKEN_CAP, BRAIN_TOKEN_WARN, BrainCapError, latestSnapshot } from '../brain/compile.js';
 import { listGaps } from '../brain/gaps.js';
+import { exportObsidianFolder } from '../brain/export.js';
+import { importObsidianFolder, importPastedText } from '../brain/import.js';
 import { BrainLintError } from '../brain/lint.js';
 import { approveNote, createNote, listNotes, noteVersions, rejectNote, updateNote } from '../brain/notes.js';
 import { brainNotes, type BrainNote } from '../db/schema.js';
@@ -166,5 +168,27 @@ export function brainRoutes(app: AppContext) {
     return c.json({ note: view(await rejectNote(db, club.id, note.id, actorOf(c), app.deps.now())) });
   });
 
+  // Spec §8.2 seeding, §10 Phase 2 baseline: the brain as an Obsidian folder (one markdown file per
+  // note), imported back as drafts, and pasted text split into draft FAQ notes. Imports are drafts.
+  r.get(`${base}/export`, managers, async (c) => c.json({ files: await exportObsidianFolder(db, c.var.club.id) }));
+
+  r.post(`${base}/import`, managers, async (c) => {
+    const body = folderBody.safeParse(await c.req.json().catch(() => null));
+    if (!body.success) return c.json({ error: 'bad_request' }, 400);
+    return c.json(await importObsidianFolder(db, c.var.club.id, body.data.files, actorOf(c), app.deps.now()));
+  });
+
+  r.post(`${base}/import-text`, managers, async (c) => {
+    const body = textBody.safeParse(await c.req.json().catch(() => null));
+    if (!body.success) return c.json({ error: 'bad_request' }, 400);
+    const res = await importPastedText(db, c.var.club.id, body.data.text, actorOf(c), app.deps.now());
+    return c.json({ created: res.created.map(view), rejected: res.rejected });
+  });
+
   return r;
 }
+
+const folderBody = z.object({
+  files: z.array(z.object({ path: z.string().trim().min(1).max(300), content: z.string().max(50_000) })).min(1).max(500),
+});
+const textBody = z.object({ text: z.string().trim().min(1).max(50_000) });

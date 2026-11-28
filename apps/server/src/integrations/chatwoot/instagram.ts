@@ -3,6 +3,7 @@ import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from '../../db/client.js';
 import { channels, conversations, guests, messages, platformFlags, type Club } from '../../db/schema.js';
+import { endOpenEpisode, recordStaffReply } from '../../chat/episodes.js';
 import { emit } from '../../data/events.js';
 import { isTestContext } from '../../data/test-flag.js';
 import { newId } from '../../lib/util.js';
@@ -108,7 +109,7 @@ export async function connectInstagram(
     const res = await cw.request<{ id?: number; payload?: { webhook?: { id: number } } }>(
       'POST',
       `/api/v1/accounts/${accountId}/webhooks`,
-      { url: instagramWebhookUrl(opts.publicUrl, club.id, token), subscriptions: ['message_created'] },
+      { url: instagramWebhookUrl(opts.publicUrl, club.id, token), subscriptions: ['message_created', 'conversation_status_changed'] },
       adminToken,
     );
     state.webhookId = res.payload?.webhook?.id ?? res.id;
@@ -152,7 +153,7 @@ const messageCreated = z.object({
   account: z.object({ id: z.union([z.number(), z.string()]) }).passthrough(),
 });
 
-export type InstagramApplied = 'recorded' | 'duplicate' | 'ignored';
+export type InstagramApplied = 'recorded' | 'duplicate' | 'ignored' | 'resolved';
 
 const occurredAt = (v: string | number | null | undefined, fallback: Date) => {
   if (v === null || v === undefined) return fallback;
@@ -168,20 +169,33 @@ const occurredAt = (v: string | number | null | undefined, fallback: Date) => {
  * a redelivery (same Chatwoot message id) is a duplicate.
  *
  * Writing `guests` / `conversations` / `messages` is B's domain (chat capture). This is a direct
- * write until B publishes a messages writer; see the Track A sync file.
+ * write until B publishes a messages writer; see the Track A sync file. A recorded message's id is
+ * returned so the caller can answer it (`answerInstagramMessage`, B16 on Instagram).
  */
-export async function recordInstagramMessage(db: Db, club: Club, state: InstagramState, body: unknown, now: Date): Promise<InstagramApplied> {
+export async function recordInstagramMessage(
+  db: Db,
+  club: Club,
+  state: InstagramState,
+  body: unknown,
+  now: Date,
+): Promise<{ applied: InstagramApplied; messageId?: string }> {
   const cwState = await chatwootState(db, club.id);
+  if (!cwState?.accountId) return { applied: 'ignored' };
+  const status = statusChanged.safeParse(body);
+  if (status.success) return resolveInstagramConversation(db, club, state, cwState.accountId, status.data, now);
   const parsed = messageCreated.safeParse(body);
-  if (!parsed.success || !cwState?.accountId) return 'ignored';
+  if (!parsed.success) return { applied: 'ignored' };
   const p = parsed.data;
-  if (String(p.account.id) !== String(cwState.accountId) || String(p.inbox.id) !== String(state.inboxId)) return 'ignored';
-  if (!(p.message_type === 'incoming' || p.message_type === 0) || p.private) return 'ignored';
+  if (String(p.account.id) !== String(cwState.accountId) || String(p.inbox.id) !== String(state.inboxId)) return { applied: 'ignored' };
+  if (p.private) return { applied: 'ignored' };
+  const outgoing = p.message_type === 'outgoing' || p.message_type === 1;
+  if (!outgoing && !(p.message_type === 'incoming' || p.message_type === 0)) return { applied: 'ignored' };
 
   const [channel] = await db.select().from(channels).where(and(eq(channels.clubId, club.id), eq(channels.kind, 'instagram'))).limit(1);
-  if (!channel) return 'ignored';
+  if (!channel) return { applied: 'ignored' };
+  if (outgoing) return recordInstagramHostReply(db, club, channel.id, cwState, p, now);
   const contactId = p.conversation.contact_inbox?.source_id ?? (p.sender?.id != null ? `cw-contact:${p.sender.id}` : null);
-  if (!contactId) return 'ignored';
+  if (!contactId) return { applied: 'ignored' };
 
   const isTest = club.status === 'demo';
   const at = occurredAt(p.created_at, now);
@@ -191,7 +205,7 @@ export async function recordInstagramMessage(db: Db, club: Club, state: Instagra
 
   return db.transaction(async (tx) => {
     const seen = await tx.select({ id: messages.id }).from(messages).where(and(eq(messages.clubId, club.id), eq(messages.externalId, externalId))).limit(1);
-    if (seen.length) return 'duplicate' as const;
+    if (seen.length) return { applied: 'duplicate' as const };
 
     let guest = await tx.query.guests.findFirst({ where: and(eq(guests.clubId, club.id), eq(guests.channelId, channel.id), eq(guests.externalUserId, contactId)) });
     let newGuest = false;
@@ -229,7 +243,7 @@ export async function recordInstagramMessage(db: Db, club: Club, state: Instagra
       })
       .onConflictDoNothing()
       .returning({ id: messages.id });
-    if (!inserted.length) return 'duplicate' as const;
+    if (!inserted.length) return { applied: 'duplicate' as const };
 
     const base = { clubId: club.id, actorType: 'guest' as const, channel: INSTAGRAM_CHANNEL, dataOrigin: 'instagram' as const, source: 'chatwoot', guestId: g.id, conversationId: c.id, isTest: isTestContext({ club, guest: g }) };
     if (newGuest) await emit(tx, { ...base, type: 'guest.first_seen', occurredAt: at, dedupeKey: `ig:first_seen:${g.id}` });
@@ -241,6 +255,88 @@ export async function recordInstagramMessage(db: Db, club: Club, state: Instagra
       raw: body,
       dedupeKey: `ig:msg:${externalId}`,
     });
-    return 'recorded' as const;
+    return { applied: 'recorded' as const, messageId: inserted[0]!.id };
   });
+}
+
+/** The fields of Chatwoot's `conversation_status_changed` webhook we read. */
+const statusChanged = z.object({
+  event: z.literal('conversation_status_changed'),
+  id: z.union([z.number(), z.string()]),
+  display_id: z.union([z.number(), z.string()]).nullish(),
+  status: z.string(),
+  inbox_id: z.union([z.number(), z.string()]).nullish(),
+  account_id: z.union([z.number(), z.string()]).nullish(),
+  account: z.object({ id: z.union([z.number(), z.string()]) }).passthrough().nullish(),
+  inbox: z.object({ id: z.union([z.number(), z.string()]) }).passthrough().nullish(),
+});
+
+/**
+ * Chatwoot's resolve button on an Instagram conversation ends the takeover (spec §6.3), as the LINE
+ * API inbox callback does. Only the club's own account and Instagram inbox count.
+ */
+async function resolveInstagramConversation(
+  db: Db,
+  club: Club,
+  state: InstagramState,
+  accountId: number,
+  b: z.infer<typeof statusChanged>,
+  now: Date,
+): Promise<{ applied: InstagramApplied }> {
+  if (b.status !== 'resolved') return { applied: 'ignored' };
+  const account = b.account?.id ?? b.account_id;
+  const inbox = b.inbox?.id ?? b.inbox_id;
+  if (String(account) !== String(accountId) || String(inbox) !== String(state.inboxId)) return { applied: 'ignored' };
+  const conv = await db.query.conversations.findFirst({
+    where: and(eq(conversations.clubId, club.id), eq(conversations.externalRef, chatwootConversationRef(accountId, b.display_id ?? b.id))),
+  });
+  if (!conv) return { applied: 'ignored' };
+  await db.transaction((tx) => endOpenEpisode(tx, { clubId: club.id, conversationId: conv.id, resolverUserId: 'chatwoot', actor: { type: 'staff' }, now }));
+  return { applied: 'resolved' };
+}
+
+/**
+ * A host's reply to an Instagram guest, typed in Chatwoot or in the Instagram app (Chatwoot shows
+ * both as outgoing). Instagram already delivered it, so it is only recorded: a `direction='out'`,
+ * `author_type='staff'` row, the takeover (started if the bot had the chat) and `host.replied`, through
+ * B14b's `recordStaffReply`. The handoff timeout and the learning loop then see the host's activity.
+ * Our own bot posts (Agent Bot, or the platform admin user) are ignored; their rows already exist,
+ * and a redelivery is deduped on the Chatwoot message id.
+ */
+async function recordInstagramHostReply(
+  db: Db,
+  club: Club,
+  channelId: string,
+  cwState: { accountId?: number; adminUserId?: number },
+  p: z.infer<typeof messageCreated>,
+  now: Date,
+): Promise<{ applied: InstagramApplied }> {
+  const text = (p.content ?? '').trim();
+  if (!text) return { applied: 'ignored' };
+  const senderType = String(p.sender?.type ?? '').toLowerCase();
+  if (senderType === 'agent_bot' || senderType === 'agentbot') return { applied: 'ignored' };
+  const senderId = p.sender?.id != null ? String(p.sender.id) : null;
+  if (senderId && cwState.adminUserId != null && senderId === String(cwState.adminUserId)) return { applied: 'ignored' };
+  const externalId = `cw:${cwState.accountId}:${p.id}`;
+  const [seen] = await db.select({ id: messages.id }).from(messages).where(and(eq(messages.clubId, club.id), eq(messages.externalId, externalId))).limit(1);
+  if (seen) return { applied: 'duplicate' };
+  const conv = await db.query.conversations.findFirst({
+    where: and(eq(conversations.clubId, club.id), eq(conversations.externalRef, chatwootConversationRef(cwState.accountId!, p.conversation.id))),
+  });
+  if (!conv) return { applied: 'ignored' };
+  await recordStaffReply(
+    db,
+    {
+      clubId: club.id,
+      conversationId: conv.id,
+      userId: senderId ? `chatwoot:${senderId}` : 'instagram',
+      text: text.slice(0, 5000),
+      channel: 'chatwoot',
+      occurredAt: occurredAt(p.created_at, now),
+      externalId,
+      channelId,
+    },
+    null,
+  );
+  return { applied: 'recorded' }; // no messageId: a host's reply is never answered by the bot
 }

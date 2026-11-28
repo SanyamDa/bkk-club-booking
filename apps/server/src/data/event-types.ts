@@ -63,7 +63,9 @@ export const EVENT_DECLARATIONS = {
   'night.rejected': { v: 1, area: 'Demand', description: 'Guest picked a night that cannot be booked.', props: { reason: N } },
   'pax.selected': { v: 1, area: 'Demand', description: 'Guest picked a party size range (paxRangeCode).', props: { pax_range: N } },
   'availability.searched': { v: 1, area: 'Demand', description: 'Table search, including zero results.', props: { night_date: N, pax_range: N, result_count: N, tables_shown: N } },
-  'night.sold_out_shown': { v: 1, area: 'Demand', description: 'Guest was shown a full night.', props: { pax_range: N } },
+  // Shown at the night step, before the party size is asked, so it has no pax range. The pax split of
+  // sold-out demand is the zero-result `availability.searched` that follows the pax step.
+  'night.sold_out_shown': { v: 1, area: 'Demand', description: 'Guest was shown a full night (no pax range: shown before the party size step).', props: {} },
   'waitlist.joined': { v: 1, area: 'Demand', description: 'Guest joined the waitlist for a night.', props: { pax_range: N } },
   'waitlist.offered': { v: 1, area: 'Demand', description: 'A freed table was offered to a waitlisted guest (B22).', props: { pax_range: N } },
   'preorder.placed': { v: 1, area: 'Booking', description: 'Guest or staff set a bottle pre-order on a booking (B22).', props: { item_count: N, total_satang: N } },
@@ -123,7 +125,7 @@ export const EVENT_DECLARATIONS = {
   'support.session_started': { v: 1, area: 'Staff and platform', description: 'Platform support session started.', props: { supportGrantId: P, mode: N } },
   'support.session_ended': { v: 1, area: 'Staff and platform', description: 'Platform support session ended.', props: { supportGrantId: P, mode: N } },
   'club.created': { v: 1, area: 'Staff and platform', description: 'Club created from the console.', props: { template: N } },
-  'club.settings_changed': { v: 1, area: 'Staff and platform', description: 'Club settings changed; changed fields as short codes (days, window, hold, arrival, handoff, accent, rules, address, menu, greeting, map, promptpay, zones, tables, profile) joined with ":".', props: { fields: N } },
+  'club.settings_changed': { v: 1, area: 'Staff and platform', description: 'Club settings changed; changed fields as short codes (days, window, hold, arrival, handoff, accent, rules, address, menu, words, greeting, map, grace, remind, cancel, tone, after, fields, hosts, promptpay, zones, tables, profile) joined with ":".', props: { fields: N } },
   'club.price_changed': {
     v: 1,
     area: 'Staff and platform',
@@ -136,6 +138,12 @@ export const EVENT_DECLARATIONS = {
 
   // Internal (beyond the §14.2 table)
   'booking.status_changed': { v: 1, area: 'Internal', description: 'Every booking status change (B2); the row the nightly check matches on.', props: { from: N, to: N, reason_code: N }, raw: 'personal' },
+  'booking.changed': {
+    v: 1,
+    area: 'Internal',
+    description: 'Booking changed without a status change (§6.2, §5.3): field pax, table, night or notes, with the old values.',
+    props: { field: N, from_pax: N, to_pax: N, from_table_id: P, from_night: N },
+  },
   'link.opened': { v: 1, area: 'Internal', description: 'Tagged redirect link tapped (B4).', props: { kind: N } },
   'guest.removal_requested': { v: 1, area: 'Internal', description: 'Guest asked for their data to be removed (B10b).', props: {} },
   'guest.removed': { v: 1, area: 'Internal', description: 'Guest data removal job finished (B10b).', props: {} },

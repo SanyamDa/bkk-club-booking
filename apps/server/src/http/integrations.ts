@@ -1,10 +1,12 @@
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { alertBotError } from '../bot/alerts.js';
 import { errorText, markRawError, markRawProcessed, rawBody, recordRawWebhook } from '../data/raw-webhooks.js';
 import { clubs } from '../db/schema.js';
 import { applyCallback, checkCallback } from '../integrations/chatwoot/callback.js';
 import { instagramState, recordInstagramMessage, verifyInstagramToken } from '../integrations/chatwoot/instagram.js';
+import { answerInstagramMessage } from '../integrations/chatwoot/instagram-answer.js';
 import { applyLiveBill, loadPosAdapter } from '../integrations/pos/live.js';
 import { PAPAYA_SIGNATURE_HEADER } from '../integrations/pos/papaya.js';
 import { clientIp } from './auth.js';
@@ -87,14 +89,33 @@ export function integrationRoutes(app: AppContext) {
     const { body, parsed } = rawBody(await c.req.text());
     // B3's raw_webhooks writer: stored before processing, then marked processed or errored.
     const rawId = await recordRawWebhook(db, { clubId: club.id, channel: 'chatwoot:instagram', receivedAt: now, body, signatureOk: true });
+    let recorded: Awaited<ReturnType<typeof recordInstagramMessage>>;
     try {
-      const applied = await recordInstagramMessage(db, club, state, parsed, now);
+      recorded = await recordInstagramMessage(db, club, state, parsed, now);
       await markRawProcessed(db, rawId, now);
-      return c.json({ ok: true, applied });
     } catch (err) {
       await markRawError(db, rawId, errorText(err));
       throw err;
     }
+    // B16 on Instagram: answer from the club's brain, back through Chatwoot. The message is already
+    // stored, so a failure here is logged and alerted, never a 500 that makes Chatwoot redeliver.
+    let answer: string | undefined;
+    if (recorded.messageId) {
+      const deps = app.deps;
+      try {
+        answer = await answerInstagramMessage(
+          { db, ai: deps.ai, cw: app.chatwoot, key: app.config.CREDENTIALS_KEY, links: deps.links, log: deps.log },
+          club,
+          recorded.messageId,
+          now,
+        );
+      } catch (err) {
+        deps.log(`Instagram answer failed for club ${club.id}`, err);
+        await alertBotError(db, club.id, now);
+        answer = 'error';
+      }
+    }
+    return c.json({ ok: true, applied: recorded.applied, ...(answer ? { answer } : {}) });
   });
 
   r.post('/pos/papaya/:slug', bodyLimit({ maxSize: 256 * 1024, onError: (c) => c.json({ error: 'too_large' }, 413) }), async (c) => {

@@ -38,7 +38,7 @@ export class Notifier {
       M.confirmation(c.club, c.lang, c.view, this.deps.links.pass(c.view.booking), this.deps.links),
       // B22: [Pre-order bottles] when the club has an active bottle menu.
       ...((await listMenu(this.deps.db, c.club.id, { activeOnly: true })).length ? [M.preorderPrompt(c.lang, c.view.booking.id)] : []),
-    ]);
+    ], undefined, undefined, { booking: { id: c.view.booking.id } });
     // B19b: a new confirmed booking is information (§6.4): the feed, and LINE only if the club switched it on.
     await alertBookingConfirmed(this.deps.db, c.view, this.deps.now());
   }
@@ -58,7 +58,7 @@ export class Notifier {
     if (!c) return;
     await this.deps.outbox.toGuest(c.gateway, c.club, c.view.guest, [
       M.plain(t(c.lang, 'paymentRejected', { ref: c.view.booking.refCode })),
-    ]);
+    ], undefined, undefined, { booking: { id: c.view.booking.id } });
   }
 
   /** `reasonText` is the free text shown to the guest, not a reason code. */
@@ -73,7 +73,7 @@ export class Notifier {
           reason: reasonText,
         }),
       ),
-    ]);
+    ], undefined, undefined, { booking: { id: c.view.booking.id } });
     // B19b: a cancellation is information (§6.4).
     await alertCancellation(this.deps.db, c.view, this.deps.now());
   }
@@ -85,14 +85,26 @@ export class Notifier {
       M.plain(t(c.lang, 'holdExpired', { code: c.view.table.code, night: formatNight(booking.nightDate, c.lang) }), [
         M.quickPostback(t(c.lang, 'tryAgain'), { a: 'book', s: 'retry_book' }),
       ]),
-    ]);
+    ], undefined, undefined, { booking: { id: booking.id, optional: true } }); // §11.1.4: within the push budget
   }
 
   /** B10: day-of reminder with [Running late] [Need to cancel] [Location]. A push (counts against quota). */
   async reminder(booking: Booking) {
     const c = await this.ctx(booking.clubId, booking.id);
     if (!c) return;
-    await this.deps.outbox.toGuest(c.gateway, c.club, c.view.guest, [M.reminder(c.club, c.lang, c.view)]);
+    // §11.1.4: the reminder is one of the booking's budgeted pushes.
+    await this.deps.outbox.toGuest(c.gateway, c.club, c.view.guest, [M.reminder(c.club, c.lang, c.view, this.deps.links)], undefined, undefined, {
+      booking: { id: booking.id, optional: true },
+    });
+  }
+
+  /** §5.2 step 10: the optional next-day "Thanks for coming" [Book again]. A push (counts against quota). */
+  async afterVisit(booking: Booking) {
+    const c = await this.ctx(booking.clubId, booking.id);
+    if (!c) return;
+    await this.deps.outbox.toGuest(c.gateway, c.club, c.view.guest, [
+      M.plain(t(c.lang, 'afterVisit', { club: c.club.name }), [M.quickPostback(t(c.lang, 'bookAgain'), { a: 'book', s: 'after_visit' })]),
+    ]);
   }
 
   /**

@@ -211,3 +211,32 @@ describe('B19 brain manager UI', () => {
     expect(notes.some((n: { id: string }) => n.id === note.id)).toBe(false);
   });
 });
+
+describe('brain export and import routes (spec §8.2, §10 Phase 2 baseline)', () => {
+  it('exports the brain as a folder, imports a folder and pasted text back as drafts, managers only', async () => {
+    const manager = await staffCookie(app, clubA, 'manager');
+    await createNote(db, { clubId: clubA.id, title: 'Dress code', type: 'policy', bodyMd: 'Smart casual. No flip-flops.', source: 'manual', status: 'live' }, actor, NOW);
+    const exp = await req(manager, clubA, '/export');
+    expect(exp.status).toBe(200);
+    const { files } = (await exp.json()) as { files: { path: string; content: string }[] };
+    const dress = files.find((f) => f.content.includes('No flip-flops'));
+    expect(dress).toBeTruthy();
+
+    // Imported into club B, the folder becomes drafts there.
+    const managerB = await staffCookie(app, clubB, 'manager');
+    const imp = await req(managerB, clubB, '/import', 'POST', { files: [dress] });
+    expect(imp.status).toBe(200);
+    expect((await imp.json()).created).toBe(1);
+    const bNotes = await db.select().from(brainNotes).where(eq(brainNotes.clubId, clubB.id));
+    expect(bNotes.map((n) => n.status)).toEqual(['draft']);
+
+    const pasted = await req(manager, clubA, '/import-text', 'POST', { text: 'Parking\nValet parking is free after 21:00.\n\nAge\nGuests must be 20 or older.' });
+    expect(pasted.status).toBe(200);
+    const body = await pasted.json();
+    expect(body.created.map((n: { status: string }) => n.status)).toEqual(['draft', 'draft']);
+
+    const host = await staffCookie(app, clubA, 'host');
+    expect((await req(host, clubA, '/export')).status).toBe(403);
+    expect((await req(host, clubA, '/import-text', 'POST', { text: 'x' })).status).toBe(403);
+  });
+});

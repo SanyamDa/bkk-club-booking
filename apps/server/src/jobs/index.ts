@@ -9,6 +9,8 @@ import { runBrainExpiry, sendBrainDigests } from './brain-expiry.js';
 import { runHandoffTimeouts } from './handoff-timeout.js';
 import { runNightlyCheck } from './nightly-check.js';
 import { releaseNoShows } from './no-show.js';
+import { completeEndedNights } from './completion.js';
+import { sendAfterVisitMessages } from './after-visit.js';
 import { sendDueReminders } from './reminders.js';
 import { runNightsJob } from './nights.js';
 import { runRemovalRequests } from '../data/removal.js';
@@ -65,6 +67,14 @@ export function buildScheduler(ctx: AppContext, now: () => Date): Scheduler {
   });
   s.register('no-show', MINUTE, async (at) => {
     await releaseNoShows(ctx, at); // B10
+  });
+  // §7.1: arrived bookings become completed at the club's closing time + 2h.
+  s.register('completion', 15 * MINUTE, async (at) => {
+    await completeEndedNights(db, at);
+  });
+  // §5.2 step 10: the optional next-day "Thanks for coming" push.
+  s.register('after-visit', 15 * MINUTE, async (at) => {
+    await sendAfterVisitMessages(ctx, at);
   });
   // B10b: guest removal requests and retention (spec §14.9), daily and at start.
   s.register('removal', DAY, async (at) => {

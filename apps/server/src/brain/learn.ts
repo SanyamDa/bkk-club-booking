@@ -6,6 +6,7 @@ import { emit } from '../data/events.js';
 import { isTestContext } from '../data/test-flag.js';
 import { brainNotes, clubs, conversations, events, guests, handoffEpisodes, messages, platformFlags, users, type Club, type Guest, type HandoffEpisode } from '../db/schema.js';
 import { clubToday } from '../platform/club-settings.js';
+import { isFeatureOn } from '../platform/features.js';
 import type { ModelUsage } from './answer.js';
 import { latestSnapshot } from './compile.js';
 import { listGaps } from './gaps.js';
@@ -397,7 +398,9 @@ export type LearnOutcome =
   | 'one_off'
   | 'invalid'
   /** No model client configured (no `ANTHROPIC_API_KEY`): flagged, not drafted. */
-  | 'no_client';
+  | 'no_client'
+  /** A17b: the club's `learning_loop` switch is off. Claimed, so it is never drafted later; nothing flagged. */
+  | 'learning_off';
 
 export interface LearnRunResult {
   episodes: { episodeId: string; outcome: LearnOutcome; noteId?: string; flagged: string[] }[];
@@ -523,8 +526,14 @@ export async function runLearning(deps: { db: Db; client: LearnClient | null; lo
   const clubRows = await db.select().from(clubs).where(inArray(clubs.id, [...new Set(pending.map((e) => e.clubId))]));
   const clubById = new Map(clubRows.map((c) => [c.id, c]));
   const work: { episode: HandoffEpisode; club: Club; transcript: EpisodeTranscript | null; skip: LearnOutcome | null }[] = [];
+  const learningOn = new Map<string, boolean>();
+  for (const id of clubById.keys()) learningOn.set(id, await isFeatureOn(db, id, 'learning_loop'));
   for (const episode of pending) {
     const club = clubById.get(episode.clubId)!;
+    if (!learningOn.get(club.id)) {
+      work.push({ episode, club, transcript: null, skip: 'learning_off' });
+      continue;
+    }
     if (episode.endedBy !== 'staff') {
       work.push({ episode, club, transcript: null, skip: 'timed_out' });
       continue;
@@ -566,7 +575,7 @@ export async function runLearning(deps: { db: Db; client: LearnClient | null; lo
     db.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Db;
       if (!(await claimEpisode(tx, w.episode.id, { outcome }, now))) return null;
-      const flagged = await flagNotesBeforeTakeover(tx, w.club, w.episode, now);
+      const flagged = outcome === 'learning_off' ? [] : await flagNotesBeforeTakeover(tx, w.club, w.episode, now);
       let noteId: string | undefined;
       if (outcome === 'drafted' && draft) {
         noteId = await saveDraft(tx, w, draft, gapKeys, now);

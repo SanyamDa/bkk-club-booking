@@ -45,6 +45,11 @@ export class Links {
     return club.liffId ? `https://liff.line.me/${club.liffId}?${q}` : `${this.base()}/liff/details?${q}`;
   }
 
+  /** Spec §5.2 step 3: the night's floor plan (free and taken tables), a public page with no guest data. */
+  floor(club: Pick<Club, 'slug'>, nightDate: string) {
+    return `${this.base()}/liff/floor?club=${encodeURIComponent(club.slug)}&d=${nightDate}`;
+  }
+
   /** PromptPay QR image, or null in demo mode when the club has no PromptPay id. */
   promptpayQr(club: Club, booking: Pick<Booking, 'id'>) {
     if (!club.promptpayId) return null;
@@ -70,8 +75,11 @@ export class Links {
   }
 }
 
-/** B4: the link kinds `GET /r/:code` serves; each maps to a club setting in `http/redirect.ts`. */
-export const TRACKED_LINK_KINDS = ['map', 'drinks'] as const;
+/**
+ * B4: the link kinds `GET /r/:code` serves; each maps to a club setting in `http/redirect.ts`.
+ * A18: `line` opens the club's LINE account (its OA basic id), the link the bot sends on Instagram (§11.5).
+ */
+export const TRACKED_LINK_KINDS = ['map', 'drinks', 'line'] as const;
 export type TrackedLinkKind = (typeof TRACKED_LINK_KINDS)[number];
 
 /** `<kind>.<slug>.<entry>.<signature>`; slugs and entry tags never contain a dot. */

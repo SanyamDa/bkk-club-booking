@@ -68,6 +68,12 @@ export interface ClubSettings {
   runningLateExtendsRelease?: boolean;
   /** B10: the no-show job marks unarrived bookings no-show and releases the table (default true). */
   autoNoShow?: boolean;
+  /** Spec §7.2: same-night bookings close at this Bangkok hour after midnight (default 1, i.e. 01:00). */
+  sameNightCutoffHour?: number;
+  /** Spec §7.2: active bookings one guest may have on one night (default 1). */
+  maxBookingsPerGuestPerNight?: number;
+  /** Spec §11.1.4: push requests per booking before optional pushes are skipped (default 2). */
+  maxPushesPerBooking?: number;
   /**
    * B19b: the club's own complaint and safety words (Thai and English, spec §6.4, §8.1). Unset or
    * empty = the platform list `DEFAULT_URGENT_WORDS` in `bot/alerts.ts`.
@@ -75,7 +81,22 @@ export interface ClubSettings {
   urgentWords?: string[];
   /** B12: local hours (0-23) the "how full now?" prompt goes to the staff group. Unset = 22, 23, 0, 1. */
   crowdPromptHours?: number[];
+  /** §6.2 Rules: the cancellation policy shown before a guest cancels. Unset = the first house rule. */
+  cancellationPolicy?: { en: string; th: string };
+  /** §5.2 step 4: guest fields the details form requires beyond name and phone. Unset = ['nationality']. */
+  requiredFields?: GuestField[];
+  /** §5.4: the club's voice (formal ค่ะ/ครับ or casual), given to the AI. Unset = 'formal'. */
+  tone?: 'formal' | 'casual';
+  /** §5.3: when hosts answer chats, `HH:MM` Bangkok. Outside it the handoff reply says when hosts are online. Unset = always. */
+  hostHours?: { from: string; to: string };
+  /** §5.2 step 10: the next-day "Thanks for coming" [Book again] push to arrived guests. Default off. */
+  afterVisitMessage?: boolean;
 }
+
+/** Optional guest-details fields a club can make required (§5.2 step 4). Name and phone always are. */
+export const GUEST_FIELDS = ['nationality', 'birthDate', 'occasion'] as const;
+export type GuestField = (typeof GUEST_FIELDS)[number];
+export const DEFAULT_REQUIRED_FIELDS: GuestField[] = ['nationality'];
 
 export const clubs = pgTable('clubs', {
   id: text('id').primaryKey(),
@@ -267,7 +288,8 @@ export const deposits = pgTable(
     amountSatang: integer('amount_satang').notNull(),
     // 'gateway' (A20b): paid through a payment gateway; `slip_trans_ref` holds '<provider>:<chargeId>'.
     method: text('method').$type<'promptpay_slip' | 'cash' | 'waived' | 'manual' | 'gateway'>().notNull(),
-    status: text('status').$type<'pending' | 'review' | 'verified' | 'rejected'>().notNull(),
+    // 'forfeited' / 'refunded_manual' (§9): a verified deposit after a cancel with or without forfeit (§6.2).
+    status: text('status').$type<'pending' | 'review' | 'verified' | 'rejected' | 'forfeited' | 'refunded_manual'>().notNull(),
     slipPath: text('slip_path'),
     slipReceivedAt: timestamp('slip_received_at', { withTimezone: true }),
     slipTransRef: text('slip_trans_ref'),

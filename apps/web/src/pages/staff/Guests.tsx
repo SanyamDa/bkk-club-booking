@@ -68,6 +68,7 @@ function GuestPanel({ club, id, onChange }: { club: string; id: string; onChange
           <button key={t} className="btn small" title="Remove tag" onClick={() => void removeTag(t)}>{t.toUpperCase() === 'VIP' ? 'VIP' : t} ×</button>
         ))}
         {!p.tags.includes('vip') && <button className="btn small primary" onClick={() => void addTag('vip')}>Mark VIP</button>}
+        <a className="btn small" href={`/staff/new?guest=${encodeURIComponent(p.guest.id)}`}>Book for this guest</a>
       </div>
       <form className="row" onSubmit={(e) => void addTag(tag, e)}>
         <input className="input" placeholder="Add a tag" value={tag} onChange={(e) => setTag(e.target.value)} aria-label="New tag" />

@@ -6,7 +6,9 @@ import { compileSnapshot } from '../src/brain/compile.js';
 import { extractBookingDetails } from '../src/brain/extract.js';
 import { guardAnswer } from '../src/brain/guard.js';
 import { createNote } from '../src/brain/notes.js';
+import { aiUserContent } from '../src/brain/answer.js';
 import { aiCostCapKey } from '../src/platform/club-stats.js';
+import { featuresFlagKey } from '../src/platform/features.js';
 import { emit } from '../src/data/events.js';
 import { alerts, bookings, conversations, events, guests, handoffEpisodes, messages, platformFlags, tables } from '../src/db/schema.js';
 import { callCostUsdMicros, type ModelReply, type ModelRequest } from '../src/brain/answer.js';
@@ -32,6 +34,8 @@ beforeEach(async () => {
   model = fakeModelClient((req) => respond(req));
   app = createApp(config, ctx.db, { bot: { now: () => FRIDAY_AFTERNOON, log: () => {}, ai: model } });
   cookie = undefined;
+  // A17b: AI answers are off by default; these tests run with the club's switch on.
+  await ctx.db.insert(platformFlags).values({ key: featuresFlagKey(ctx.club.id), value: { ai_answers: true }, updatedBy: 'test', updatedAt: FRIDAY_AFTERNOON });
 });
 afterEach(async () => {
   await ctx.close();
@@ -95,6 +99,15 @@ async function setCap(usdMicros: number, spent: number) {
 }
 
 describe('B16 AI answers', () => {
+  it('ai_answers switch off (the default): free text gets the menu and no model call', async () => {
+    await ctx.db.delete(platformFlags).where(eq(platformFlags.key, featuresFlagKey(ctx.club.id)));
+    respond = () => reply({ answer: 'Dress code is smart casual.', topic: 'dress_code' });
+    await say('g0', 'what is the dress code');
+    expect(model.calls).toHaveLength(0);
+    expect((await outTexts('g0')).join('\n')).not.toContain('smart casual');
+    expect((await eventsOf('bot.fallback_menu')).length).toBe(1);
+  });
+
   it('guard strips invented price', async () => {
     // A non-booking topic: the answer is replaced by a handoff, and the gap is recorded.
     respond = () => reply({ answer: 'Sure, bring a cake! Minimum spend is ฿5,000 tonight.', topic: 'birthday_cake' });
@@ -175,6 +188,8 @@ describe('B16 AI answers', () => {
     expect(model.calls).toHaveLength(0); // deterministic pass, no tokens spent
     expect((await convOf('g1')).state).toEqual({ nightDate: SATURDAY, paxRange: '5-8', entry: 'text_intent', attemptId: expect.any(String) }); // B4: a typed request is an attempt
     expect((await lastOut('g1')).type).toBe('flex'); // straight to the table carousel
+    expect((await eventsOf('night.selected')).map((e) => e.nightDate)).toEqual([SATURDAY]);
+    expect(await eventsOf('pax.selected')).toHaveLength(1);
     expect(extractBookingDetails('โต๊ะ 6 คน เสาร์นี้ ใกล้ดีเจ', { today: '2026-11-27', tableCodes: [], zones: [] })).toEqual({ date: SATURDAY, pax: 6 });
   });
 
@@ -196,6 +211,9 @@ describe('B16 AI answers', () => {
     expect(model.calls).toHaveLength(0);
     const [b] = await ctx.db.select().from(bookings).where(eq(bookings.guestId, (await guestOf('g1')).id));
     expect(b).toMatchObject({ tableId: 'table_demo_17A', nightDate: SATURDAY, pax: 6, status: 'held' });
+    // B4b: the prefilled night and party size are funnel steps, recorded once each before the hold.
+    expect((await eventsOf('night.selected')).map((e) => e.nightDate)).toEqual([SATURDAY]);
+    expect((await eventsOf('pax.selected')).map((e) => e.props)).toEqual([{ pax_range: 'p5_8' }]);
   });
 
   it('tool ignores club id in model output', async () => {
@@ -250,6 +268,11 @@ describe('B16 AI answers', () => {
     expect(episodes.map((e) => ({ trigger: e.trigger, topic: e.topic }))).toEqual([{ trigger: 'ai_cost_cap', topic: 'ai_cost_cap' }]);
   });
 
+  it("the club's tone from Settings reaches the model (§5.4)", () => {
+    expect(aiUserContent('2026-11-27', 'th', 'hi', 'casual')).toContain('Club voice: casual');
+    expect(aiUserContent('2026-11-27', 'th', 'hi')).toContain('Club voice: formal');
+  });
+
   it('ai.answered logs note ids', async () => {
     const note = await createNote(
       ctx.db,
@@ -262,6 +285,7 @@ describe('B16 AI answers', () => {
     await say('g1', 'dress code?');
     expect(model.calls[0]!.brain).toContain('No flip-flops.');
     expect(model.calls[0]!.userContent).toContain('<guest_message>\ndress code?\n</guest_message>');
+    expect(model.calls[0]!.userContent).toContain('Club voice: formal'); // §5.4 default
     expect((await lastOut('g1')).text).toBe('Smart casual, no flip-flops.');
     const [answered] = await eventsOf('ai.answered');
     expect(answered!.props).toEqual({ notes_used: 1, topic: 'dress_code' });

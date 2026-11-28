@@ -1,13 +1,19 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
+import type { ModelClient, ModelReply, ModelRequest } from '../src/brain/answer.js';
+import { compileSnapshot } from '../src/brain/compile.js';
+import { createNote } from '../src/brain/notes.js';
+import { fakeModelClient } from '../src/bot/deps.js';
+import { featuresFlagKey } from '../src/platform/features.js';
 import type { Db } from '../src/db/client.js';
-import { channels, conversations, events, guests, messages, occupancySnapshots, platformFlags, rawWebhooks, type Club } from '../src/db/schema.js';
+import { alerts, channels, conversations, events, guests, handoffEpisodes, messages, occupancySnapshots, platformFlags, rawWebhooks, type Club } from '../src/db/schema.js';
 import { issueBusynessKey } from '../src/data/busyness.js';
 import { emit } from '../src/data/events.js';
 import { chatwootFlagKey, type ChatwootClubState } from '../src/integrations/chatwoot/provision.js';
 import { instagramFlagKey, instagramState, instagramWebhookPath } from '../src/integrations/chatwoot/instagram.js';
 import { replayUnprocessed } from '../src/http/webhook.js';
+import { runHandoffTimeouts, HANDOFF_REALERT_KIND } from '../src/jobs/handoff-timeout.js';
 import { encryptSecret } from '../src/platform/crypto.js';
 import { FRIDAY_AFTERNOON, setupTwoClubs } from './helpers.js';
 import { adminCookie, testConfig } from './helpers/track-a.js';
@@ -22,6 +28,7 @@ function fakeChatwoot() {
   let seq = 900;
   const inboxes = new Map<number, Inbox[]>();
   const webhooks: { id: number; accountId: number; url: string; subscriptions: string[]; token: string | null }[] = [];
+  const posts: { id: number; accountId: number; conversationId: number; content: string; messageType: string; token: string | null }[] = [];
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   const fetchImpl = (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
@@ -37,11 +44,18 @@ function fakeChatwoot() {
       webhooks.push(w);
       return json({ payload: { webhook: { id: w.id, url: w.url, subscriptions: w.subscriptions } } });
     }
+    if ((m = /^\/api\/v1\/accounts\/(\d+)\/conversations\/(\d+)\/messages$/.exec(url.pathname)) && method === 'POST') {
+      const posted = { id: ++seq, accountId: Number(m[1]), conversationId: Number(m[2]), content: body.content as string, messageType: body.message_type as string, token };
+      posts.push(posted);
+      return json({ id: posted.id });
+    }
     return json({ error: `unhandled ${method} ${url.pathname}` }, 404);
   }) as typeof fetch;
   return {
     fetchImpl,
     webhooks,
+    /** Messages we posted into Chatwoot conversations (the bot's Instagram replies). */
+    posts,
     /** What finishing Instagram's login screen inside Chatwoot leaves behind. */
     addInstagramInbox(accountId: number, id: number, instagramId = `1784${id}`) {
       const list = inboxes.get(accountId) ?? [];
@@ -81,12 +95,12 @@ async function seedProvisioned(db: Db, key: Buffer, club: Club, accountId: numbe
   await db.insert(platformFlags).values({ key: chatwootFlagKey(club.id), value: state, updatedBy: 'test', updatedAt: FRIDAY_AFTERNOON });
 }
 
-async function setup(opts: { chatwoot?: boolean; provisioned?: boolean } = {}) {
+async function setup(opts: { chatwoot?: boolean; provisioned?: boolean; ai?: ModelClient } = {}) {
   const t = await setupTwoClubs();
   close = t.close;
   const cw = fakeChatwoot();
   const config = opts.chatwoot === false ? testConfig() : testConfig({ CHATWOOT_URL: CW_URL, CHATWOOT_PLATFORM_TOKEN: PLATFORM_TOKEN });
-  const app = createApp(config, t.db, { bot: { now: () => FRIDAY_AFTERNOON, log: () => {} }, chatwootFetch: cw.fetchImpl });
+  const app = createApp(config, t.db, { bot: { now: () => FRIDAY_AFTERNOON, log: () => {}, ...(opts.ai ? { ai: opts.ai } : {}) }, chatwootFetch: cw.fetchImpl });
   if (opts.provisioned !== false) {
     await seedProvisioned(t.db, config.CREDENTIALS_KEY, t.clubA, ACCOUNT.a, LINE_INBOX.a);
     await seedProvisioned(t.db, config.CREDENTIALS_KEY, t.clubB, ACCOUNT.b, LINE_INBOX.b);
@@ -138,8 +152,8 @@ const deliver = (s: Setup, clubId: string, token: string | null, body: unknown) 
     body: JSON.stringify(body),
   });
 
-async function connected() {
-  const s = await setup();
+async function connected(opts: { ai?: ModelClient } = {}) {
+  const s = await setup(opts);
   s.cw.addInstagramInbox(ACCOUNT.a, IG_INBOX.a, '17841400000001');
   s.cw.addInstagramInbox(ACCOUNT.b, IG_INBOX.b, '17841400000002');
   expect((await connect(s, s.clubA.slug)).status).toBe(200);
@@ -162,7 +176,7 @@ describe('A18 Instagram connect (spec §11.5)', () => {
     expect(s.cw.webhooks).toHaveLength(1);
     const w = s.cw.webhooks[0]!;
     expect(w.accountId).toBe(ACCOUNT.a);
-    expect(w.subscriptions).toEqual(['message_created']);
+    expect(w.subscriptions).toEqual(['message_created', 'conversation_status_changed']);
     expect(w.token).toBe(`admin-token-${s.clubA.id}`);
     expect(new URL(w.url).pathname).toBe(instagramWebhookPath(s.clubA.id));
     expect(webhookToken(s, ACCOUNT.a).length).toBeGreaterThanOrEqual(32);
@@ -327,7 +341,183 @@ describe('A18 Instagram webhook (message_created)', () => {
     // Not a LINE delivery: start-up replay never picks it up.
     expect(await replayUnprocessed(s.app.ctx, new Date(Date.now() + 3_600_000))).toBe(0);
   });
-  it.todo("an Instagram message from a guest reaches the club's brain (B, chat capture) once B owns the messages writer");
+});
+
+describe('A18 + B16: an Instagram message from a guest reaches the club brain', () => {
+  const reply = (input: Record<string, unknown>): Partial<ModelReply> => ({
+    toolCalls: [{ name: 'reply', input: { answer: '', lang: 'en', notes_used: [], topic: 'other', needs_handoff: false, unclear: false, summary: '', ...input } }],
+  });
+
+  async function aiConnected(respond: (req: ModelRequest) => Partial<ModelReply>) {
+    const model = fakeModelClient(respond);
+    const s = await connected({ ai: model });
+    await s.db.insert(platformFlags).values({ key: featuresFlagKey(s.clubA.id), value: { instagram: true, ai_answers: true } });
+    await s.db.update(channels).set({ externalId: '@velora' }).where(and(eq(channels.clubId, s.clubA.id), eq(channels.kind, 'line')));
+    await createNote(
+      s.db,
+      { clubId: s.clubA.id, title: 'Dress code', slug: 'dress-code', type: 'policy', bodyMd: 'Smart casual. No flip-flops.', source: 'manual', status: 'live' },
+      { type: 'staff' },
+      FRIDAY_AFTERNOON,
+    );
+    await compileSnapshot(s.db, s.clubA.id, FRIDAY_AFTERNOON);
+    const say = async (id: number, content: string) => {
+      const res = await deliver(s, s.clubA.id, webhookToken(s, ACCOUNT.a), messageCreated({ accountId: ACCOUNT.a, inboxId: IG_INBOX.a, id, content }));
+      expect(res.status).toBe(200);
+      return (await res.json()) as { applied: string; answer?: string };
+    };
+    return { ...s, model, say };
+  }
+
+  it("answers from the club's brain snapshot and sends the reply back through Chatwoot, tagged instagram", async () => {
+    const s = await aiConnected(() => reply({ answer: 'Smart casual, please. No flip-flops.', notes_used: ['dress-code'], topic: 'dress_code' }));
+    expect(await s.say(7101, 'What is the dress code?')).toMatchObject({ applied: 'recorded', answer: 'answered' });
+
+    expect(s.model.calls).toHaveLength(1);
+    expect(s.model.calls[0]!.brain).toContain('No flip-flops');
+    expect(s.model.calls[0]!.userContent).toContain('What is the dress code?');
+
+    // Posted into the guest's Chatwoot conversation (44) of club A's account, as the bot.
+    expect(s.cw.posts).toEqual([expect.objectContaining({ accountId: ACCOUNT.a, conversationId: 44, content: 'Smart casual, please. No flip-flops.', messageType: 'outgoing' })]);
+    const [ig] = await s.db.select().from(channels).where(and(eq(channels.clubId, s.clubA.id), eq(channels.kind, 'instagram')));
+    const out = await s.db.select().from(messages).where(and(eq(messages.clubId, s.clubA.id), eq(messages.direction, 'out')));
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ authorType: 'bot', channelId: ig!.id, deliveryStatus: 'sent', externalId: `cw:${ACCOUNT.a}:${s.cw.posts[0]!.id}` });
+
+    const evs = await s.db.select().from(events).where(eq(events.clubId, s.clubA.id));
+    const answered = evs.filter((e) => e.type === 'ai.answered');
+    expect(answered).toHaveLength(1);
+    expect((answered[0]!.raw as { noteIds: string[] }).noteIds).toHaveLength(1);
+    expect(evs.filter((e) => e.type === 'ai.call')).toHaveLength(1);
+    // Every event of the Instagram guest is tagged instagram at the source (§14.8).
+    const guestEvents = evs.filter((e) => e.guestId === out[0]!.guestId);
+    expect(guestEvents.length).toBeGreaterThan(2);
+    expect(guestEvents.every((e) => e.dataOrigin === 'instagram' && e.channel === 'instagram')).toBe(true);
+    // Chatwoot's echo of our own reply comes back as outgoing and is ignored.
+    const echo = await deliver(s, s.clubA.id, webhookToken(s, ACCOUNT.a), messageCreated({ accountId: ACCOUNT.a, inboxId: IG_INBOX.a, id: s.cw.posts[0]!.id, type: 'outgoing' }));
+    // Its row already exists (same Chatwoot message id), so nothing new is stored.
+    expect(((await echo.json()) as { applied: string }).applied).toBe('duplicate');
+    expect(await s.db.select().from(messages).where(and(eq(messages.clubId, s.clubA.id), eq(messages.direction, 'out')))).toHaveLength(1);
+  });
+
+  it('no answer in the brain: faq.missed, a takeover with an urgent alert, the ack through Chatwoot, then quiet', async () => {
+    const s = await aiConnected(() => reply({ needs_handoff: true, topic: 'private_room', summary: 'Asks about private room hire.' }));
+    expect((await s.say(7201, 'Can I rent a private room for 20?')).answer).toBe('handoff');
+
+    const evs = await s.db.select().from(events).where(eq(events.clubId, s.clubA.id));
+    const missed = evs.filter((e) => e.type === 'faq.missed');
+    expect(missed).toHaveLength(1);
+    expect(missed[0]).toMatchObject({ dataOrigin: 'instagram', channel: 'instagram', props: { topic: 'private_room' } });
+    expect(evs.find((e) => e.type === 'handoff.requested')).toMatchObject({ dataOrigin: 'instagram', channel: 'instagram' });
+
+    const [ep] = await s.db.select().from(handoffEpisodes).where(eq(handoffEpisodes.clubId, s.clubA.id));
+    expect(ep).toMatchObject({ trigger: 'faq_missed', topic: 'private_room', endedAt: null });
+    const [conv] = await s.db.select().from(conversations).where(eq(conversations.id, ep!.conversationId));
+    expect(conv!.mode).toBe('human');
+    const [alert] = await s.db.select().from(alerts).where(eq(alerts.clubId, s.clubA.id));
+    expect(alert).toMatchObject({ level: 'urgent', kind: 'bot_unanswered', conversationId: conv!.id });
+    expect(alert!.textEn).toContain('Asks about private room hire.');
+    expect(s.cw.posts.map((p) => p.content)).toEqual(['Got it, a host will reply here shortly.']);
+
+    // A host has the chat: the next message gets no bot reply and no model call.
+    expect((await s.say(7202, 'Hello?')).answer).toBe('quiet');
+    expect(s.model.calls).toHaveLength(1);
+    expect(s.cw.posts).toHaveLength(1);
+  });
+
+  it('a host reply on Instagram is recorded as staff activity: no false re-alert, no timeout; resolving ends the takeover', async () => {
+    const s = await aiConnected(() => reply({ needs_handoff: true, topic: 'private_room', summary: 'Asks about private room hire.' }));
+    expect((await s.say(7211, 'Can I rent a private room for 20?')).answer).toBe('handoff');
+    const [ep] = await s.db.select().from(handoffEpisodes).where(eq(handoffEpisodes.clubId, s.clubA.id));
+    const timeoutMs = s.clubA.settings.handoffTimeoutMinutes * 60_000;
+    const token = webhookToken(s, ACCOUNT.a);
+
+    // Our own bot post (the ack) coming back as an echo is not a host reply.
+    const echo = { ...messageCreated({ accountId: ACCOUNT.a, inboxId: IG_INBOX.a, id: 7212, content: 'Got it', type: 'outgoing' }), sender: { id: 1, type: 'agent_bot' } };
+    expect(((await (await deliver(s, s.clubA.id, token, echo)).json()) as any).applied).toBe('ignored');
+
+    // A host replies from Chatwoot late in the takeover.
+    const hostAt = new Date(FRIDAY_AFTERNOON.getTime() + timeoutMs * 0.8);
+    const host = {
+      ...messageCreated({ accountId: ACCOUNT.a, inboxId: IG_INBOX.a, id: 7213, content: 'Yes, the private room fits 20.', type: 'outgoing' }),
+      sender: { id: 4401, name: 'Host', type: 'user' },
+      created_at: hostAt.toISOString(),
+    };
+    expect(((await (await deliver(s, s.clubA.id, token, host)).json()) as any).applied).toBe('recorded');
+    expect(((await (await deliver(s, s.clubA.id, token, host)).json()) as any).applied).toBe('duplicate');
+    const staff = await s.db.select().from(messages).where(and(eq(messages.clubId, s.clubA.id), eq(messages.authorType, 'staff')));
+    expect(staff).toHaveLength(1);
+    expect(staff[0]).toMatchObject({ direction: 'out', externalId: `cw:${ACCOUNT.a}:7213` });
+    const replied = await s.db.select().from(events).where(and(eq(events.clubId, s.clubA.id), eq(events.type, 'host.replied')));
+    expect(replied).toHaveLength(1);
+    expect(replied[0]).toMatchObject({ channel: 'instagram', dataOrigin: 'instagram' });
+    expect(s.cw.posts).toHaveLength(1); // the reply is never re-sent through Chatwoot
+
+    // Past the half and full timeout counted from the episode start, but inside it from the host reply.
+    const later = new Date(FRIDAY_AFTERNOON.getTime() + timeoutMs * 1.2);
+    expect(await runHandoffTimeouts(s.db, later)).toEqual({ realerted: [], ended: [] });
+    expect(await s.db.select().from(alerts).where(and(eq(alerts.clubId, s.clubA.id), eq(alerts.kind, HANDOFF_REALERT_KIND)))).toHaveLength(0);
+    const [still] = await s.db.select().from(handoffEpisodes).where(eq(handoffEpisodes.id, ep!.id));
+    expect(still!.endedAt).toBeNull();
+
+    // Resolving in Chatwoot gives the chat back to the bot.
+    const resolved = { event: 'conversation_status_changed', id: 44, status: 'resolved', inbox_id: IG_INBOX.a, account: { id: ACCOUNT.a } };
+    expect(((await (await deliver(s, s.clubA.id, token, resolved)).json()) as any).applied).toBe('resolved');
+    const [done] = await s.db.select().from(handoffEpisodes).where(eq(handoffEpisodes.id, ep!.id));
+    expect(done!.endedAt).not.toBeNull();
+    const [conv] = await s.db.select().from(conversations).where(eq(conversations.id, ep!.conversationId));
+    expect(conv!.mode).toBe('bot');
+  });
+
+  it("a booking request gets the counted link to the club's LINE account, with no model call", async () => {
+    const s = await aiConnected(() => reply({ answer: 'unused' }));
+    expect((await s.say(7301, 'book a table')).answer).toBe('line_link');
+    expect(s.model.calls).toHaveLength(0);
+    const text = s.cw.posts[0]!.content;
+    const url = /http\S+\/r\/\S+/.exec(text)?.[0];
+    expect(url).toBeTruthy();
+    const res = await s.app.app.request(new URL(url!).pathname);
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe('https://line.me/R/ti/p/%40velora');
+    const opened = await s.db.select().from(events).where(and(eq(events.clubId, s.clubA.id), eq(events.type, 'link.opened')));
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ source: 'instagram', props: { kind: 'line' } });
+  });
+
+  it("the guard keeps an invented price out of an Instagram answer", async () => {
+    const s = await aiConnected(() => reply({ answer: 'The VIP table is 15,000 baht minimum spend.', topic: 'vip_price' }));
+    expect((await s.say(7401, 'how much is vip?')).answer).toBe('line_link');
+    expect(s.cw.posts).toHaveLength(1);
+    expect(s.cw.posts[0]!.content).not.toContain('15,000');
+    expect(s.cw.posts[0]!.content).toContain('LINE');
+  });
+
+  it("with the club's instagram switch off the message is recorded and the bot stays quiet", async () => {
+    const s = await aiConnected(() => reply({ answer: 'Hi' }));
+    await s.db.update(platformFlags).set({ value: { instagram: false } }).where(eq(platformFlags.key, featuresFlagKey(s.clubA.id)));
+    expect(await s.say(7501, 'hello')).toMatchObject({ applied: 'recorded', answer: 'off' });
+    expect(s.model.calls).toHaveLength(0);
+    expect(s.cw.posts).toHaveLength(0);
+  });
+
+  it("with the club's ai_answers switch off the message is recorded and no model call is made", async () => {
+    const s = await aiConnected(() => reply({ answer: 'Hi' }));
+    await s.db.update(platformFlags).set({ value: { instagram: true } }).where(eq(platformFlags.key, featuresFlagKey(s.clubA.id)));
+    expect(await s.say(7551, 'hello')).toMatchObject({ applied: 'recorded', answer: 'off' });
+    expect(s.model.calls).toHaveLength(0);
+    expect(s.cw.posts).toHaveLength(0);
+  });
+
+  it('with no model client the message is recorded and the bot stays quiet, with no alert', async () => {
+    const s = await connected();
+    await s.db.insert(platformFlags).values({ key: featuresFlagKey(s.clubA.id), value: { instagram: true, ai_answers: true } });
+    const res = await deliver(s, s.clubA.id, webhookToken(s, ACCOUNT.a), messageCreated({ accountId: ACCOUNT.a, inboxId: IG_INBOX.a, id: 7601, content: 'What is the dress code?' }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ applied: 'recorded', answer: 'off' });
+    expect(s.cw.posts).toHaveLength(0);
+    expect(await s.db.select().from(alerts).where(eq(alerts.clubId, s.clubA.id))).toHaveLength(0);
+    const inbound = await s.db.select().from(messages).where(and(eq(messages.clubId, s.clubA.id), eq(messages.direction, 'in')));
+    expect(inbound).toHaveLength(1);
+  });
 });
 
 describe('A18 §14.8: Instagram data stays with its club', () => {

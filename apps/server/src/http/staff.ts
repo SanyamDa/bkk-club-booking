@@ -2,14 +2,17 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
-import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import {
   ACTIVE_BOOKING_STATUSES,
+  auditLog,
+  bookingStatusHistory,
   conversations,
   deposits,
   guests,
+  handoffEpisodes,
   messages,
   type Booking,
   type Club,
@@ -50,6 +53,7 @@ import { staffPromoterRoutes } from './staff-promoters.js';
 import { staffPosRoutes } from './staff-pos.js';
 import { staffReportRoutes } from './staff-report.js';
 import { staffSettingsRoutes } from './staff-settings.js';
+import { staffBookingRoutes } from './staff-bookings.js';
 import { teamRoutes } from './team.js';
 
 /** Roles per route (plan A2 Decisions). */
@@ -88,6 +92,7 @@ export function staffRoutes(app: AppContext) {
   r.route('/', staffPromoterRoutes(app)); // A20a promoters, attribution, promoter report
   r.route('/', staffCrmRoutes(app)); // A20c guest CRM and VIP tags
   r.route('/', staffExtrasRoutes(app)); // B22 bottle menu, pre-orders, waitlist
+  r.route('/', staffBookingRoutes(app)); // §6.2 booking search, change table/night/pax/notes, payments, deposit CSV
 
   /** A staff-surface event for the club in the URL, attributed to the signed-in person. */
   function staffEvent(c: StaffContext, e: Omit<EventInput, 'clubId' | 'occurredAt' | 'actorType' | 'actorId' | 'dataOrigin' | 'isTest'>) {
@@ -165,6 +170,8 @@ export function staffRoutes(app: AppContext) {
           guestName: g?.name ?? g?.displayName ?? 'Guest',
           phone: g?.phone ?? null,
           nationality: g?.nationality ?? null,
+          // Spec §5.3: the guest blocked the club's LINE account and cannot be messaged.
+          unfollowedAt: g?.unfollowedAt?.toISOString() ?? null,
           live: isLive(b),
         };
       });
@@ -172,6 +179,14 @@ export function staffRoutes(app: AppContext) {
       .select({ id: conversations.id })
       .from(conversations)
       .where(and(eq(conversations.clubId, club.id), eq(conversations.mode, 'human')));
+    // Spec §6.2 Tonight totals: deposits collected (verified) and minimum spend booked, real bookings only.
+    const booked = nightBookings.filter((b) => !b.isTest && isLive(b) && ['confirmed', 'arrived', 'payment_review'].includes(b.status));
+    const paid = booked.length
+      ? await db
+          .select({ amount: deposits.amountSatang })
+          .from(deposits)
+          .where(and(eq(deposits.clubId, club.id), eq(deposits.status, 'verified'), inArray(deposits.bookingId, booked.map((b) => b.id))))
+      : [];
     return c.json({
       club: { slug: club.slug, name: club.name, accentColor: club.settings.accentColor },
       date,
@@ -179,6 +194,10 @@ export function staffRoutes(app: AppContext) {
       tables,
       bookings: list,
       handoffCount: handoffs.length,
+      totals: {
+        depositsCollected: formatBaht(paid.reduce((n, r) => n + r.amount, 0)),
+        minSpendBooked: formatBaht(booked.reduce((n, b) => n + b.minSpendSatang, 0)),
+      },
     });
   });
 
@@ -198,6 +217,25 @@ export function staffRoutes(app: AppContext) {
       .from(deposits)
       .where(and(eq(deposits.clubId, club.id), eq(deposits.bookingId, view.booking.id)))
       .orderBy(desc(deposits.createdAt));
+    // §6.2 Booking detail: history, rules accepted, chat summary and audit trail.
+    const [history, audit, conv] = await Promise.all([
+      db.select().from(bookingStatusHistory).where(eq(bookingStatusHistory.bookingId, view.booking.id)).orderBy(asc(bookingStatusHistory.at)),
+      db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.clubId, club.id), eq(auditLog.entity, 'booking'), eq(auditLog.entityId, view.booking.id)))
+        .orderBy(asc(auditLog.at))
+        .limit(200),
+      db.query.conversations.findFirst({ where: and(eq(conversations.clubId, club.id), eq(conversations.guestId, view.guest.id)) }),
+    ]);
+    const handoffs = conv
+      ? await db
+          .select()
+          .from(handoffEpisodes)
+          .where(and(eq(handoffEpisodes.clubId, club.id), eq(handoffEpisodes.conversationId, conv.id)))
+          .orderBy(desc(handoffEpisodes.startedAt))
+          .limit(5)
+      : [];
     await staffEvent(c, {
       type: 'staff.booking_viewed',
       bookingId: view.booking.id,
@@ -207,8 +245,23 @@ export function staffRoutes(app: AppContext) {
       nightDate: view.booking.nightDate,
     });
     return c.json({
-      booking: { ...shape(view.booking), table: view.table.code, zone: view.zone.name, rulesAcceptedAt: view.booking.rulesAcceptedAt?.toISOString() ?? null },
-      guest: { id: view.guest.id, name: view.guest.name, displayName: view.guest.displayName, phone: view.guest.phone, nationality: view.guest.nationality, viaLine: Boolean(view.guest.lineUserId) },
+      booking: {
+        ...shape(view.booking),
+        table: view.table.code,
+        tableId: view.table.id,
+        zone: view.zone.name,
+        occasion: view.booking.occasion,
+        rulesVersion: view.booking.rulesVersion,
+        rulesAcceptedAt: view.booking.rulesAcceptedAt?.toISOString() ?? null,
+      },
+      history: history.map((h) => ({ from: h.fromStatus, to: h.toStatus, at: h.at.toISOString(), actorType: h.actorType, actorId: h.actorId, reasonCode: h.reasonCode })),
+      audit: audit.map((a) => ({ action: a.action, at: a.at.toISOString(), actorType: a.actorType, actorId: a.actorId, reason: a.reason, before: a.before, after: a.after })),
+      chatSummary: {
+        mode: conv?.mode ?? null,
+        handoffReason: conv?.handoffReason ?? null,
+        handoffs: handoffs.map((h) => ({ startedAt: h.startedAt.toISOString(), endedAt: h.endedAt?.toISOString() ?? null, trigger: h.trigger, topic: h.topic, summary: h.reason })),
+      },
+      guest: { id: view.guest.id, name: view.guest.name, displayName: view.guest.displayName, phone: view.guest.phone, nationality: view.guest.nationality, viaLine: Boolean(view.guest.lineUserId), unfollowedAt: view.guest.unfollowedAt?.toISOString() ?? null },
       deposits: allDeposits.map((d) => ({
         id: d.id,
         amount: formatBaht(d.amountSatang),
@@ -228,6 +281,8 @@ export function staffRoutes(app: AppContext) {
     reasonCode: z.enum(REASON_CODES).optional(),
     /** `arrived` only: the party size actually at the door (B2 `markArrived`). */
     arrivedPax: z.number().int().min(0).max(200).optional(),
+    /** `cancel` only (§6.2): keep the verified deposit (`forfeit`) or refund it by hand (`refund`). */
+    deposit: z.enum(['forfeit', 'refund']).optional(),
   });
   type ActionInput = z.infer<typeof actionSchema>;
   /** Builds the W0 `Reason` from the optional code and free text; `fallback` when neither is given. */
@@ -263,7 +318,7 @@ export function staffRoutes(app: AppContext) {
     await app.notifier.rejected(club.id, id);
   });
   act('cancel', staff, async (club, id, actor, input) => {
-    await cancelBooking(db, club.id, id, actor, reasonOf(input, { code: 'club_cancelled', text: 'Cancelled by the club' }), app.deps.now());
+    await cancelBooking(db, club.id, id, actor, reasonOf(input, { code: 'club_cancelled', text: 'Cancelled by the club' }), app.deps.now(), { deposit: input.deposit });
     await app.notifier.cancelled(club.id, id, input.reason ?? '');
   });
   act('arrived', staff, async (club, id, actor, input) => {
@@ -282,13 +337,23 @@ export function staffRoutes(app: AppContext) {
     phone: z.string().trim().max(30).optional(),
     notes: z.string().trim().max(300).optional(),
     depositPaid: z.boolean().default(false),
+    /** §9 source: a phone booking (`manual_phone`) or a walk-in (`manual_walkin`). */
+    kind: z.enum(['phone', 'walkin']).default('phone'),
+    /** §6.2: a LINE guest of this club to book for, so they can get the confirmation in LINE. */
+    guestId: z.string().max(80).optional(),
+    /** §6.2 "send the guest a LINE confirmation if they're linked". */
+    sendLineConfirmation: z.boolean().default(false),
   });
   r.post('/clubs/:slug/bookings', staff, async (c) => {
     const parsed = manualSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
     try {
-      const b = await createManualBooking(db, c.var.club, parsed.data, actorOf(c), app.deps.now());
-      return c.json({ ok: true, id: b.id, ref: b.refCode });
+      const club = c.var.club;
+      const { kind, sendLineConfirmation, ...input } = parsed.data;
+      const b = await createManualBooking(db, club, { ...input, source: kind === 'walkin' ? 'manual_walkin' : 'manual_phone' }, actorOf(c), app.deps.now());
+      const linked = Boolean(input.guestId) && Boolean((await db.query.guests.findFirst({ where: and(eq(guests.id, b.guestId), eq(guests.clubId, club.id)) }))?.lineUserId);
+      if (sendLineConfirmation && linked) await app.notifier.confirmed(club.id, b.id);
+      return c.json({ ok: true, id: b.id, ref: b.refCode, lineConfirmationSent: sendLineConfirmation && linked });
     } catch (err) {
       if (err instanceof BookingError) return c.json({ error: err.code, message: err.message }, 409);
       throw err;
@@ -317,6 +382,7 @@ export function staffRoutes(app: AppContext) {
         guestName: guest.name ?? guest.displayName ?? 'Guest',
         reason: conv.handoffReason,
         requestedAt: conv.handoffRequestedAt?.toISOString() ?? null,
+        unfollowedAt: guest.unfollowedAt?.toISOString() ?? null,
         messages: recent.reverse().map((m) => ({ direction: m.direction, kind: m.kind, payload: m.payload, at: m.createdAt.toISOString() })),
       });
     }

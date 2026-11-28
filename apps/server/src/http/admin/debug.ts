@@ -13,6 +13,7 @@ import {
   guests,
   messages,
   rawWebhooks,
+  users,
   type Club,
 } from '../../db/schema.js';
 import { newId } from '../../lib/util.js';
@@ -215,10 +216,18 @@ export function debugRoutes(app: AppContext) {
     const parsed = testMessageBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
     const club = c.var.debugClub;
-    // Deferred (sync/track-a.md, A5): no founder LINE user id is stored yet, so "our own LINE
-    // account" cannot be addressed (spec §12.3). Storing it needs a users column (migration) and a
-    // way to capture the id; until then `to: 'self'` answers 501 and an it.todo tracks it.
-    if (parsed.data.to === 'self') return c.json({ error: 'not_ready' }, 501);
+    // `self`: the founder's own LINE account (spec §12.3), set with `PUT /api/admin/me/line`.
+    if (parsed.data.to === 'self') {
+      const [u] = await db.select({ lineUserId: users.lineUserId }).from(users).where(eq(users.id, c.var.user.id)).limit(1);
+      if (!u?.lineUserId) return c.json({ error: 'no_founder_line_user' }, 409);
+      const gateway = await app.gateways.forClub(club);
+      try {
+        await gateway.push(u.lineUserId, [{ type: 'text', text: `Test message from ${club.name} (platform team). No action needed.` }]);
+      } catch (err) {
+        return c.json({ error: 'send_failed', message: err instanceof Error ? err.message : String(err) }, 502);
+      }
+      return c.json({ ok: true });
+    }
     if (!club.staffGroupId) return c.json({ error: 'no_staff_group' }, 409);
     const gateway = await app.gateways.forClub(club);
     await app.deps.outbox.toStaff(gateway, club, [{ type: 'text', text: 'Test message from the platform team. No action needed.' }]);

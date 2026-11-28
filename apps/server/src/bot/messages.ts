@@ -2,7 +2,7 @@ import type { messagingApi } from '@line/bot-sdk';
 import { PAX_RANGES, type BookingView, type TableOption } from '../bookings/service.js';
 import type { Club } from '../db/schema.js';
 import type { Message } from '../line/gateway.js';
-import { addDays, currentNightDate, formatClock, formatNight } from '../lib/time.js';
+import { addDays, bangkokParts, currentNightDate, formatClock, formatNight } from '../lib/time.js';
 import { formatBaht } from '../lib/util.js';
 import { t, type Lang } from './i18n.js';
 import type { Links } from './links.js';
@@ -90,6 +90,7 @@ export function menuQuickReplies(club: Club, lang: Lang, links: TrackedLinks, wh
     qr({ type: 'uri', label: t(lang, 'location'), uri: links.tracked(club, 'map', `${where}_location`) }),
     qr(postback(t(lang, 'talkToHost'), { a: 'host', s: `${where}_host` })),
     qr(postback(t(lang, 'myData'), { a: 'privacy' })), // B10b
+    qr(postback(t(lang, 'switchLang'), { a: 'lang', l: lang === 'th' ? 'en' : 'th' })), // spec §5.3
   ];
 }
 
@@ -153,7 +154,8 @@ export function askPax(lang: Lang, nightDate: string): Message {
   );
 }
 
-export function tablesCarousel(club: Club, lang: Lang, options: TableOption[], nightDate: string, paxLabel: string): Message[] {
+/** `floorUrl` (spec §5.2 step 3): the night's floor plan page, as a [See floor plan] chip. */
+export function tablesCarousel(club: Club, lang: Lang, options: TableOption[], nightDate: string, paxLabel: string, floorUrl?: string): Message[] {
   const accent = club.settings.accentColor;
   const bubbles = options.slice(0, 10).map((o) =>
     bubble(
@@ -176,7 +178,11 @@ export function tablesCarousel(club: Club, lang: Lang, options: TableOption[], n
       altText: t(lang, 'tablesIntro', { night: formatNight(nightDate, lang), pax: paxLabel }),
       contents: { type: 'carousel', contents: bubbles },
       quickReply: {
-        items: [qr(postback(t(lang, 'otherNight'), { a: 'book', s: 'other_night' })), qr(postback(t(lang, 'talkToHost'), { a: 'host' }))],
+        items: [
+          ...(floorUrl ? [qr({ type: 'uri', label: t(lang, 'seeFloorPlan'), uri: floorUrl })] : []),
+          qr(postback(t(lang, 'otherNight'), { a: 'book', s: 'other_night' })),
+          qr(postback(t(lang, 'talkToHost'), { a: 'host' })),
+        ],
       },
     },
   ];
@@ -310,7 +316,11 @@ export function alreadyBooked(club: Club, lang: Lang, view: BookingView, links: 
   const status = t(lang, `status_${view.booking.status}` as 'status_confirmed');
   return text(
     t(lang, 'alreadyBooked', { code: view.table.code, night: formatNight(view.booking.nightDate, lang), status }),
-    [qr(postback(t(lang, 'talkToHost'), { a: 'host' })), ...menuQuickReplies(club, lang, links).slice(2)],
+    [
+      qr(postback(t(lang, 'bookOtherNight'), { a: 'book_other', s: 'already_other' })), // spec §7.2: one booking per night, not per guest
+      qr(postback(t(lang, 'talkToHost'), { a: 'host' })),
+      ...menuQuickReplies(club, lang, links).slice(2),
+    ],
   );
 }
 
@@ -424,6 +434,7 @@ export function staffNewBooking(view: BookingView, kind: 'confirmed' | 'review')
 /** [Running late] [Cancel] [Talk to a host] under a confirmed booking (spec §5.3 My booking). */
 export function bookingActions(lang: Lang, bookingId: string): QuickReplyItem[] {
   return [
+    qr(postback(t(lang, 'changePax'), { a: 'pax_change', b: bookingId })),
     qr(postback(t(lang, 'runningLate'), { a: 'late', b: bookingId })),
     qr(postback(t(lang, 'cancelShort'), { a: 'cancel', b: bookingId })),
     qr(postback(t(lang, 'talkToHost'), { a: 'host' })),
@@ -431,12 +442,45 @@ export function bookingActions(lang: Lang, bookingId: string): QuickReplyItem[] 
 }
 
 /** Day-of reminder (spec §5.2 step 8). */
-export function reminder(club: Club, lang: Lang, view: BookingView): Message {
+export function reminder(club: Club, lang: Lang, view: BookingView, links: TrackedLinks): Message {
   const b = view.booking;
   return text(t(lang, 'reminder', { code: view.table.code, time: club.settings.arrivalBy }), [
     qr(postback(t(lang, 'runningLate'), { a: 'late', b: b.id })),
     qr(postback(t(lang, 'needToCancel'), { a: 'cancel', b: b.id })),
-    qr({ type: 'uri', label: t(lang, 'location'), uri: club.settings.mapUrl }),
+    // B4: through GET /r/:code so `link.opened` counts the tap; no map set, no button (LINE rejects an empty uri).
+    ...(club.settings.mapUrl ? [qr({ type: 'uri', label: t(lang, 'location'), uri: links.tracked(club, 'map', 'reminder_location') })] : []),
+  ]);
+}
+
+const minutesOf = (hhmm: string) => {
+  const [h, m] = hhmm.split(':').map(Number) as [number, number];
+  return h * 60 + m;
+};
+
+/** True when `now` is inside the club's host hours (§5.3). No hours set = always. A window may cross midnight. */
+export function hostsOnline(club: Pick<Club, 'settings'>, now: Date): boolean {
+  const hours = club.settings.hostHours;
+  if (!hours) return true;
+  const p = bangkokParts(now);
+  const m = p.hour * 60 + p.minute;
+  const from = minutesOf(hours.from);
+  const to = minutesOf(hours.to);
+  if (from === to) return true;
+  return from < to ? m >= from && m < to : m >= from || m < to;
+}
+
+/** The handoff reply (§5.3): outside host hours it says when hosts are online. */
+export function handoffAckText(club: Pick<Club, 'settings'>, lang: Lang, now: Date): string {
+  return hostsOnline(club, now) ? t(lang, 'handoffAck') : t(lang, 'handoffAckOffHours', { from: club.settings.hostHours!.from });
+}
+
+/** §5.3 [Change party size]: one chip per size the table seats (LINE allows 13; the last chip asks a host). */
+export function askPaxChange(lang: Lang, view: BookingView): Message {
+  const { minPax, maxPax, code } = view.table;
+  const sizes = Array.from({ length: Math.max(0, maxPax - minPax + 1) }, (_, i) => minPax + i).filter((n) => n !== view.booking.pax);
+  return text(t(lang, 'askPaxChange', { code, min: minPax, max: maxPax }), [
+    ...sizes.slice(0, 12).map((n) => qr(postback(String(n), { a: 'pax_set', b: view.booking.id, n: String(n) }))),
+    qr(postback(t(lang, 'talkToHost'), { a: 'host' })),
   ]);
 }
 
@@ -448,9 +492,9 @@ export function askLate(lang: Lang, bookingId: string): Message {
   ]);
 }
 
-/** Shows the club's cancellation rule (the deposit line, `rules[0]`) before the guest confirms. */
+/** Shows the club's cancellation policy (Settings; unset = the deposit line, `rules[0]`) before the guest confirms. */
 export function cancelAsk(club: Club, lang: Lang, view: BookingView): Message {
-  const policy = club.settings.rules[lang][0] ?? '';
+  const policy = club.settings.cancellationPolicy?.[lang]?.trim() || (club.settings.rules[lang][0] ?? '');
   return text(t(lang, 'cancelAsk', { code: view.table.code, night: formatNight(view.booking.nightDate, lang), policy }), [
     qr(postback(t(lang, 'cancelYes'), { a: 'cancel_yes', b: view.booking.id })),
     qr(postback(t(lang, 'keepBooking'), { a: 'my' })),

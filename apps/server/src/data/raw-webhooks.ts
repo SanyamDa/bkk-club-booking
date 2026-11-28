@@ -34,9 +34,15 @@ export async function recordRawWebhook(db: Db, input: RawWebhookInput): Promise<
   return id;
 }
 
-/** The delivery was processed in full: `processed_at` set, `error` cleared. */
-export async function markRawProcessed(db: Db, id: string, at: Date): Promise<void> {
-  await db.update(rawWebhooks).set({ processedAt: at, error: null }).where(eq(rawWebhooks.id, id));
+/**
+ * The delivery was processed in full: `processed_at` set, `error` cleared. `body` replaces the stored
+ * copy (spec §14.2: staff-group chatter is stripped once processed).
+ */
+export async function markRawProcessed(db: Db, id: string, at: Date, opts: { body?: object } = {}): Promise<void> {
+  await db
+    .update(rawWebhooks)
+    .set({ processedAt: at, error: null, ...(opts.body ? { body: opts.body } : {}) })
+    .where(eq(rawWebhooks.id, id));
 }
 
 /** Processing failed: `error` set, `processed_at` left NULL so a replay picks it up. */

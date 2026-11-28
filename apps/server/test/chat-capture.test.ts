@@ -10,6 +10,7 @@ import * as M from '../src/bot/messages.js';
 import { bookings, channels, clubs, conversations, events, guests, messages, notices, promoterAttributions, promoters } from '../src/db/schema.js';
 import { SIM_USER_PREFIX } from '../src/line/gateway.js';
 import { richMenuRequest } from '../src/line/setup.js';
+import { Links } from '../src/bot/links.js';
 import { createPromoter } from '../src/platform/promoters.js';
 import { FRIDAY, FRIDAY_AFTERNOON, makeGuest, setupDb } from './helpers.js';
 import { testConfig } from './helpers/track-a.js';
@@ -171,7 +172,14 @@ describe('entry tags and attempts (B4)', () => {
       .map((a) => a.action)
       .filter((a) => a?.type === 'postback')
       .map((a) => (a as { data: string }).data);
-    expect(data).toEqual(['a=book&s=rm_book', 'a=my&s=rm_my', 'a=host&s=rm_host']);
+    // Without links (the image preview) the Privacy cell opens the "My data" menu.
+    expect(data).toEqual(['a=book&s=rm_book', 'a=my&s=rm_my', 'a=host&s=rm_host', 'a=privacy']);
+  });
+
+  it('the rich menu carries a permanent Privacy link to the data notice (spec §5.5)', () => {
+    const links = new Links('https://club.test', 'secret');
+    const uris = (richMenuRequest(ctx.club, links).areas ?? []).map((a) => a.action).filter((a) => a?.type === 'uri').map((a) => (a as { uri: string }).uri);
+    expect(uris).toContain(links.privacy());
   });
 });
 

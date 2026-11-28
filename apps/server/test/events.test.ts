@@ -34,7 +34,7 @@ const SPEC_14_2_EVENTS = [
 
 /** Types the plan adds beyond the spec table (B2, B4, B10b, A8). */
 const PLAN_EXTRA_EVENTS = [
-  'booking.status_changed', 'link.opened', 'guest.removal_requested', 'guest.removed',
+  'booking.status_changed', 'booking.changed', 'link.opened', 'guest.removal_requested', 'guest.removed',
   'staff.invited', 'staff.invite_accepted', 'staff.role_changed', 'staff.disabled',
 ];
 

@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { fakeLearnClient } from '../src/bot/deps.js';
 import { createManualBooking, holdTable, requestDeposit, submitDetails } from '../src/bookings/service.js';
+import { createNote } from '../src/brain/notes.js';
 import { endOpenEpisode, recordStaffReply } from '../src/chat/episodes.js';
+import { emit } from '../src/data/events.js';
 import type { Db } from '../src/db/client.js';
 import { alerts, bookings, clubs, conversations, guests, messages, platformFlags, type Club } from '../src/db/schema.js';
 import { buildScheduler } from '../src/jobs/index.js';
@@ -309,6 +311,58 @@ describe('B19b alert call sites', () => {
     expect(learn.drafts).toHaveLength(2);
     // Only the two handoff alerts (urgent) reached the group, not the draft.
     expect(groupPushes()).toHaveLength(2);
+  });
+
+  it('an unanswered gap raises needs-input gap_waiting, once per new miss, and an answered gap does not', async () => {
+    const miss = (topic: string, text: string) =>
+      emit(db, { clubId: club.id, type: 'faq.missed', occurredAt: clock, actorType: 'bot', channel: 'line', dataOrigin: 'first_party', props: { topic }, raw: { text }, isTest: false });
+    const run = async () => {
+      clock = new Date(clock.getTime() + 60_000);
+      await buildScheduler(created.ctx, () => clock).runOnce('brain-draft', clock);
+    };
+    const gapAlerts = async () => (await clubAlerts()).filter((r) => r.kind === 'gap_waiting');
+
+    await run();
+    expect(await gapAlerts()).toHaveLength(0); // no misses, no alert
+
+    await miss('parking', 'Where can I park?');
+    await miss('parking', 'Is there parking?');
+    await miss('re_entry', 'Can I go out and come back?');
+    await run();
+    let rows = await gapAlerts();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ level: 'needs_input', sentLineAt: null, resolvedAt: null });
+    expect(rows[0]!.textEn).toContain('2 unanswered question(s)');
+    await run();
+    expect(await gapAlerts()).toHaveLength(1); // one open per club
+
+    // Staff resolve it: no new alert until a new miss arrives.
+    await resolveOpenAlerts(db, club.id, 'gap_waiting', clock);
+    await run();
+    expect(await gapAlerts()).toHaveLength(1);
+    clock = new Date(clock.getTime() + 1000);
+    await miss('re_entry', 'Re-entry allowed?');
+    await run();
+    rows = await gapAlerts();
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => !r.resolvedAt)).toHaveLength(1);
+
+    // A new miss, but every gap is answered by a live note approved after it: nothing is waiting.
+    await resolveOpenAlerts(db, club.id, 'gap_waiting', clock);
+    clock = new Date(clock.getTime() + 1000);
+    await miss('parking', 'Parking near the club?');
+    clock = new Date(clock.getTime() + 1000);
+    for (const [topic, title] of [['parking', 'Parking'], ['re_entry', 'Re-entry']] as const) {
+      await createNote(
+        db,
+        { clubId: club.id, title, type: 'faq', bodyMd: `${title}: ask the door host.`, source: 'manual', status: 'live', frontmatter: { gapTopic: topic } },
+        { type: 'staff', id: 'user_manager' },
+        clock,
+      );
+    }
+    await run();
+    expect(await gapAlerts()).toHaveLength(2);
+    expect(groupPushes()).toHaveLength(0); // needs input never goes to the group
   });
 
   it('alerts_line switched off keeps the alert in the feed and sends nothing to the staff group', async () => {

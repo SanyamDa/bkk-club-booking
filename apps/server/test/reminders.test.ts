@@ -101,10 +101,21 @@ describe('reminders (B10)', () => {
     expect(msg.text).toContain('B1');
     expect(msg.text).toContain('23:30');
     expect(msg.quickReply.items.map((i: any) => i.action.label)).toEqual(['Running late', 'Need to cancel', 'Location']);
+    // B4: the location tap goes through GET /r/:code (link.opened), never the raw map URL.
+    expect(msg.quickReply.items[2].action.uri).toMatch(/\/r\/[^/]+$/);
+    expect(msg.quickReply.items[2].action.uri).not.toBe(club.settings.mapUrl);
 
     // A club-set time moves it.
     await setSettings({ reminderTime: '20:15' });
     expect(reminderDueAt(club, FRIDAY).toISOString()).toBe(at('20:15').toISOString());
+  });
+
+  it('a club with no map link gets no [Location] button on the reminder', async () => {
+    await setSettings({ mapUrl: '' });
+    const b = await confirmedFor('r-nomap');
+    await run('reminders', at('18:00'));
+    const msg = await lastOut(b.guestId);
+    expect(msg.quickReply.items.map((i: any) => i.action.label)).toEqual(['Running late', 'Need to cancel']);
   });
 
   it('an afternoon reminder time, or a late night start, keeps the reminder on the night itself', async () => {
@@ -179,6 +190,10 @@ describe('guest actions (B10)', () => {
     await sim('c1', { type: 'postback', data: `a=cancel&b=${b.id}` });
     const ask = await lastOut(b.guestId);
     expect(ask.text).toContain('Deposit is non-refundable');
+    // A cancellation policy set in Settings replaces the first house rule.
+    await setSettings({ cancellationPolicy: { en: 'Cancel 24h ahead for a refund.', th: 'ยกเลิกล่วงหน้า 24 ชม.' } });
+    await sim('c1', { type: 'postback', data: `a=cancel&b=${b.id}` });
+    expect((await lastOut(b.guestId)).text).toContain('Cancel 24h ahead for a refund.');
     expect(ask.quickReply.items.map((i: any) => i.action.label)).toEqual(['Yes, cancel', 'Keep booking']);
     expect((await bookingOf(b.id)).status).toBe('confirmed');
 
@@ -210,7 +225,28 @@ describe('guest actions (B10)', () => {
     await sim('m1', { type: 'postback', data: 'a=my' });
     const card = await lastOut(b.guestId);
     expect(card.type).toBe('flex');
-    expect(card.quickReply.items.map((i: any) => i.action.label)).toEqual(['Running late', 'Cancel', 'Talk to a host']);
+    expect(card.quickReply.items.map((i: any) => i.action.label)).toEqual(['Change party size', 'Running late', 'Cancel', 'Talk to a host']);
+  });
+
+  it('change party size: offers the sizes the table seats, then changes pax with audit and booking.changed (§5.3)', async () => {
+    const b = await confirmedFor('px1'); // B1, 4 pax
+    await sim('px1', { type: 'postback', data: `a=pax_change&b=${b.id}` });
+    const ask = await lastOut(b.guestId);
+    const labels = ask.quickReply.items.map((i: any) => i.action.label);
+    expect(labels).not.toContain('4');
+    expect(labels.at(-1)).toBe('Talk to a host');
+    const six = ask.quickReply.items.find((i: any) => i.action.label === '6');
+    await sim('px1', { type: 'postback', data: six.action.data });
+    expect((await bookingOf(b.id)).pax).toBe(6);
+    expect((await lastOut(b.guestId)).text).toContain('now for 6 guests');
+    const [ev] = await eventsOf(b.id, 'booking.changed');
+    expect(ev!.props).toMatchObject({ field: 'pax', from_pax: 4, to_pax: 6 });
+    expect(ev!.actorType).toBe('guest');
+    const audits = await db().select().from(auditLog).where(and(eq(auditLog.entityId, b.id), eq(auditLog.action, 'booking_changed')));
+    expect(audits).toHaveLength(1);
+    // Outside the table's range: nothing changes.
+    await sim('px1', { type: 'postback', data: `a=pax_set&b=${b.id}&n=40` });
+    expect((await bookingOf(b.id)).pax).toBe(6);
   });
 });
 
@@ -259,6 +295,11 @@ describe('no-show job (B10)', () => {
     await setSettings({ autoNoShow: false });
     await run('no-show', at('03:00', addDays(FRIDAY, 1)));
     expect((await bookingOf(kept.id)).status).toBe('confirmed');
+    // The host is still told, once: the club marks the no-show itself.
+    await run('no-show', at('03:01', addDays(FRIDAY, 1)));
+    const noArrival = await db().select().from(alerts).where(and(eq(alerts.bookingId, kept.id), eq(alerts.kind, 'no_arrival')));
+    expect(noArrival).toHaveLength(1);
+    expect(noArrival[0]!.level).toBe('urgent');
 
     // A club that does not let running late move the release time.
     await setSettings({ autoNoShow: true, runningLateExtendsRelease: false, arrivalGraceMinutes: 0 });
@@ -304,5 +345,45 @@ describe('no-show job (B10)', () => {
     const names = buildScheduler(app.ctx, () => clock).names();
     expect(names).toContain('reminders');
     expect(names).toContain('no-show');
+    expect(names).toContain('completion'); // §7.1
+  });
+});
+
+describe('after-visit message (§5.2 step 10)', () => {
+  const SAT_14 = at('14:00', addDays(FRIDAY, 1));
+  const thanks = async (guestId: string) =>
+    (await guestOut(guestId)).filter((m) => JSON.stringify(m.payload).includes('Thanks for coming'));
+
+  it('is off by default, and when on goes once the next day from 14:00 with [Book again]', async () => {
+    const b = await confirmedFor('av1');
+    await markArrived(db(), club.id, b.id, STAFF, at('23:00'), 4);
+    await run('after-visit', SAT_14);
+    expect(await thanks(b.guestId)).toHaveLength(0);
+
+    await setSettings({ afterVisitMessage: true });
+    await run('after-visit', new Date(SAT_14.getTime() - 60_000));
+    expect(await thanks(b.guestId)).toHaveLength(0);
+    await run('after-visit', SAT_14);
+    await run('after-visit', new Date(SAT_14.getTime() + 60 * 60_000));
+    const sent = await thanks(b.guestId);
+    expect(sent).toHaveLength(1);
+    expect((sent[0]!.payload as any).quickReply.items.map((i: any) => i.action.label)).toEqual(['Book again']);
+    expect((await eventsOf(b.id, 'reminder.sent')).map((e) => e.props)).toContainEqual({ kind: 'after_visit' });
+  });
+
+  it('skips a guest who opted out, a no-show, and a club whose push quota is nearly used up', async () => {
+    await setSettings({ afterVisitMessage: true });
+    const opted = await confirmedFor('av-out');
+    await markArrived(db(), club.id, opted.id, STAFF, at('23:00'), 4);
+    await sim('av-out', { type: 'text', text: 'stop' });
+    const noShow = await confirmedFor('av-ns', 'table_demo_B2');
+    await run('after-visit', SAT_14);
+    expect(await thanks(opted.guestId)).toHaveLength(0);
+    expect(await thanks(noShow.guestId)).toHaveLength(0);
+    expect((await bookingOf(noShow.id)).status).toBe('confirmed');
+  });
+
+  it('is registered on the scheduler', () => {
+    expect(buildScheduler(app.ctx, () => clock).names()).toContain('after-visit');
   });
 });

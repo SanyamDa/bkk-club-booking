@@ -16,6 +16,7 @@ export function errText(e: unknown): string {
     const code = e.body.error;
     if (code === 'totp_required') return 'Enter a fresh 6-digit authenticator code.';
     if (code === 'invalid_totp') return 'That authenticator code is not right. Try the current one.';
+    if (code === 'no_founder_line_user') return 'Set your own LINE user id (Controls) before sending a test message to yourself.';
     if (code === 'not_ready') return 'Not available yet: this part of the platform has not shipped.';
     if (code === 'profile_missing') return 'Fill the club profile before going live.';
     if (code === 'login_not_configured') return 'No LINE Login channel resolves for this club (set the platform channel in Controls, or a club login channel).';

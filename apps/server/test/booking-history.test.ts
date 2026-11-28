@@ -225,6 +225,7 @@ describe('scheduler (B2)', () => {
         'nights', 'no-show', 'reminders', 'removal', 'retention', 'snapshots', 'crowd-prompt', 'waitlist',
         'brain-draft', 'brain-lint', // B18
         'brain-testset', 'brain-sample-review', // B17
+        'completion', 'after-visit', // §7.1 completed, §5.2 step 10
       ].sort(),
     );
   });

@@ -227,6 +227,65 @@ export function Brain() {
           );
         })}
       </section>
+
+      <BrainImportExport club={club} run={run} />
     </div>
+  );
+}
+
+/** Spec §8.2 seeding: export the brain as an Obsidian folder, import one back, or paste text. Imports are drafts. */
+function BrainImportExport({ club, run }: { club: string; run: (fn: () => Promise<unknown>) => Promise<void> }) {
+  const [text, setText] = useState('');
+  const [msg, setMsg] = useState('');
+
+  async function exportFolder() {
+    const { files } = await api<{ files: { path: string; content: string }[] }>(staffPath(club, '/brain/export'));
+    const blob = new Blob([JSON.stringify({ files }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${club}-brain.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+  async function importFiles(list: FileList | null) {
+    if (!list?.length) return;
+    let files: { path: string; content: string }[] = [];
+    for (const f of Array.from(list)) {
+      const content = await f.text();
+      if (f.name.endsWith('.json')) files = files.concat((JSON.parse(content) as { files: { path: string; content: string }[] }).files);
+      else if (f.name.endsWith('.md')) files.push({ path: (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name, content });
+    }
+    await run(async () => {
+      const r = await api<{ created: number; superseding: number; rejected: unknown[] }>(staffPath(club, '/brain/import'), { body: { files } });
+      setMsg(`Imported ${r.created} draft(s), ${r.superseding} replacing a note, ${r.rejected.length} rejected.`);
+    });
+  }
+  async function importText() {
+    await run(async () => {
+      const r = await api<{ created: unknown[]; rejected: unknown[] }>(staffPath(club, '/brain/import-text'), { body: { text } });
+      setMsg(`Imported ${r.created.length} draft(s), ${r.rejected.length} rejected.`);
+      setText('');
+    });
+  }
+
+  return (
+    <section className="card stack">
+      <h2 style={{ margin: 0 }}>Import and export · นำเข้าและส่งออก</h2>
+      <p className="faint" style={{ margin: 0 }}>Everything imported is a draft in the approval queue. · ทุกอย่างที่นำเข้าจะรออนุมัติ</p>
+      <div className="row wrap">
+        <button className="btn small" onClick={() => void exportFolder()}>Export brain · ส่งออก</button>
+        <label className="btn small">
+          Import folder · นำเข้าโฟลเดอร์
+          <input type="file" multiple style={{ display: 'none' }} onChange={(e) => void importFiles(e.target.files)} {...{ webkitdirectory: '' }} />
+        </label>
+        <label className="btn small">
+          Import export file · นำเข้าไฟล์
+          <input type="file" accept=".json,.md" multiple style={{ display: 'none' }} onChange={(e) => void importFiles(e.target.files)} />
+        </label>
+      </div>
+      <textarea className="input" rows={5} placeholder="Paste a pinned message or a rules page · วางข้อความ" value={text} onChange={(e) => setText(e.target.value)} />
+      <button className="btn small" style={{ alignSelf: 'flex-start' }} disabled={!text.trim()} onClick={() => void importText()}>Import text · นำเข้าข้อความ</button>
+      {msg && <div className="faint">{msg}</div>}
+    </section>
   );
 }

@@ -27,6 +27,7 @@ interface BookingRow {
   source: string;
   live: boolean;
   specialRequest: string | null;
+  unfollowedAt?: string | null;
 }
 interface NightData {
   date: string;
@@ -34,6 +35,7 @@ interface NightData {
   tables: TableRow[];
   bookings: BookingRow[];
   handoffCount: number;
+  totals?: { depositsCollected: string; minSpendBooked: string };
 }
 
 function shiftDate(date: string, days: number) {
@@ -49,6 +51,7 @@ export function Night() {
   const [data, setData] = useState<NightData | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -84,6 +87,14 @@ export function Night() {
   const live = data.bookings.filter((b) => b.live);
   const review = live.filter((b) => b.status === 'payment_review');
   const guestsExpected = live.filter((b) => ['confirmed', 'arrived', 'payment_review'].includes(b.status)).reduce((n, b) => n + b.pax, 0);
+  // Spec §6.2: search the night's list by guest name or phone.
+  const q = search.trim().toLowerCase();
+  const qDigits = q.replace(/\D/g, '');
+  const shown = q
+    ? data.bookings.filter(
+        (b) => b.guestName.toLowerCase().includes(q) || (qDigits.length >= 3 && (b.phone ?? '').replace(/\D/g, '').includes(qDigits)),
+      )
+    : data.bookings;
   const booked = data.tables.filter((t) => t.booking && ['confirmed', 'arrived', 'payment_review'].includes(t.booking.status)).length;
 
   return (
@@ -112,6 +123,8 @@ export function Night() {
         <div className="stat"><b>{guestsExpected}</b><span>Guests expected</span></div>
         <div className="stat"><b style={{ color: review.length ? 'var(--warn)' : undefined }}>{review.length}</b><span>Slips to check</span></div>
         <div className="stat"><b>{live.filter((b) => b.status === 'arrived').length}</b><span>Arrived</span></div>
+        {data.totals && <div className="stat"><b>{data.totals.depositsCollected}</b><span>Deposits collected</span></div>}
+        {data.totals && <div className="stat"><b>{data.totals.minSpendBooked}</b><span>Min spend booked</span></div>}
       </div>
 
       {error && <div className="error" style={{ marginBottom: 12 }}>{error}</div>}
@@ -131,9 +144,14 @@ export function Night() {
         ))}
       </div>
 
-      <h2 style={{ margin: '28px 0 10px' }}>Bookings</h2>
+      <div className="spread wrap" style={{ margin: '28px 0 10px' }}>
+        <h2>Bookings</h2>
+        <input className="input" type="search" style={{ width: 'auto', minHeight: 34 }} placeholder="Search name or phone" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search bookings by name or phone" />
+      </div>
       {data.bookings.length === 0 ? (
         <p className="muted">No bookings for this night yet.</p>
+      ) : shown.length === 0 ? (
+        <p className="muted">No booking matches “{search}”.</p>
       ) : (
         <div className="scroll-x">
           <table className="list">
@@ -141,13 +159,14 @@ export function Night() {
               <tr><th>Table</th><th>Guest</th><th>Pax</th><th>Deposit</th><th>Status</th><th>Ref</th><th></th></tr>
             </thead>
             <tbody>
-              {data.bookings.map((b) => (
+              {shown.map((b) => (
                 <tr key={b.id} style={{ opacity: b.live ? 1 : 0.55 }}>
                   <td><b>{b.table}</b> <span className="faint">{b.zone}</span></td>
                   <td>
                     <Link to={`/staff/bookings/${b.id}`} style={{ color: 'var(--text)' }}>{b.guestName}</Link>
                     <div className="faint">{[b.nationality, b.phone, b.source === 'manual' ? 'manual' : null].filter(Boolean).join(' · ')}</div>
                     {b.specialRequest && <div className="faint">“{b.specialRequest}”</div>}
+                    {b.unfollowedAt && <div className="faint" style={{ color: 'var(--warn)' }}>Blocked our LINE: can't be messaged</div>}
                   </td>
                   <td>{b.pax}</td>
                   <td>{b.deposit}</td>

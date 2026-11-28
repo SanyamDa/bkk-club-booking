@@ -2,12 +2,15 @@ import { validateSignature, type webhook } from '@line/bot-sdk';
 import { and, asc, eq, gte, isNull, lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { buildBotDeps } from '../bot/deps.js';
-import { processEvent } from '../bot/flow.js';
+import { processEvent, recordBotError } from '../bot/flow.js';
 import { alertBotError } from '../bot/alerts.js';
+import { emit, type EventInput } from '../data/events.js';
 import { recordOps } from '../data/ops.js';
+import { isTestContext } from '../data/test-flag.js';
 import { errorText, markRawError, markRawProcessed, rawBody, recordRawWebhook } from '../data/raw-webhooks.js';
+import { detectIntent } from '../bot/intents.js';
 import type { Db } from '../db/client.js';
-import { clubs, rawWebhooks } from '../db/schema.js';
+import { clubs, rawWebhooks, type Club } from '../db/schema.js';
 import type { LineGateway, Message } from '../line/gateway.js';
 import { clientIp } from './auth.js';
 import type { AppContext } from './context.js';
@@ -20,6 +23,11 @@ const REPLAY_MIN_AGE_MS = 10_000;
  * replies to old messages (the reply token is long expired).
  */
 export const REPLAY_MAX_AGE_MS = 6 * 60 * 60_000;
+
+/** B4b (§14.2): a delivery the webhook refused, for the club its URL names. Capped with the ops row. */
+function rejectedEvent(club: Club, reason: 'bad_signature' | 'bad_json', now: Date): EventInput {
+  return { clubId: club.id, type: 'line.webhook.rejected', occurredAt: now, actorType: 'system', channel: 'line', dataOrigin: 'first_party', props: { reason }, isTest: isTestContext({ club }) };
+}
 
 /**
  * POST /line/webhook/:slug — one webhook URL per club (plan B3 order): find club (unknown → ops
@@ -58,12 +66,14 @@ export function webhookRoutes(app: AppContext) {
       const summary = { rejected: 'bad_signature', bytes: text.length };
       await recordRawWebhook(db, { clubId: club.id, channel: 'line', body: summary, signatureOk: false, receivedAt: now });
       await recordOps(db, club.id, 'webhook_bad_signature', summary, now);
+      await emit(db, rejectedEvent(club, 'bad_signature', now));
       return c.text('Bad signature', 401);
     }
 
     const { body, parsed } = rawBody(text);
     if (parsed === null || typeof parsed !== 'object') {
       await recordRawWebhook(db, { clubId: club.id, channel: 'line', body, signatureOk: true, receivedAt: now, error: 'bad_json' });
+      await emit(db, rejectedEvent(club, 'bad_json', now));
       return c.text('Bad JSON', 400);
     }
     // Stored before the 200: a crash after the answer loses nothing (start-up replays it).
@@ -115,8 +125,9 @@ export async function processDelivery(ctx: AppContext, rawId: string, opts: { dr
     try {
       await db.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Db;
-        // Never call the slip provider from a dry run.
-        const deps = buildBotDeps(ctx.config, tx, { now: ctx.deps.now, log: ctx.deps.log, slipVerifier: null, payments: {} });
+        // Never call the slip provider, a payment gateway or a model from a dry run: the call would
+        // be real and its cost events would roll back with the transaction.
+        const deps = buildBotDeps(ctx.config, tx, { now: ctx.deps.now, log: ctx.deps.log, slipVerifier: null, payments: {}, ai: null, learn: null, judge: null });
         const gateway = collectingGateway(ctx.gateways.dev, replies);
         for (const event of events) await processEvent(deps, club, gateway, event, { ignoreDedupe: true });
         throw new DryRunRollback();
@@ -148,13 +159,28 @@ export async function processDelivery(ctx: AppContext, rawId: string, opts: { dr
       const error = errorText(err);
       errors.push(error);
       await recordOps(db, club.id, 'bot_error', { rawWebhookId: rawId, webhookEventId: event.webhookEventId, error }, ctx.deps.now());
+      await recordBotError(db, club, event, err, ctx.deps.now()).catch((e) => ctx.deps.log(`bot.error event failed for club ${club.id}`, e));
       // B19b: urgent (§6.4), one open per club; an alert failure must not hide the recorded error.
       await alertBotError(db, club.id, ctx.deps.now()).catch((e) => ctx.deps.log(`bot_error alert failed for club ${club.id}`, e));
     }
   }
   if (errors.length) await markRawError(db, rawId, errors.join('; '));
-  else await markRawProcessed(db, rawId, ctx.deps.now());
+  else await markRawProcessed(db, rawId, ctx.deps.now(), staffChatterStripped(raw.body));
   return { events: events.length, replies: [] };
+}
+
+/**
+ * Spec §14.2: once processed, messages from a staff group are dropped from the stored copy, except
+ * the bot's own command (`link <code>`). Returns no body when nothing changes.
+ */
+export function staffChatterStripped(body: unknown): { body?: object } {
+  const b = body as Partial<webhook.CallbackRequest> | null;
+  if (!b || !Array.isArray(b.events)) return {};
+  const kept = b.events.filter((e) => {
+    if (e.source?.type !== 'group' || e.type !== 'message') return true;
+    return e.message.type === 'text' && detectIntent(e.message.text).kind === 'staff_link';
+  });
+  return kept.length === b.events.length ? {} : { body: { ...b, events: kept } };
 }
 
 /**

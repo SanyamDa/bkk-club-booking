@@ -2,6 +2,7 @@ import { and, eq, inArray, like, sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { holdTable } from '../src/bookings/service.js';
+import { approveNote, createNote } from '../src/brain/notes.js';
 import { openDb, type Db } from '../src/db/client.js';
 import {
   bookings,
@@ -162,6 +163,23 @@ describe('B7 Velora seeded club', () => {
     expect(left.every((e) => e.id.startsWith(SEED_HIST) || e.id.startsWith(SEED_TONIGHT))).toBe(true);
     // The brain notes are content and stay.
     expect(await db.select().from(brainNotes).where(eq(brainNotes.clubId, DEMO_CLUB_ID))).toHaveLength(VELORA.faqs.length);
+  });
+
+  it('reset retires the note learned in the demo, so the gap exists again, and returns chats to the bot (spec §12.4)', async () => {
+    const { db } = await veloraDb(WED);
+    const draft = await createNote(
+      db,
+      { clubId: DEMO_CLUB_ID, title: 'Birthday cakes', slug: 'birthday-cakes', type: 'faq', bodyMd: 'You can bring a cake.', source: 'takeover', frontmatter: { gapTopic: 'birthday_cake' } } as never,
+      { type: 'staff' },
+      WED,
+    );
+    await approveNote(db, DEMO_CLUB_ID, draft.id, { type: 'staff', id: 'u1' }, WED);
+    await resetDemoClub(db, DEMO_CLUB_ID, FRI);
+    const [after] = await db.select().from(brainNotes).where(eq(brainNotes.id, draft.id));
+    expect(after!.status).toBe('retired');
+    // The seeded onboarding notes stay live.
+    const live = await db.select().from(brainNotes).where(and(eq(brainNotes.clubId, DEMO_CLUB_ID), eq(brainNotes.status, 'live')));
+    expect(live).toHaveLength(VELORA.faqs.length);
   });
 
   it('reset refuses a non-demo club', async () => {

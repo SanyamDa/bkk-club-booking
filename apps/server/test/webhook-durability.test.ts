@@ -275,6 +275,29 @@ describe('durable webhook pipeline (B3)', () => {
     expect(raw!.processedAt).not.toBeNull();
   });
 
+  it('staff-group chatter is stripped from the stored copy once processed; the link command stays (spec §14.2)', async () => {
+    const group = (text: string) => {
+      const e = textBody('Ustaff1', text).events[0]!;
+      return { ...e, source: { type: 'group', groupId: 'Cgroup1', userId: 'Ustaff1' } };
+    };
+    const body = { destination: 'Ubot', events: [group('who is on the door tonight?'), group('link ABCD2345'), textBody('Uguest9', 'hello').events[0]!] };
+    expect((await post(body)).status).toBe(200);
+    const [raw] = await raws();
+    expect(raw!.processedAt).not.toBeNull();
+    const kept = (raw!.body as { events: { source: { type: string }; message: { text: string } }[] }).events;
+    expect(kept.map((e) => e.message.text)).toEqual(['link ABCD2345', 'hello']);
+    expect(JSON.stringify(raw!.body)).not.toContain('door tonight');
+  });
+
+  it("a club with status 'paused' stores inbound, sends nothing and alerts no one (spec §12.3)", async () => {
+    await db.update(clubs).set({ status: 'paused' }).where(eq(clubs.id, club.id));
+    expect((await post(textBody('Ustatus1', 'book a table'))).status).toBe(200);
+    expect(await inbound()).toHaveLength(1);
+    expect(await guestOut()).toHaveLength(0);
+    expect(await staffOut()).toHaveLength(0);
+    expect(gw.sent).toHaveLength(0);
+  });
+
   it('paused club alerts the staff group once per conversation per pause, and again after a new pause', async () => {
     await pause(clock);
     await post(textBody('Upa1', 'hello'));

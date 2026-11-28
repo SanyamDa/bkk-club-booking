@@ -26,6 +26,8 @@ export const users = pgTable('users', {
   lockedUntil: timestamp('locked_until', { withTimezone: true }),
   disabledAt: timestamp('disabled_at', { withTimezone: true }),
   lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+  /** A5: a platform admin's own LINE user id (`U` + 32 hex), the target of debug `test-message {to: 'self'}`. */
+  lineUserId: text('line_user_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -11,7 +11,7 @@ type Lang = 'en' | 'th';
 
 interface BookingInfo {
   lang: Lang;
-  club: { name: string; accentColor: string; rules: string[]; arrivalBy: string; liffId: string | null };
+  club: { name: string; accentColor: string; rules: string[]; arrivalBy: string; liffId: string | null; requiredFields?: GuestField[] };
   booking: {
     ref: string;
     status: string;
@@ -27,9 +27,12 @@ interface BookingInfo {
     holdUntil: string | null;
     detailsDone: boolean;
   };
-  guest: { name: string; phone: string; nationality: string };
+  guest: { name: string; phone: string; nationality: string; birthDate?: string };
   detailsSentText: string;
 }
+
+/** Fields a club can require beyond name and phone (§5.2 step 4). */
+type GuestField = 'nationality' | 'birthDate' | 'occasion';
 
 const L = {
   en: {
@@ -38,6 +41,7 @@ const L = {
     table: 'Table', night: 'Night', minSpend: 'Minimum spend', deposit: 'Deposit', none: 'None',
     name: 'Name', phone: 'Phone number', nationality: 'Nationality', guests: 'Number of guests',
     request: 'Special request (optional)', requestHint: 'Birthday, cake, anything we should know',
+    birthDate: 'Date of birth', occasion: 'Occasion', occasionHint: 'Birthday, anniversary…', optional: '(optional)',
     rulesTitle: 'House rules', accept: 'I have read and accept the house rules',
     submit: 'Continue', sending: 'Sending…',
     doneTitle: 'Done', doneBody: 'Go back to the LINE chat to confirm your booking and pay the deposit.',
@@ -55,6 +59,7 @@ const L = {
     table: 'โต๊ะ', night: 'คืน', minSpend: 'ยอดขั้นต่ำ', deposit: 'มัดจำ', none: 'ไม่มี',
     name: 'ชื่อ', phone: 'เบอร์โทรศัพท์', nationality: 'สัญชาติ', guests: 'จำนวนคน',
     request: 'คำขอพิเศษ (ไม่บังคับ)', requestHint: 'วันเกิด เค้ก หรืออื่นๆ ที่ควรทราบ',
+    birthDate: 'วันเกิด', occasion: 'โอกาสพิเศษ', occasionHint: 'วันเกิด วันครบรอบ…', optional: '(ไม่บังคับ)',
     rulesTitle: 'กฎของร้าน', accept: 'ฉันได้อ่านและยอมรับกฎของร้านแล้ว',
     submit: 'ดำเนินการต่อ', sending: 'กำลังส่ง…',
     doneTitle: 'เรียบร้อย', doneBody: 'กลับไปที่แชท LINE เพื่อยืนยันการจองและชำระมัดจำค่ะ',
@@ -110,7 +115,7 @@ export function Details() {
   const [liffReady, setLiffReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [form, setForm] = useState({ name: '', phone: '', nationality: '', otherNationality: '', pax: 2, specialRequest: '', acceptRules: false });
+  const [form, setForm] = useState({ name: '', phone: '', nationality: '', otherNationality: '', pax: 2, specialRequest: '', birthDate: '', occasion: '', acceptRules: false });
   const [state, setState] = useState<'loading' | 'form' | 'sending' | 'done' | 'gone'>('loading');
 
   useEffect(() => {
@@ -147,6 +152,7 @@ export function Details() {
           phone: data.guest.phone,
           nationality: !nat ? '' : NATIONALITIES.includes(nat) ? nat : 'Other',
           otherNationality: nat && !NATIONALITIES.includes(nat) ? nat : '',
+          birthDate: data.guest.birthDate ?? '',
           pax: Math.min(Math.max(data.booking.pax, data.booking.minPax), data.booking.maxPax),
         }));
         setState(data.booking.status !== 'held' || data.booking.detailsDone ? 'gone' : 'form');
@@ -194,7 +200,7 @@ export function Details() {
     try {
       const idToken = liffReady ? liff.getIDToken() ?? undefined : undefined;
       await api('/api/liff/booking/details', {
-        body: { ref, t: token, name: form.name, phone: form.phone, nationality, pax: form.pax, specialRequest: form.specialRequest, acceptRules: form.acceptRules, viaChat, idToken },
+        body: { ref, t: token, name: form.name, phone: form.phone, nationality, pax: form.pax, specialRequest: form.specialRequest, birthDate: form.birthDate, occasion: form.occasion, acceptRules: form.acceptRules, viaChat, idToken },
       });
       if (viaChat) {
         try {
@@ -232,6 +238,10 @@ export function Details() {
   }
 
   const paxOptions = Array.from({ length: b.maxPax - b.minPax + 1 }, (_, i) => b.minPax + i);
+  const required = new Set<GuestField>(info.club.requiredFields ?? ['nationality']);
+  const nationalityValue = form.nationality === 'Other' ? form.otherNationality : form.nationality;
+  const missingRequired = (required.has('nationality') && !nationalityValue) || (required.has('birthDate') && !form.birthDate) || (required.has('occasion') && !form.occasion.trim());
+  const opt = (f: GuestField) => (required.has(f) ? '' : ` ${s.optional}`);
 
   return (
     <form className="guest stack" onSubmit={submit} noValidate>
@@ -261,9 +271,9 @@ export function Details() {
         {fieldErrors.phone && <span className="error">{fieldErrors.phone}</span>}
       </div>
       <div className="field">
-        <label htmlFor="nat">{s.nationality}</label>
-        <select id="nat" className="input" required value={form.nationality} onChange={(e) => setForm({ ...form, nationality: e.target.value })}>
-          <option value="" disabled>—</option>
+        <label htmlFor="nat">{s.nationality}{opt('nationality')}</label>
+        <select id="nat" className="input" required={required.has('nationality')} value={form.nationality} onChange={(e) => setForm({ ...form, nationality: e.target.value })}>
+          <option value="" disabled={required.has('nationality')}>—</option>
           {NATIONALITIES.map((n) => <option key={n} value={n}>{n}</option>)}
           <option value="Other">{s.other}</option>
         </select>
@@ -278,6 +288,16 @@ export function Details() {
           {paxOptions.map((n) => <option key={n} value={n}>{n}</option>)}
         </select>
         {fieldErrors.pax && <span className="error">{fieldErrors.pax}</span>}
+      </div>
+      <div className="field">
+        <label htmlFor="dob">{s.birthDate}{opt('birthDate')}</label>
+        <input id="dob" className="input" type="date" autoComplete="bday" required={required.has('birthDate')} value={form.birthDate} onChange={(e) => setForm({ ...form, birthDate: e.target.value })} />
+        {fieldErrors.birthDate && <span className="error">{fieldErrors.birthDate}</span>}
+      </div>
+      <div className="field">
+        <label htmlFor="occ">{s.occasion}{opt('occasion')}</label>
+        <input id="occ" className="input" maxLength={60} placeholder={s.occasionHint} required={required.has('occasion')} value={form.occasion} onChange={(e) => setForm({ ...form, occasion: e.target.value })} />
+        {fieldErrors.occasion && <span className="error">{fieldErrors.occasion}</span>}
       </div>
       <div className="field">
         <label htmlFor="req">{s.request}</label>
@@ -295,7 +315,7 @@ export function Details() {
       </div>
 
       {error && <div className="error">{error}</div>}
-      <button className="btn block primary" type="submit" disabled={state === 'sending' || !form.acceptRules || !form.name || !form.phone || !form.nationality}>
+      <button className="btn block primary" type="submit" disabled={state === 'sending' || !form.acceptRules || !form.name || !form.phone || missingRequired}>
         {state === 'sending' ? s.sending : s.submit}
       </button>
     </form>

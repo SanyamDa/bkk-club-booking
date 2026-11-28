@@ -33,6 +33,16 @@ export function redirectRoutes(app: AppContext) {
       isTest: club.status === 'demo',
     });
 
+  // A18: the club's LINE account, from the OA basic id the LINE setup stored (null before setup).
+  const lineAddUrl = async (club: Club): Promise<string | null> => {
+    const [line] = await db
+      .select({ basicId: channels.externalId })
+      .from(channels)
+      .where(and(eq(channels.clubId, club.id), eq(channels.kind, 'line')))
+      .limit(1);
+    return line?.basicId ? `https://line.me/R/ti/p/${encodeURIComponent(line.basicId)}` : null;
+  };
+
   r.get('/p/:slug/:code', async (c) => {
     const club = await db.query.clubs.findFirst({ where: eq(clubs.slug, c.req.param('slug')) });
     if (!club) return c.text('Not found', 404);
@@ -57,7 +67,7 @@ export function redirectRoutes(app: AppContext) {
     if (!parsed) return c.text('Not found', 404);
     const club = await db.query.clubs.findFirst({ where: eq(clubs.slug, parsed.slug) });
     if (!club) return c.text('Not found', 404);
-    const target = parsed.kind === 'map' ? club.settings.mapUrl : club.settings.drinksMenuUrl;
+    const target = parsed.kind === 'line' ? await lineAddUrl(club) : parsed.kind === 'map' ? club.settings.mapUrl : club.settings.drinksMenuUrl;
     if (!target) return c.text('Not found', 404);
     await opened(club, parsed.kind, parsed.entry);
     return c.redirect(target, 302);

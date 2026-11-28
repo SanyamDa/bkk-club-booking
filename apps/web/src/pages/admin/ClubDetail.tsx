@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { adminApi, saveSupport, type AdminClub, type CredentialSummary } from '../../api';
+import { adminApi, api, saveSupport, type AdminClub, type CredentialSummary } from '../../api';
 import { NightsCalendar, type NightsApi } from '../staff/Calendar';
 import { errText, fmtTime } from './AdminLayout';
 
@@ -196,6 +196,59 @@ function SupportStart({ club }: { club: AdminClub }) {
   );
 }
 
+/** Demo controls (spec §12.4): one-click reset and fast-forward for one booking. Demo clubs only. */
+function DemoControls({ slug }: { slug: string }) {
+  const [what, setWhat] = useState<'hold_expiry' | 'reminder' | 'release'>('hold_expiry');
+  const [bookingId, setBookingId] = useState('');
+  const [msg, setMsg] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function run(fn: () => Promise<string>) {
+    setBusy(true);
+    setError('');
+    setMsg('');
+    try {
+      setMsg(await fn());
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const reset = () =>
+    run(async () => {
+      if (!window.confirm('Reset the demo club? Everything from the last demo is cleared.')) return '';
+      const r = await api<{ nightDate: string }>(`/api/admin/demo/${encodeURIComponent(slug)}/reset`, { body: {} });
+      return `Reset done. Tonight is ${r.nightDate}.`;
+    });
+  const fastForward = () =>
+    run(async () => {
+      const r = await api<{ booking: { refCode: string; status: string } }>(`/api/admin/demo/${encodeURIComponent(slug)}/fast-forward`, {
+        body: { what, bookingId: bookingId.trim() },
+      });
+      return `Booking ${r.booking.refCode} is now ${r.booking.status}.`;
+    });
+
+  return (
+    <div className="card stack">
+      <h2>Demo controls</h2>
+      <button className="btn primary" disabled={busy} style={{ alignSelf: 'flex-start' }} onClick={reset}>Reset demo</button>
+      <div className="row wrap">
+        <select className="input" style={{ width: 'auto', minHeight: 34 }} value={what} onChange={(e) => setWhat(e.target.value as typeof what)} aria-label="Fast-forward to">
+          <option value="hold_expiry">Hold expires</option>
+          <option value="reminder">Reminder sends</option>
+          <option value="release">Release time</option>
+        </select>
+        <input className="input mono" style={{ width: 220, minHeight: 34 }} placeholder="booking id" value={bookingId} onChange={(e) => setBookingId(e.target.value)} aria-label="Booking id" />
+        <button className="btn small" disabled={busy || !bookingId.trim()} onClick={fastForward}>Fast-forward</button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {msg && <div className="faint">{msg}</div>}
+    </div>
+  );
+}
+
 function TimelineJump({ slug }: { slug: string }) {
   const navigate = useNavigate();
   const [kind, setKind] = useState<'conversations' | 'bookings'>('conversations');
@@ -290,6 +343,7 @@ export function ClubDetail() {
       </div>
       <div className="side stack" style={{ gap: 20 }}>
         <SupportStart club={club} />
+        {club.status === 'demo' && <DemoControls slug={slug} />}
         <ClubControls club={club} onChange={load} />
       </div>
     </div>

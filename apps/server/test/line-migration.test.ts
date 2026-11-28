@@ -177,6 +177,7 @@ describe('greeting and rich menu migration (A10)', () => {
     await runLineSetup({ ...base, refreshRichMenu: true });
     await runLineSetup({ ...base, refreshRichMenu: true, keepOldRichMenu: true });
     expect(created).toHaveLength(2);
-    expect(created.at(-1)).toEqual(['a=book&s=rm_book', 'a=my&s=rm_my', 'a=host&s=rm_host']);
+    // No `links` here, so the Privacy cell (spec §5.5) falls back to the "My data" postback.
+    expect(created.at(-1)).toEqual(['a=book&s=rm_book', 'a=my&s=rm_my', 'a=host&s=rm_host', 'a=privacy']);
   });
 });

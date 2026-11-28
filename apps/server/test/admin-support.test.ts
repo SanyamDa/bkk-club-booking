@@ -1,9 +1,10 @@
 import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import type { Db } from '../src/db/client.js';
-import { auditLog, conversations, events, messages, rawWebhooks, type Club } from '../src/db/schema.js';
+import { auditLog, conversations, events, messages, platformFlags, rawWebhooks, type Club } from '../src/db/schema.js';
+import { featuresFlagKey } from '../src/platform/features.js';
 import { emit } from '../src/data/events.js';
 import { dataRoutes } from '../src/http/admin/data.js';
 import { debugRoutes } from '../src/http/admin/debug.js';
@@ -194,6 +195,22 @@ describe('admin debug', () => {
     expect((await app.app.request(`/api/admin/clubs/${clubA.slug}/webhooks/${forged}/replay`, post(cookie, {}))).status).toBe(409);
   });
 
+  it('webhook replay dry run makes no model call even with ANTHROPIC_API_KEY set', async () => {
+    await db.insert(platformFlags).values({ key: featuresFlagKey(clubA.id), value: { ai_answers: true }, updatedBy: 'test', updatedAt: clock });
+    const keyed = createApp(testConfig({ ANTHROPIC_API_KEY: 'sk-test-not-real' }), db, { bot: { now: () => clock, log: () => {} } });
+    const rawId = await recordRawWebhook(db, { clubId: clubA.id, channel: 'line', body: lineText('Ureplayai', 'is there valet parking'), signatureOk: true, receivedAt: clock });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('no network in tests'));
+    try {
+      const out = await processDelivery(keyed.ctx, rawId, { dryRun: true });
+      expect(out.events).toBe(1);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      await keyed.settle();
+    }
+    expect((await db.select().from(events).where(eq(events.type, 'ai.call'))).length).toBe(0);
+  });
+
   it('opening the webhook and message lists writes an audit row each', async () => {
     const cookie = await adminCookie(app);
     for (const list of ['webhooks', 'messages']) {
@@ -206,8 +223,40 @@ describe('admin debug', () => {
     expect(views[0]!.data).toMatchObject({ method: 'GET', query: { limit: '10' } });
   });
 
-  // Deferred (sync/track-a.md, A5): no founder LINE user id is stored, so `to: 'self'` answers 501.
-  it.todo("test-message {to: 'self'} pushes to the founder's own LINE account (needs a stored founder LINE user id)");
+  it("test-message {to: 'self'} pushes to the founder's own LINE account, set in the admin console", async () => {
+    const pushes: { to: string; text: string }[] = [];
+    useLine();
+    const gateway = await app.ctx.gateways.forClub(clubA);
+    gateway.push = async (to, msgs) => {
+      for (const m of msgs) pushes.push({ to, text: (m as { text?: string }).text ?? '' });
+    };
+    const cookie = await adminCookie(app);
+    const put = (c: string, body: unknown) => app.app.request('/api/admin/me/line', { ...post(c, body), method: 'PUT' });
+    const testSelf = () => app.app.request(`/api/admin/clubs/${clubA.slug}/test-message`, post(cookie, { to: 'self' }));
+
+    // No id stored yet: nothing to address.
+    const before = await testSelf();
+    expect(before.status).toBe(409);
+    expect(((await before.json()) as { error: string }).error).toBe('no_founder_line_user');
+    expect(pushes).toHaveLength(0);
+
+    expect((await put(cookie, { lineUserId: 'not-a-line-id' })).status).toBe(400);
+    const okId = `U${'a1'.repeat(16)}`;
+    expect((await put(cookie, { lineUserId: okId })).status).toBe(200);
+    const me = await app.app.request('/api/admin/me/line', { headers: { cookie } });
+    expect(await me.json()).toEqual({ lineUserId: okId });
+    expect(await db.select().from(auditLog).where(eq(auditLog.action, 'admin.line_user_set'))).toHaveLength(1);
+
+    const res = await testSelf();
+    expect(res.status).toBe(200);
+    expect(pushes).toEqual([{ to: okId, text: expect.stringContaining(clubA.name) }]);
+
+    // A club owner cannot set it; clearing it brings the 409 back.
+    const owner = await staffCookie(app, clubA, 'owner');
+    expect((await put(owner, { lineUserId: okId })).status).toBe(403);
+    expect((await put(cookie, { lineUserId: null })).status).toBe(200);
+    expect((await testSelf()).status).toBe(409);
+  });
 
   it('one guest message is traceable end to end', async () => {
     useLine();

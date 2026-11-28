@@ -2,7 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import type { Db } from '../src/db/client.js';
-import { auditLog, calendarDays, clubProfile, clubs, events, messages, nights, opsEvents, priceRules, tables, users, zones, type Club } from '../src/db/schema.js';
+import { alerts, auditLog, calendarDays, clubProfile, clubs, events, messages, nights, opsEvents, priceRules, tables, users, zones, type Club } from '../src/db/schema.js';
 import { newId } from '../src/lib/util.js';
 import { base32Decode, base32Encode, totp } from '../src/platform/totp.js';
 import { FRIDAY_AFTERNOON, setupTwoClubs } from './helpers.js';
@@ -96,6 +96,35 @@ describe('settings (plan A9)', () => {
     expect(await eventsOf('club.settings_changed')).toHaveLength(2);
   });
 
+  it('hold duration is capped at 30 minutes (§7.2: 5–30)', async () => {
+    expect((await staff('PATCH', '/settings', { holdMinutes: 31 })).status).toBe(400);
+    expect((await staff('PATCH', '/settings', { holdMinutes: 30 })).status).toBe(200);
+  });
+
+  it('the policy form sets grace, reminder, cancellation policy, required fields, tone, host hours and after-visit (§6.2)', async () => {
+    const body = {
+      arrivalGraceMinutes: 45,
+      reminderTime: '19:30',
+      cancellationPolicy: { en: 'Deposits are not refunded.', th: 'มัดจำไม่คืนค่ะ' },
+      requiredFields: ['nationality', 'birthDate'],
+      tone: 'casual',
+      hostHours: { from: '18:00', to: '03:00' },
+      afterVisitMessage: true,
+    };
+    const res = await staff('PATCH', '/policy', body);
+    expect(res.status).toBe(200);
+    const club = await loadClub();
+    expect(club.settings).toMatchObject(body);
+    const [ev] = await eventsOf('club.settings_changed');
+    expect(ev!.props).toMatchObject({ fields: 'grace:remind:cancel:tone:after:fields:hosts' });
+    // null clears host hours.
+    expect((await staff('PATCH', '/policy', { hostHours: null })).status).toBe(200);
+    expect((await loadClub()).settings.hostHours).toBeUndefined();
+    expect((await staff('PATCH', '/policy', { requiredFields: ['shoeSize'] })).status).toBe(400);
+    const host = await loginAs(app, await makeUser(db, { email: 'host-p@test.local', clubId: clubA.id, role: 'host' }));
+    expect((await staff('PATCH', '/policy', { tone: 'formal' }, host)).status).toBe(403);
+  });
+
   it('a host cannot change settings', async () => {
     const host = await loginAs(app, await makeUser(db, { email: 'host-a@test.local', clubId: clubA.id, role: 'host' }));
     expect((await staff('PATCH', '/settings', { holdMinutes: 15 }, host)).status).toBe(403);
@@ -169,6 +198,12 @@ describe('settings (plan A9)', () => {
     expect(audit).toMatchObject({ actorType: 'staff', actorId: manager.id, before: { promptpayId: clubA.promptpayId }, after: { promptpayId: '0812345678' } });
     const [ev] = await eventsOf('club.settings_changed');
     expect(ev!.props).toMatchObject({ fields: 'promptpay' });
+    // §12.3: the owner is told even with no staff group linked: a needs-input alert on the club's feed.
+    expect(clubA.staffGroupId).toBeNull();
+    const owner = await db.select().from(alerts).where(and(eq(alerts.clubId, clubA.id), eq(alerts.kind, 'sensitive_change')));
+    expect(owner).toHaveLength(1);
+    expect(owner[0]).toMatchObject({ level: 'needs_input', resolvedAt: null });
+    expect(owner[0]!.textEn).toContain('For the owner: PromptPay ID changed');
   });
 
   it('a manager with no second factor is refused without counting failures', async () => {

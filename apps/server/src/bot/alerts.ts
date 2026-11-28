@@ -107,6 +107,21 @@ export function alertPaymentReview(db: Db, v: BookingView, now: Date, opts: { co
   );
 }
 
+/** Spec §5.3: a guest with an upcoming booking blocked the club's LINE account. Information. */
+export function alertGuestUnfollowed(db: Db, v: BookingView, now: Date): Promise<void> {
+  return raiseAlert(
+    db,
+    {
+      clubId: v.booking.clubId,
+      level: 'info',
+      kind: 'guest_unfollowed',
+      bookingId: v.booking.id,
+      text: bookingText(v, "Guest blocked the LINE account and can't be messaged", 'ลูกค้าบล็อกบัญชี LINE ส่งข้อความหาไม่ได้'),
+    },
+    now,
+  );
+}
+
 /** B10 no-show job: release time passed and the table has not arrived. Urgent. */
 export function alertNoArrival(db: Db, v: BookingView, now: Date): Promise<void> {
   return raiseAlert(

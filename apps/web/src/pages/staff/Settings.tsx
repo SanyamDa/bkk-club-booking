@@ -22,6 +22,13 @@ interface SettingsData {
     rules: { en: string[]; th: string[] };
     greeting: { en: string; th: string };
     mapUrl: string;
+    arrivalGraceMinutes?: number;
+    reminderTime?: string;
+    cancellationPolicy?: { en: string; th: string };
+    requiredFields?: ('nationality' | 'birthDate' | 'occasion')[];
+    tone?: 'formal' | 'casual';
+    hostHours?: { from: string; to: string };
+    afterVisitMessage?: boolean;
   };
 }
 
@@ -161,6 +168,7 @@ export function Settings() {
       </div>
       <QuotaPanel club={club} />
       <RulesEditor club={club} settings={s.settings} onSaved={reload} />
+      <PolicyEditor club={club} settings={s.settings} onSaved={reload} />
       <TablesEditor club={club} />
       {s.secondFactorEnrolled ? (
         <SensitiveEditor club={club} settings={s.settings} promptpayConfigured={s.promptpayConfigured} onSaved={reload} />
@@ -283,6 +291,67 @@ function RulesEditor({ club, settings, onSaved }: { club: string; settings: Sett
       <p className="faint" style={{ margin: 0 }}>Closed dates and event nights are on the Calendar page.</p>
       {status}
       <button className="btn primary" disabled={busy} style={{ alignSelf: 'flex-start' }}>{busy ? 'Saving…' : 'Save rules'}</button>
+    </form>
+  );
+}
+
+const GUEST_FIELDS = [['nationality', 'Nationality'], ['birthDate', 'Date of birth'], ['occasion', 'Occasion']] as const;
+
+/** §6.2 Settings, Rules and Bot content: grace, reminder time, cancellation policy, required fields, tone, host hours, after-visit. */
+function PolicyEditor({ club, settings, onSaved }: { club: string; settings: SettingsData['settings']; onSaved: () => void }) {
+  const [grace, setGrace] = useState(String(settings.arrivalGraceMinutes ?? 30));
+  const [reminder, setReminder] = useState(settings.reminderTime ?? '18:00');
+  const [policyEn, setPolicyEn] = useState(settings.cancellationPolicy?.en ?? '');
+  const [policyTh, setPolicyTh] = useState(settings.cancellationPolicy?.th ?? '');
+  const [fields, setFields] = useState<string[]>(settings.requiredFields ?? ['nationality']);
+  const [tone, setTone] = useState(settings.tone ?? 'formal');
+  const [hostFrom, setHostFrom] = useState(settings.hostHours?.from ?? '');
+  const [hostTo, setHostTo] = useState(settings.hostHours?.to ?? '');
+  const [after, setAfter] = useState(Boolean(settings.afterVisitMessage));
+  const { busy, run, status } = useSave();
+
+  function save(e: FormEvent) {
+    e.preventDefault();
+    void run(async () => {
+      await api(staffPath(club, '/policy'), {
+        method: 'PATCH',
+        body: {
+          arrivalGraceMinutes: Number(grace),
+          reminderTime: reminder,
+          cancellationPolicy: { en: policyEn, th: policyTh },
+          requiredFields: fields,
+          tone,
+          hostHours: hostFrom && hostTo ? { from: hostFrom, to: hostTo } : null,
+          afterVisitMessage: after,
+        },
+      });
+      onSaved();
+    }, 'Policy saved.');
+  }
+
+  return (
+    <form className="card stack" onSubmit={save}>
+      <h2>Guest policy and bot</h2>
+      <div className="row wrap">
+        <div className="field"><label htmlFor="p-grace">Grace period (min)</label><input id="p-grace" className="input" inputMode="numeric" value={grace} onChange={(e) => setGrace(e.target.value)} /></div>
+        <div className="field"><label htmlFor="p-rem">Reminder time</label><input id="p-rem" className="input" value={reminder} onChange={(e) => setReminder(e.target.value)} placeholder="18:00" /></div>
+        <div className="field"><label htmlFor="p-tone">Tone</label>
+          <select id="p-tone" className="input" value={tone} onChange={(e) => setTone(e.target.value as 'formal' | 'casual')}><option value="formal">Formal (ค่ะ/ครับ)</option><option value="casual">Casual</option></select>
+        </div>
+        <div className="field"><label htmlFor="p-hf">Hosts online from</label><input id="p-hf" className="input" value={hostFrom} onChange={(e) => setHostFrom(e.target.value)} placeholder="18:00" /></div>
+        <div className="field"><label htmlFor="p-ht">until</label><input id="p-ht" className="input" value={hostTo} onChange={(e) => setHostTo(e.target.value)} placeholder="03:00" /></div>
+      </div>
+      <div className="field"><label htmlFor="p-cen">Cancellation policy (English)</label><textarea id="p-cen" className="input" rows={2} value={policyEn} onChange={(e) => setPolicyEn(e.target.value)} placeholder="Empty: the first house rule is shown" /></div>
+      <div className="field"><label htmlFor="p-cth">Cancellation policy (Thai)</label><textarea id="p-cth" className="input" rows={2} value={policyTh} onChange={(e) => setPolicyTh(e.target.value)} /></div>
+      <div className="row wrap">
+        <span className="faint">Required guest fields (name and phone always are):</span>
+        {GUEST_FIELDS.map(([k, label]) => (
+          <label key={k} className="row"><input type="checkbox" checked={fields.includes(k)} onChange={(e) => setFields(e.target.checked ? [...fields, k] : fields.filter((x) => x !== k))} /> {label}</label>
+        ))}
+      </div>
+      <label className="check"><input type="checkbox" checked={after} onChange={(e) => setAfter(e.target.checked)} /><span>Send “Thanks for coming” the day after a visit (uses LINE quota)</span></label>
+      {status}
+      <button className="btn primary" disabled={busy} style={{ alignSelf: 'flex-start' }}>{busy ? 'Saving…' : 'Save policy'}</button>
     </form>
   );
 }

@@ -8,7 +8,9 @@ import {
   BookingError,
   bookingAwaitingSlip,
   cancelBooking,
+  changeBooking,
   currentBookingForGuest,
+  guestNightLimitReached,
   RUNNING_LATE_MINUTES,
   setRunningLate,
   getBookingView,
@@ -49,8 +51,8 @@ import { releaseAt } from '../jobs/no-show.js';
 import { newId } from '../lib/util.js';
 import { DATA_NOTICE_VERSION, langOf, t, type Lang } from './i18n.js';
 import { detectIntent, testerCodeIn } from './intents.js';
-import { emit } from '../data/events.js';
-import { paxRangeCode } from '../data/event-types.js';
+import { emit, PROPS_VALUE_PATTERN, type EventInput } from '../data/events.js';
+import { paxRangeCode, type EventType } from '../data/event-types.js';
 import { activePromoterByCode, attributeBooking, PromoterError } from '../platform/promoters.js';
 import { recordMarketingOptOut, requestRemoval } from '../data/removal.js';
 import { startEpisode, type HandoffTrigger } from '../chat/episodes.js';
@@ -61,8 +63,9 @@ import * as M from './messages.js';
 import { handleStaffLink } from './staff-link.js';
 import { answerGuestMessage, extractContext, type ModelClient } from '../brain/answer.js';
 import { extractBookingDetails, hasBookingDetails, looksLikeBookingRequest, paxKeyFor, type BookingDetails } from '../brain/extract.js';
-import { alertBookingConfirmed, alertCancellation, alertPaymentReview, alertRunningLate, handoffAlertKind, urgentWordIn } from './alerts.js';
+import { alertBookingConfirmed, alertCancellation, alertGuestUnfollowed, alertPaymentReview, alertRunningLate, handoffAlertKind, urgentWordIn } from './alerts.js';
 import { raiseAlert } from '../platform/alerts.js';
+import { isFeatureOn } from '../platform/features.js';
 
 export interface BotDeps {
   db: Db;
@@ -107,7 +110,58 @@ async function send(turn: Turn, msgs: Message[]) {
   const notice = await dataNoticeOnce(turn);
   const replyToken = turn.replyToken;
   turn.replyToken = undefined;
-  await turn.deps.outbox.toGuest(turn.gateway, turn.club, turn.guest, notice ? [notice, ...msgs] : msgs, replyToken);
+  await turn.deps.outbox.toGuest(turn.gateway, turn.club, turn.guest, notice ? [notice, ...msgs] : msgs, replyToken, undefined, {
+    causeId: turn.inboundId,
+  });
+}
+
+/**
+ * B4b (§14.2): one guest-side event of this turn, with the attempt and entry tag from the
+ * conversation state and the inbound message as its cause. `extra` overrides any field.
+ */
+function turnEvent(turn: Turn, type: EventType, extra: Partial<EventInput> = {}): EventInput {
+  return {
+    clubId: turn.club.id,
+    type,
+    occurredAt: turn.now,
+    actorType: 'guest',
+    actorId: turn.guest.id,
+    channel: 'line',
+    dataOrigin: 'first_party',
+    source: turn.conv.state.entry,
+    guestId: turn.guest.id,
+    conversationId: turn.conv.id,
+    attemptId: turn.conv.state.attemptId,
+    causeId: turn.inboundId,
+    lang: turn.lang,
+    isTest: isTestContext({ club: turn.club, guest: turn.guest }),
+    ...extra,
+  };
+}
+
+/** B4b: the fallback menu, recorded as `bot.fallback_menu` (the AI path records its own in brain/answer.ts). */
+async function sendFallbackMenu(turn: Turn) {
+  await emit(turn.deps.db, turnEvent(turn, 'bot.fallback_menu', { actorType: 'bot', actorId: undefined }));
+  await send(turn, [M.menu(turn.club, turn.lang, turn.deps.links)]);
+}
+
+/**
+ * B4b: `bot.error` for a turn that threw (`handleEvent` here, `processDelivery` in http/webhook.ts).
+ * `code` is the error's code or class name; the message goes to `raw` only.
+ */
+export async function recordBotError(db: Db, club: Club, event: webhook.Event, err: unknown, now: Date): Promise<void> {
+  const name = err instanceof BookingError ? err.code : err instanceof Error ? err.name : 'unknown';
+  await emit(db, {
+    clubId: club.id,
+    type: 'bot.error',
+    occurredAt: now,
+    actorType: 'bot',
+    channel: 'line',
+    dataOrigin: 'first_party',
+    props: { code: PROPS_VALUE_PATTERN.test(name) ? name : 'unknown', step: PROPS_VALUE_PATTERN.test(event.type) ? event.type : 'unknown' },
+    raw: { message: (err instanceof Error ? err.message : String(err)).slice(0, 500), webhookEventId: event.webhookEventId },
+    isTest: isTestContext({ club }),
+  });
 }
 
 const NOTICE_CHANNEL = 'line';
@@ -185,14 +239,36 @@ function attemptState(s: Conversation['state']): Conversation['state'] {
 async function beginAttempt(turn: Turn, entry: string | undefined, promoterCode?: string) {
   const s = turn.conv.state;
   if (s.attemptId && (entry === undefined || IN_FLOW_TAGS.has(entry))) return;
-  turn.conv = await updateConversation(turn.deps.db, turn.conv.id, {
-    state: {
-      ...(s.pauseAlertedFor ? { pauseAlertedFor: s.pauseAlertedFor } : {}),
-      entry: entry === undefined || IN_FLOW_TAGS.has(entry) ? 'rm_unknown' : entry,
-      attemptId: newId(),
-      ...(promoterCode ? { promoterCode } : {}),
-    },
+  const { db } = turn.deps;
+  // B4b: a running attempt that never held a table ends here as `booking.abandoned`. One with a
+  // booking row was already abandoned (or finished) by the booking service.
+  const replaced =
+    s.attemptId &&
+    !(await db.query.bookings.findFirst({ where: and(eq(bookings.clubId, turn.club.id), eq(bookings.attemptId, s.attemptId)), columns: { id: true } }));
+  const tag = entry === undefined || IN_FLOW_TAGS.has(entry) ? 'rm_unknown' : entry;
+  const attemptId = newId();
+  turn.conv = await db.transaction(async (tx) => {
+    if (replaced) {
+      await emit(tx, turnEvent(turn, 'booking.abandoned', { nightDate: s.nightDate, props: { last_step: preHoldStep(s), reason_code: 'attempt_replaced' } }));
+    }
+    const conv = await updateConversation(tx, turn.conv.id, {
+      state: {
+        ...(s.pauseAlertedFor ? { pauseAlertedFor: s.pauseAlertedFor } : {}),
+        entry: tag,
+        attemptId,
+        ...(promoterCode ? { promoterCode } : {}),
+      },
+    });
+    await emit(tx, turnEvent(turn, 'booking.started', { conversationId: conv.id, source: tag, attemptId }));
+    return conv;
   });
+}
+
+/** B4b: the step an attempt with no hold had reached (`booking.abandoned.last_step`). */
+function preHoldStep(s: Conversation['state']): 'night' | 'pax' | 'table' {
+  if (!s.nightDate) return 'night';
+  if (!s.paxRange) return 'pax';
+  return 'table';
 }
 
 /** B4: the text the promoter redirect pre-fills in the club's chat (`/r/p/<slug>/<code>`). */
@@ -211,6 +287,7 @@ export async function handleEvent(deps: BotDeps, club: Club, gateway: LineGatewa
     await processEvent(deps, club, gateway, event);
   } catch (err) {
     deps.log(`Bot error for club ${club.id}`, err);
+    await recordBotError(deps.db, club, event, err, deps.now()).catch((e) => deps.log(`bot.error event failed for club ${club.id}`, e));
   }
 }
 
@@ -249,9 +326,13 @@ export async function processEvent(
 
 /**
  * The bot pause in force, if any (B3): `club:<bot_paused_at>` for a club pause, `global:<updated_at>`
- * for the platform-wide stop. The key names one pause, so the staff alert goes out once per pause.
+ * for the platform-wide stop, `status:paused` for a club whose status is paused. The key names one
+ * pause, so the staff alert goes out once per pause (none for a paused club: it has stopped using us).
  */
-async function activePause(db: Db, club: Club): Promise<string | null> {
+const PAUSED_CLUB = 'status:paused';
+export async function activePause(db: Db, club: Club): Promise<string | null> {
+  // Spec §12.3: a paused club (status) gets no bot replies; inbound messages are still stored.
+  if (club.status === 'paused') return PAUSED_CLUB;
   if (club.botPaused) return `club:${club.botPausedAt?.toISOString() ?? 'unknown'}`;
   if (!(await isGloballyStopped(db))) return null;
   const flag = await db.query.platformFlags.findFirst({ where: eq(platformFlags.key, GLOBAL_STOP_FLAG) });
@@ -262,17 +343,44 @@ type GuestEvent = webhook.MessageEvent | webhook.PostbackEvent | webhook.FollowE
 
 async function runTurn(deps: BotDeps, club: Club, gateway: LineGateway, event: GuestEvent, guestIn: Guest, now: Date, inboundId?: string) {
   let guest = guestIn;
+  // B4b: follow, unfollow and refollow are recorded with the guest change, in one transaction.
+  const contactEvent = (type: EventType, g: Guest): EventInput => ({
+    clubId: club.id,
+    type,
+    occurredAt: now,
+    actorType: 'guest',
+    actorId: g.id,
+    channel: 'line',
+    dataOrigin: 'line_chat',
+    guestId: g.id,
+    isTest: isTestContext({ club, guest: g }),
+    dedupeKey: `${type}:${event.webhookEventId}`,
+  });
   if (event.type === 'unfollow') {
     // Guest blocked the club's account: stop pushing to them (it would fail and waste quota).
-    await deps.db.update(guests).set({ unfollowedAt: now, updatedAt: now }).where(eq(guests.id, guest.id));
+    await deps.db.transaction(async (tx) => {
+      await tx.update(guests).set({ unfollowedAt: now, updatedAt: now }).where(eq(guests.id, guest.id));
+      await emit(tx, contactEvent('guest.unfollowed', guest));
+    });
+    // Spec §5.3: the host is told the guest can't be messaged when they have an upcoming booking.
+    const upcoming = await currentBookingForGuest(deps.db, club, guest.id, now);
+    const view = upcoming ? await getBookingView(deps.db, { clubId: club.id, id: upcoming.id }) : undefined;
+    if (view) await alertGuestUnfollowed(deps.db, view, now);
     return;
   }
-  if (guest.unfollowedAt) {
-    [guest] = (await deps.db
-      .update(guests)
-      .set({ unfollowedAt: null, updatedAt: now })
-      .where(eq(guests.id, guest.id))
-      .returning()) as [Guest];
+  const wasUnfollowed = guest.unfollowedAt !== null;
+  if (wasUnfollowed || event.type === 'follow') {
+    guest = await deps.db.transaction(async (tx) => {
+      let g = guest;
+      if (wasUnfollowed) {
+        [g] = (await tx.update(guests).set({ unfollowedAt: null, updatedAt: now }).where(eq(guests.id, guest.id)).returning()) as [Guest];
+      }
+      if (event.type === 'follow') {
+        const again = wasUnfollowed || event.follow.isUnblocked;
+        await emit(tx, contactEvent(again ? 'guest.refollowed' : 'guest.followed', g));
+      }
+      return g;
+    });
   }
   let conv = await getConversation(deps.db, club, guest);
   const turn: Turn = {
@@ -291,7 +399,7 @@ async function runTurn(deps: BotDeps, club: Club, gateway: LineGateway, event: G
   // and one urgent alert is raised per conversation per pause (B19b: through raiseAlert).
   const pause = await activePause(deps.db, club);
   if (pause) {
-    if (conv.state.pauseAlertedFor !== pause) {
+    if (pause !== PAUSED_CLUB && conv.state.pauseAlertedFor !== pause) {
       const who = guest.name ?? guest.displayName ?? 'A guest';
       await raiseAlert(
         deps.db,
@@ -338,7 +446,7 @@ async function runTurn(deps: BotDeps, club: Club, gateway: LineGateway, event: G
   const m = event.message;
   if (m.type === 'text') await handleText(turn, m.text);
   else if (m.type === 'image') await handleImage(turn, m.id);
-  else await send(turn, [M.menu(club, turn.lang, turn.deps.links)]);
+  else await sendFallbackMenu(turn);
 }
 
 // ---------- Staff group linking ----------
@@ -398,6 +506,13 @@ async function handleText(turn: Turn, text: string) {
     return;
   }
   const intent = detectIntent(text);
+  // B4b (§14.2): every typed text is matched or not; the unmatched text is kept in `raw` only.
+  await emit(
+    turn.deps.db,
+    intent.kind === 'unknown'
+      ? turnEvent(turn, 'intent.unknown', { dataOrigin: 'line_chat', raw: { text: text.slice(0, 500) } })
+      : turnEvent(turn, 'intent.detected', { dataOrigin: 'line_chat', props: { intent: intent.kind } }),
+  );
   switch (intent.kind) {
     case 'details_sent': {
       const view = await getBookingView(turn.deps.db, { clubId: turn.club.id, refCode: intent.ref });
@@ -405,7 +520,7 @@ async function handleText(turn: Turn, text: string) {
         await sendReview(turn, view.booking.id);
         return;
       }
-      await send(turn, [M.menu(turn.club, turn.lang, turn.deps.links)]);
+      await sendFallbackMenu(turn);
       return;
     }
     case 'handoff':
@@ -459,6 +574,13 @@ async function handlePostback(turn: Turn, data: string, params?: webhook.Postbac
       // B4: a booking postback with no entry tag (an old rich menu) is recorded as `rm_unknown`.
       await startBooking(turn, { force: true, entry: p.get('s') ?? 'rm_unknown' });
       return;
+    case 'book_other': {
+      // Spec §7.2: a guest with a booking may book a different night; chooseNight checks the limit.
+      await beginAttempt(turn, p.get('s') ?? 'already_other');
+      const nights = await bookableNights(turn.deps.db, turn.club, turn.now, 4);
+      await send(turn, [M.askNight(turn.club, turn.lang, nights, turn.now)]);
+      return;
+    }
     case 'restart':
       await abandonUnfinished(turn);
       await startBooking(turn, { force: true, entry: p.get('s') ?? 'rm_unknown' });
@@ -490,6 +612,15 @@ async function handlePostback(turn: Turn, data: string, params?: webhook.Postbac
     case 'privacy':
       await send(turn, [M.myData(turn.lang)]);
       return;
+    case 'lang': {
+      // Spec §5.3: Thai or English, switched from the menu; kept on the guest for later messages.
+      const lang: Lang = p.get('l') === 'th' ? 'th' : 'en';
+      const [g] = await turn.deps.db.update(guests).set({ lang, updatedAt: turn.now }).where(and(eq(guests.id, turn.guest.id), eq(guests.clubId, turn.club.id))).returning();
+      if (g) turn.guest = g;
+      turn.lang = lang;
+      await send(turn, [M.menu(turn.club, lang, turn.deps.links)]);
+      return;
+    }
     case 'stop':
       await optOutMarketing(turn);
       return;
@@ -501,6 +632,12 @@ async function handlePostback(turn: Turn, data: string, params?: webhook.Postbac
       return;
     case 'late': // B10
       await runningLate(turn, p.get('b') ?? '', p.get('m'));
+      return;
+    case 'pax_change': // §5.3 [Change party size]
+      await guestChangePax(turn, p.get('b') ?? '', null);
+      return;
+    case 'pax_set':
+      await guestChangePax(turn, p.get('b') ?? '', p.get('n'));
       return;
     case 'cancel': // B10
       await guestCancel(turn, p.get('b') ?? '', false);
@@ -518,7 +655,7 @@ async function handlePostback(turn: Turn, data: string, params?: webhook.Postbac
       await handleExtras(turn, p); // B22
       return;
     default:
-      await send(turn, [M.menu(turn.club, turn.lang, turn.deps.links)]);
+      await sendFallbackMenu(turn);
   }
 }
 
@@ -550,6 +687,33 @@ async function runningLate(turn: Turn, bookingId: string, minutesParam: string |
   await send(turn, [M.plain(t(turn.lang, 'lateNoted', { code: view.table.code, time: until }), M.menuQuickReplies(turn.club, turn.lang, turn.deps.links))]);
   // B19b: information alert through raiseAlert (§6.4).
   await alertRunningLate(turn.deps.db, { ...view, booking: updated }, turn.now, turn.conv.id, { minutes, releaseTime: until });
+}
+
+/**
+ * §5.3 [Change party size]: the sizes the booked table seats; the change goes through
+ * `changeBooking` (audit row and `booking.changed`). A bigger group than the table seats goes to a host.
+ */
+async function guestChangePax(turn: Turn, bookingId: string, paxParam: string | null) {
+  const view = await ownConfirmed(turn, bookingId);
+  if (!view) return cannotChange(turn);
+  if (paxParam === null) {
+    await send(turn, [M.askPaxChange(turn.lang, view)]);
+    return;
+  }
+  const pax = Number(paxParam);
+  if (!Number.isInteger(pax) || pax < view.table.minPax || pax > view.table.maxPax) {
+    await send(turn, [M.plain(t(turn.lang, 'paxTooMany', { code: view.table.code, max: view.table.maxPax }), M.bookingActions(turn.lang, bookingId))]);
+    return;
+  }
+  try {
+    await changeBooking(turn.deps.db, turn.club, bookingId, { type: 'guest', id: turn.guest.id }, { pax }, turn.now);
+  } catch (err) {
+    if (err instanceof BookingError) return cannotChange(turn);
+    throw err;
+  }
+  await send(turn, [
+    M.plain(t(turn.lang, 'paxChanged', { code: view.table.code, night: formatNight(view.booking.nightDate, turn.lang), pax }), M.menuQuickReplies(turn.club, turn.lang, turn.deps.links)),
+  ]);
 }
 
 /** Spec §5.2 step 8: the policy is shown first; on confirm the booking is cancelled and the host alerted. */
@@ -648,7 +812,10 @@ async function sendGatewayPayment(turn: Turn, bookingId: string): Promise<boolea
 }
 
 async function chooseNight(turn: Turn, date: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !(await isNightOpen(turn.deps.db, turn.club, date, turn.now))) {
+  const isDate = /^\d{4}-\d{2}-\d{2}$/.test(date);
+  if (!isDate || !(await isNightOpen(turn.deps.db, turn.club, date, turn.now))) {
+    // B4b: a night that cannot be booked (closed, past or outside the window), or a bad date.
+    await emit(turn.deps.db, turnEvent(turn, 'night.rejected', { nightDate: isDate ? date : undefined, props: { reason: isDate ? 'closed' : 'invalid' } }));
     const nights = await bookableNights(turn.deps.db, turn.club, turn.now, 4);
     await send(turn, [
       M.plain(t(turn.lang, 'nightClosed', { night: /^\d{4}-\d{2}-\d{2}$/.test(date) ? formatNight(date, turn.lang) : date })),
@@ -656,24 +823,41 @@ async function chooseNight(turn: Turn, date: string) {
     ]);
     return;
   }
+  if (await guestNightLimitReached(turn.deps.db, turn.club, turn.guest.id, date)) return sendNightLimit(turn, date);
   await beginAttempt(turn, undefined); // B4: a night tap from an old message still gets an attempt
-  turn.conv = await updateConversation(turn.deps.db, turn.conv.id, { state: { ...attemptState(turn.conv.state), nightDate: date } });
+  turn.conv = await turn.deps.db.transaction(async (tx) => {
+    const conv = await updateConversation(tx, turn.conv.id, { state: { ...attemptState(turn.conv.state), nightDate: date } });
+    await emit(tx, turnEvent(turn, 'night.selected', { nightDate: date }));
+    return conv;
+  });
   // B22 (spec §5.2 step 1): a sold-out night says so; the party size still comes next, for the waitlist.
   const soldOut = (await nightStatus(turn.deps.db, turn.club.id, date)) === 'sold_out';
+  if (soldOut) await emit(turn.deps.db, turnEvent(turn, 'night.sold_out_shown', { nightDate: date }));
   await send(turn, [...(soldOut ? [M.plain(t(turn.lang, 'nightSoldOut', { night: formatNight(date, turn.lang) }))] : []), M.askPax(turn.lang, date)]);
+}
+
+/** Spec §7.2: the guest already has the club's maximum of bookings on that night. */
+async function sendNightLimit(turn: Turn, date: string) {
+  await emit(turn.deps.db, turnEvent(turn, 'night.rejected', { nightDate: date, props: { reason: 'guest_limit' } }));
+  const nights = await bookableNights(turn.deps.db, turn.club, turn.now, 4);
+  await send(turn, [M.plain(t(turn.lang, 'nightLimit', { night: formatNight(date, turn.lang) })), M.askNight(turn.club, turn.lang, nights, turn.now)]);
 }
 
 async function choosePax(turn: Turn, key: string) {
   const range = paxRange(key);
   const nightDate = turn.conv.state.nightDate;
   if (!range || !nightDate) return startBooking(turn, { force: true });
+  const paxSelected = turnEvent(turn, 'pax.selected', { nightDate, props: { pax_range: paxRangeCode(key as PaxRangeKey) } });
   if (range.min > SELF_BOOK_MAX_PAX) {
+    await emit(turn.deps.db, paxSelected);
     await send(turn, [M.plain(t(turn.lang, 'bigGroup'))]);
     await requestHandoff(turn, 'large_group', `Large group (13+) for ${formatNight(nightDate, 'en')}`, { silent: true });
     return;
   }
-  turn.conv = await updateConversation(turn.deps.db, turn.conv.id, {
-    state: { ...attemptState(turn.conv.state), nightDate, paxRange: key },
+  turn.conv = await turn.deps.db.transaction(async (tx) => {
+    const conv = await updateConversation(tx, turn.conv.id, { state: { ...attemptState(turn.conv.state), nightDate, paxRange: key } });
+    await emit(tx, paxSelected);
+    return conv;
   });
   await sendTables(turn, nightDate, key);
 }
@@ -711,7 +895,9 @@ async function sendTables(turn: Turn, nightDate: string, key: string, prefix: Me
     await send(turn, [...prefix, M.noTables(turn.lang, nightDate, label, key)]); // B22: with [Join waitlist]
     return;
   }
-  await send(turn, [...prefix, ...M.tablesCarousel(turn.club, turn.lang, options, nightDate, label)]);
+  // Spec §5.2 step 3: [See floor plan] when the club has placed its tables on a floor plan.
+  const floorUrl = options.some((o) => o.table.floorX !== null && o.table.floorY !== null) ? turn.deps.links.floor(turn.club, nightDate) : undefined;
+  await send(turn, [...prefix, ...M.tablesCarousel(turn.club, turn.lang, options, nightDate, label, floorUrl)]);
 }
 
 async function chooseTable(turn: Turn, tableId: string, nightDate: string, guestPax?: number) {
@@ -749,12 +935,17 @@ async function chooseTable(turn: Turn, tableId: string, nightDate: string, guest
     await send(turn, [M.held(turn.club, turn.lang, view, turn.deps.links.details(turn.club, booking, turn.now))]);
   } catch (err) {
     if (err instanceof BookingError && err.code === 'table_taken') {
+      await emit(turn.deps.db, turnEvent(turn, 'table.hold_lost_race', { tableId, nightDate }));
       const code = tableId.split('_').pop() ?? '';
       await sendTables(turn, nightDate, key, [M.plain(t(turn.lang, 'tableTaken', { code }))]);
       return;
     }
     if (err instanceof BookingError && (err.code === 'night_not_bookable' || err.code === 'not_found')) {
       await startBooking(turn, { force: true });
+      return;
+    }
+    if (err instanceof BookingError && err.code === 'guest_night_limit') {
+      await sendNightLimit(turn, nightDate);
       return;
     }
     throw err;
@@ -966,8 +1157,9 @@ async function handleFreeText(turn: Turn, text: string) {
   const details = extractBookingDetails(text, ctx);
   if (looksLikeBookingRequest(details)) return prefillBooking(turn, details);
   const ai = turn.deps.ai;
-  if (!ai) {
-    await send(turn, [M.menu(turn.club, turn.lang, turn.deps.links)]);
+  // A17b: AI answers stay off until the console switches `ai_answers` on for the club.
+  if (!ai || !(await isFeatureOn(turn.deps.db, turn.club.id, 'ai_answers'))) {
+    await sendFallbackMenu(turn);
     return;
   }
   const out = await answerGuestMessage(
@@ -1012,14 +1204,24 @@ async function prefillBooking(turn: Turn, d: BookingDetails) {
   await beginAttempt(turn, 'text_intent');
   if (!d.pax || !(await isNightOpen(turn.deps.db, turn.club, d.date, turn.now))) return chooseNight(turn, d.date);
   const key = paxKeyFor(d.pax);
-  turn.conv = await updateConversation(turn.deps.db, turn.conv.id, { state: { ...attemptState(turn.conv.state), nightDate: d.date } });
+  // B4b: the prefilled steps are funnel steps too, so each records its event with the state change.
+  const nightDate = d.date;
+  turn.conv = await turn.deps.db.transaction(async (tx) => {
+    const conv = await updateConversation(tx, turn.conv.id, { state: { ...attemptState(turn.conv.state), nightDate } });
+    await emit(tx, turnEvent(turn, 'night.selected', { nightDate }));
+    return conv;
+  });
   const table = d.tableCode
     ? await turn.deps.db.query.tables.findFirst({ where: and(eq(tablesTable.clubId, turn.club.id), eq(tablesTable.code, d.tableCode)) })
     : undefined;
   // A named table that is inactive or too small falls back to the table list for the party size.
   if (!table || !table.active || d.pax > table.maxPax || paxRange(key)!.min > SELF_BOOK_MAX_PAX) return choosePax(turn, key);
-  turn.conv = await updateConversation(turn.deps.db, turn.conv.id, { state: { ...attemptState(turn.conv.state), nightDate: d.date, paxRange: key } });
-  await chooseTable(turn, table.id, d.date, d.pax);
+  turn.conv = await turn.deps.db.transaction(async (tx) => {
+    const conv = await updateConversation(tx, turn.conv.id, { state: { ...attemptState(turn.conv.state), nightDate, paxRange: key } });
+    await emit(tx, turnEvent(turn, 'pax.selected', { nightDate, props: { pax_range: paxRangeCode(key as PaxRangeKey) } }));
+    return conv;
+  });
+  await chooseTable(turn, table.id, nightDate, d.pax);
 }
 
 /**
@@ -1039,7 +1241,7 @@ async function requestHandoff(turn: Turn, trigger: HandoffTrigger, reason: strin
     }),
   );
   turn.conv = (await getConversationForClub(turn.deps.db, turn.club.id, turn.conv.id))!;
-  if (!opts.silent) await send(turn, [M.plain(t(turn.lang, 'handoffAck'))]);
+  if (!opts.silent) await send(turn, [M.plain(M.handoffAckText(turn.club, turn.lang, turn.now))]);
   if (opts.alert === false) return;
 
   const current = await currentBookingForGuest(turn.deps.db, turn.club, turn.guest.id, turn.now);
@@ -1134,23 +1336,43 @@ async function logInbound(db: Db, club: Club, guest: Guest, event: webhook.Event
     .from(channels)
     .where(and(eq(channels.clubId, club.id), eq(channels.kind, 'line')))
     .limit(1);
-  const [row] = await db
-    .insert(messagesTable)
-    .values({
-      id: newId(),
-      clubId: club.id,
-      guestId: guest.id,
-      direction: 'in',
-      kind,
-      payload: event,
-      lineMessageId: event.webhookEventId,
-      authorType: 'guest',
-      authorId: guest.id,
-      channelId: channel?.id ?? null,
-      occurredAt: typeof event.timestamp === 'number' ? new Date(event.timestamp) : null,
-    })
-    .onConflictDoNothing()
-    .returning({ id: messagesTable.id, processedAt: messagesTable.processedAt });
+  const occurredAt = typeof event.timestamp === 'number' ? new Date(event.timestamp) : null;
+  const row = await db.transaction(async (tx) => {
+    const [r] = await tx
+      .insert(messagesTable)
+      .values({
+        id: newId(),
+        clubId: club.id,
+        guestId: guest.id,
+        direction: 'in',
+        kind,
+        payload: event,
+        lineMessageId: event.webhookEventId,
+        authorType: 'guest',
+        authorId: guest.id,
+        channelId: channel?.id ?? null,
+        occurredAt,
+      })
+      .onConflictDoNothing()
+      .returning({ id: messagesTable.id, processedAt: messagesTable.processedAt });
+    // B4b: a new guest message or tap (not follow or unfollow) is `message.received`; a redelivery is not.
+    if (r && (event.type === 'message' || event.type === 'postback')) {
+      await emit(tx, {
+        clubId: club.id,
+        type: 'message.received',
+        occurredAt: occurredAt ?? new Date(),
+        actorType: 'guest',
+        actorId: guest.id,
+        channel: 'line',
+        dataOrigin: 'line_chat',
+        guestId: guest.id,
+        props: { kind, attachments: event.type === 'message' && event.message.type !== 'text' && event.message.type !== 'sticker' ? 1 : 0, messageId: r.id },
+        isTest: isTestContext({ club, guest }),
+        dedupeKey: `message.received:${event.webhookEventId}`,
+      });
+    }
+    return r;
+  });
   if (row) return row;
   const [found] = await db
     .select({ id: messagesTable.id, processedAt: messagesTable.processedAt })

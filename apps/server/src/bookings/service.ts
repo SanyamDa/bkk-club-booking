@@ -47,8 +47,10 @@ export const SELF_BOOK_MAX_PAX = 12;
 
 // ---------- Nights ----------
 
-/** Same-night bookings close at 01:00 Bangkok time (spec §7.2). */
-const SAME_NIGHT_CUTOFF_HOUR = 1;
+/** Same-night bookings close at 01:00 Bangkok time by default (spec §7.2; `sameNightCutoffHour`). */
+export const DEFAULT_SAME_NIGHT_CUTOFF_HOUR = 1;
+/** One active booking per guest per night by default (spec §7.2; `maxBookingsPerGuestPerNight`). */
+export const DEFAULT_MAX_BOOKINGS_PER_GUEST_PER_NIGHT = 1;
 
 /** The date is inside the booking window and, for tonight, before the same-night cutoff. */
 function inBookingWindow(club: Club, date: string, now: Date): boolean {
@@ -58,7 +60,7 @@ function inBookingWindow(club: Club, date: string, now: Date): boolean {
   if (date > addDays(tonight, s.bookingWindowDays)) return false;
   if (date === tonight) {
     const hour = bangkokParts(now).hour;
-    if (hour >= SAME_NIGHT_CUTOFF_HOUR && hour < s.nightEndHour) return false;
+    if (hour >= (s.sameNightCutoffHour ?? DEFAULT_SAME_NIGHT_CUTOFF_HOUR) && hour < s.nightEndHour) return false;
   }
   return true;
 }
@@ -216,7 +218,8 @@ export class BookingError extends Error {
       | 'not_found'
       | 'invalid_state'
       | 'hold_expired'
-      | 'details_missing',
+      | 'details_missing'
+      | 'guest_night_limit',
     message?: string,
   ) {
     super(message ?? code);
@@ -519,8 +522,12 @@ export async function holdTable(
           .where(and(eq(bookings.clubId, club.id), eq(bookings.guestId, input.guestId), inArray(bookings.status, ['held'])))
           .for('update');
         for (const b of unfinished) {
-          await changeStatus(tx, b, 'abandoned', GUEST, { code: 'guest_abandoned', text: 'Guest chose another table' }, now);
+          // B4b: last_step is a funnel step (details / payment), never the status 'held'.
+          const lastStep = b.rulesAcceptedAt ? 'payment' : 'details';
+          await changeStatus(tx, b, 'abandoned', GUEST, { code: 'guest_abandoned', text: 'Guest chose another table' }, now, { lastStep });
         }
+        // Spec §7.2: a guest has at most `maxBookingsPerGuestPerNight` active bookings on one night.
+        if (await guestNightLimitReached(tx, club, input.guestId, input.nightDate)) throw new BookingError('guest_night_limit');
         // Free up stale holds on this table so the unique index reflects reality.
         await expireStaleOnTable(tx, input.tableId, input.nightDate, now);
         const [row] = await tx
@@ -568,9 +575,14 @@ export async function holdTable(
 export interface GuestDetails {
   name: string;
   phone: string;
-  nationality: string;
+  /** Null when the club does not require it and the guest left it empty (§5.2 step 4). */
+  nationality: string | null;
   pax: number;
   specialRequest?: string;
+  /** §5.2 step 4, optional: `YYYY-MM-DD`. Kept on the guest when not given. */
+  birthDate?: string | null;
+  /** §5.2 step 4, optional: birthday, anniversary, etc. */
+  occasion?: string | null;
 }
 
 /**
@@ -587,13 +599,21 @@ export async function submitDetails(db: Db, club: Club, bookingId: string, detai
 
     await tx
       .update(guests)
-      .set({ name: details.name, phone: details.phone, nationality: details.nationality, consentAt: now, updatedAt: now })
+      .set({
+        name: details.name,
+        phone: details.phone,
+        nationality: details.nationality,
+        ...(details.birthDate ? { birthDate: details.birthDate } : {}),
+        consentAt: now,
+        updatedAt: now,
+      })
       .where(eq(guests.id, booking.guestId));
     const [updated] = await tx
       .update(bookings)
       .set({
         pax: details.pax,
         specialRequest: details.specialRequest || null,
+        occasion: details.occasion || null,
         rulesVersion: club.settings.rulesVersion,
         rulesAcceptedAt: now,
         updatedAt: now,
@@ -780,8 +800,23 @@ export async function rejectDeposit(db: Db, clubId: string, bookingId: string, a
   });
 }
 
-export const cancelBooking = (db: Db, clubId: string, id: string, actor: Actor, reason: Reason, now: Date) =>
-  transition(db, clubId, id, ['held', 'awaiting_payment', 'payment_review', 'confirmed'], 'cancelled', actor, now, reason);
+/**
+ * `opts.deposit` (§6.2 cancel "with or without forfeiting the deposit"): a verified deposit becomes
+ * `forfeited` (the club keeps it) or `refunded_manual` (staff refund it outside the system), in the
+ * same transaction. Without it the deposit row is left as it was.
+ */
+export const cancelBooking = (db: Db, clubId: string, id: string, actor: Actor, reason: Reason, now: Date, opts: { deposit?: 'forfeit' | 'refund' } = {}) =>
+  transition(db, clubId, id, ['held', 'awaiting_payment', 'payment_review', 'confirmed'], 'cancelled', actor, now, reason, {
+    onDeposit: opts.deposit
+      ? async (tx, deposit) => {
+          if (deposit.status !== 'verified') return;
+          await tx
+            .update(deposits)
+            .set({ status: opts.deposit === 'forfeit' ? 'forfeited' : 'refunded_manual', note: reasonText(reason) })
+            .where(eq(deposits.id, deposit.id));
+        }
+      : undefined,
+  });
 
 /** Guest arrived. `arrivedPax` is the actual party size when staff give it (stored in `arrived_pax`). */
 export const markArrived = (db: Db, clubId: string, id: string, actor: Actor, now: Date, arrivedPax?: number) =>
@@ -792,6 +827,103 @@ export const markArrived = (db: Db, clubId: string, id: string, actor: Actor, no
 
 export const markNoShow = (db: Db, clubId: string, id: string, actor: Actor, now: Date) =>
   transition(db, clubId, id, ['confirmed'], 'no_show', actor, now, undefined, { set: { noShowAt: now } });
+
+/**
+ * §7.1 `completed`: an arrived booking whose night is over (the `completion` job, closing time + 2h)
+ * or whose POS bill closed. Through `changeStatus` on the caller's `tx`, so history, audit and the
+ * `booking.status_changed` event commit with it. Returns null (no change) when the booking is not
+ * `arrived`, so the POS path can call it for any matched bill.
+ */
+export async function completeBookingTx(tx: Db, clubId: string, bookingId: string, actor: Actor, now: Date): Promise<Booking | null> {
+  const booking = await tx.query.bookings.findFirst({ where: and(eq(bookings.id, bookingId), eq(bookings.clubId, clubId)) });
+  if (!booking || booking.status !== 'arrived') return null;
+  return changeStatus(tx, booking, 'completed', actor, undefined, now);
+}
+
+export const completeBooking = (db: Db, clubId: string, bookingId: string, actor: Actor, now: Date) =>
+  db.transaction((tx) => completeBookingTx(tx as unknown as Db, clubId, bookingId, actor, now));
+
+/** What staff (or the guest, pax only) may change on a booking without a status change (§6.2, §5.3). */
+export interface BookingChange {
+  pax?: number;
+  /** Move to another table and/or night. The booked minimum spend and deposit stay as booked. */
+  tableId?: string;
+  nightDate?: string;
+  /** Staff notes; null clears them. */
+  notes?: string | null;
+}
+
+/** Statuses whose table, night or party size can still change. */
+const CHANGEABLE: BookingStatus[] = ['held', 'awaiting_payment', 'payment_review', 'confirmed'];
+
+/**
+ * §6.2 "change table or night, change party size, add notes" and §5.3 [Change party size]. One
+ * transaction: the booking update, one audit row with before and after, and one `booking.changed`
+ * event per changed field. Party size must fit the (new) table; a move to a taken table is
+ * `table_taken` (the one-active-booking index). Notes can change on an arrived booking too.
+ */
+export async function changeBooking(db: Db, club: Club, bookingId: string, actor: Actor, change: BookingChange, now: Date): Promise<Booking> {
+  try {
+    return await db.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Db;
+      const booking = await tx.query.bookings.findFirst({ where: and(eq(bookings.id, bookingId), eq(bookings.clubId, club.id)) });
+      if (!booking) throw new BookingError('not_found');
+      const onlyNotes = change.pax === undefined && change.tableId === undefined && change.nightDate === undefined;
+      const allowed = onlyNotes ? [...CHANGEABLE, 'arrived'] : CHANGEABLE;
+      if (!allowed.includes(booking.status)) throw new BookingError('invalid_state', `Cannot change a ${booking.status} booking`);
+
+      const tableId = change.tableId ?? booking.tableId;
+      const nightDate = change.nightDate ?? booking.nightDate;
+      const pax = change.pax ?? booking.pax;
+      const moved = tableId !== booking.tableId || nightDate !== booking.nightDate;
+      const table = await tx.query.tables.findFirst({ where: and(eq(tables.id, tableId), eq(tables.clubId, club.id)) });
+      if (!table || (moved && !table.active)) throw new BookingError('not_found', 'Table not found');
+      if (pax < table.minPax || pax > table.maxPax) throw new BookingError('invalid_state', `This table seats ${table.minPax}–${table.maxPax}`);
+      if (moved) {
+        if ((await nightStatus(tx, club.id, nightDate)) === 'closed') throw new BookingError('night_not_bookable');
+        await expireStaleOnTable(tx, tableId, nightDate, now);
+      }
+
+      const set: Partial<typeof bookings.$inferInsert> = { updatedAt: now };
+      const fields: string[] = [];
+      if (pax !== booking.pax) (set.pax = pax), fields.push('pax');
+      if (tableId !== booking.tableId) (set.tableId = tableId), fields.push('table');
+      if (nightDate !== booking.nightDate) (set.nightDate = nightDate), fields.push('night');
+      if (change.notes !== undefined && (change.notes || null) !== booking.notes) (set.notes = change.notes || null), fields.push('notes');
+      if (!fields.length) return booking;
+
+      const [after] = await tx
+        .update(bookings)
+        .set(set)
+        .where(and(eq(bookings.id, booking.id), eq(bookings.clubId, club.id), eq(bookings.status, booking.status)))
+        .returning();
+      if (!after) throw new BookingError('invalid_state', `Booking ${booking.id} changed while it was being updated`);
+      const pick = (b: Booking) => ({ pax: b.pax, tableId: b.tableId, nightDate: b.nightDate, notes: b.notes });
+      await audit(tx, club.id, actor, 'booking_changed', booking.id, { fields }, { before: pick(booking), after: pick(after), at: now });
+      for (const field of fields) {
+        await emit(tx, {
+          ...bookingEventBase(after, actor, now),
+          type: 'booking.changed',
+          props: {
+            field,
+            from_pax: field === 'pax' ? booking.pax : null,
+            to_pax: field === 'pax' ? after.pax : null,
+            from_table_id: field === 'table' ? booking.tableId : null,
+            from_night: field === 'night' ? booking.nightDate : null,
+          },
+        });
+      }
+      if (moved) {
+        await syncSoldOut(tx, booking, actor, now); // the night or table it left
+        await syncSoldOut(tx, after, actor, now);
+      }
+      return after;
+    });
+  } catch (err) {
+    if (isUniqueViolation(err)) throw new BookingError('table_taken', 'That table is already booked that night');
+    throw err;
+  }
+}
 
 /**
  * B10 no-show job: a confirmed booking past its release time becomes `no_show` through
@@ -888,7 +1020,8 @@ export async function expireHold(db: Db, clubId: string, bookingId: string, now:
 
 /**
  * The guest started over: their unfinished bookings at this club become `abandoned`, each through
- * `changeStatus` (B2). `last_step` is the status each one had reached.
+ * `changeStatus` (B2). `last_step` is the step each one had reached (B4b): `details` for a hold
+ * whose form was not submitted, `payment` once it was.
  */
 export async function abandonUnfinished(db: Db, clubId: string, guestId: string, now: Date): Promise<Booking[]> {
   return db.transaction(async (tx) => {
@@ -898,7 +1031,10 @@ export async function abandonUnfinished(db: Db, clubId: string, guestId: string,
       .where(and(eq(bookings.clubId, clubId), eq(bookings.guestId, guestId), inArray(bookings.status, ['held', 'awaiting_payment'])))
       .for('update');
     const out: Booking[] = [];
-    for (const b of open) out.push(await changeStatus(tx, b, 'abandoned', GUEST, { code: 'guest_abandoned', text: 'Guest started over' }, now));
+    for (const b of open) {
+      const lastStep = b.status === 'held' && !b.rulesAcceptedAt ? 'details' : 'payment';
+      out.push(await changeStatus(tx, b, 'abandoned', GUEST, { code: 'guest_abandoned', text: 'Guest started over' }, now, { lastStep }));
+    }
     return out;
   });
 }
@@ -907,16 +1043,32 @@ export async function abandonUnfinished(db: Db, clubId: string, guestId: string,
 export async function createManualBooking(
   db: Db,
   club: Club,
-  input: { tableId: string; nightDate: string; pax: number; name: string; phone?: string; notes?: string; depositPaid: boolean },
+  input: {
+    tableId: string;
+    nightDate: string;
+    pax: number;
+    name: string;
+    phone?: string;
+    notes?: string;
+    depositPaid: boolean;
+    /** §9: `manual_phone` or `manual_walkin` (default `manual`). */
+    source?: Extract<BookingSource, 'manual' | 'manual_phone' | 'manual_walkin'>;
+    /** An existing guest of this club (a LINE guest booking by phone); otherwise a new guest row is made. */
+    guestId?: string;
+  },
   actor: Actor,
   now: Date,
 ): Promise<Booking> {
   const option = (await listTableOptions(db, club.id, input.nightDate)).find((o) => o.table.id === input.tableId);
   if (!option) throw new BookingError('not_found', 'Table not found');
-  const [guest] = await db
-    .insert(guests)
-    .values({ id: newId(), clubId: club.id, name: input.name, phone: input.phone || null, displayName: input.name, isTest: isTestContext({ club }) })
-    .returning();
+  const existing = input.guestId ? await db.query.guests.findFirst({ where: and(eq(guests.id, input.guestId), eq(guests.clubId, club.id)) }) : undefined;
+  if (input.guestId && !existing) throw new BookingError('not_found', 'Guest not found');
+  const [guest] = existing
+    ? [existing]
+    : await db
+        .insert(guests)
+        .values({ id: newId(), clubId: club.id, name: input.name, phone: input.phone || null, displayName: input.name, isTest: isTestContext({ club }) })
+        .returning();
   try {
     return await db.transaction(async (tx) => {
       await expireStaleOnTable(tx, input.tableId, input.nightDate, now);
@@ -931,7 +1083,7 @@ export async function createManualBooking(
           nightDate: input.nightDate,
           pax: input.pax,
           status: 'confirmed',
-          source: 'manual',
+          source: input.source ?? 'manual',
           minSpendSatang: option.minSpendSatang,
           depositSatang: option.depositSatang,
           notes: input.notes || null,
@@ -967,6 +1119,26 @@ export async function createManualBooking(
 // ---------- Reads ----------
 
 /** The guest's current booking flow: an unfinished hold, or an upcoming booking. */
+/**
+ * True when the guest already has the club's maximum of active bookings on that night (spec §7.2).
+ * Counts bookings with a slip in review, confirmed or arrived; an unfinished one is replaced by a new hold.
+ */
+export async function guestNightLimitReached(db: Db, club: Club, guestId: string, nightDate: string): Promise<boolean> {
+  const max = club.settings.maxBookingsPerGuestPerNight ?? DEFAULT_MAX_BOOKINGS_PER_GUEST_PER_NIGHT;
+  const rows = await db
+    .select({ id: bookings.id })
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.clubId, club.id),
+        eq(bookings.guestId, guestId),
+        eq(bookings.nightDate, nightDate),
+        inArray(bookings.status, ['payment_review', 'confirmed', 'arrived']),
+      ),
+    );
+  return rows.length >= max;
+}
+
 export async function currentBookingForGuest(db: Db, club: Club, guestId: string, now: Date) {
   const tonight = currentNightDate(now, club.settings.nightEndHour);
   const rows = await db

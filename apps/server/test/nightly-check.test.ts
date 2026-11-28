@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { holdTable, requestDeposit, submitDetails } from '../src/bookings/service.js';
 import { emit } from '../src/data/events.js';
 import type { Db } from '../src/db/client.js';
-import { events, opsEvents, platformFlags, type Club } from '../src/db/schema.js';
+import { events, eventsDeadLetter, opsEvents, platformFlags, type Club } from '../src/db/schema.js';
 import { checkEventCompleteness, runNightlyCheck } from '../src/jobs/nightly-check.js';
 import { newId } from '../src/lib/util.js';
 import { FRIDAY, FRIDAY_AFTERNOON, makeGuest, setupTwoClubs } from './helpers.js';
@@ -52,7 +52,7 @@ describe('nightly check (B2)', () => {
     await submitDetails(db, clubA, b.id, { name: 'Ari', phone: '0812345678', nationality: 'Thai', pax: 6 }, FRIDAY_AFTERNOON);
     await requestDeposit(db, clubA, b.id, FRIDAY_AFTERNOON);
 
-    expect(await checkEventCompleteness(db, FRIDAY)).toEqual({ missing: 0, silentClubs: [], piiInProps: 0, testInAggregates: 0 });
+    expect(await checkEventCompleteness(db, FRIDAY)).toEqual({ missing: 0, silentClubs: [], piiInProps: 0, testInAggregates: 0, deadLetters: 0 });
     expect(await db.select().from(opsEvents)).toEqual([]);
 
     const [one] = await db
@@ -83,6 +83,16 @@ describe('nightly check (B2)', () => {
   it('a live club closed that night is not silent', async () => {
     // Sunday is closed for the fixture settings (Wed to Sat).
     expect((await checkEventCompleteness(db, '2026-11-29')).silentClubs).toEqual([]);
+  });
+
+  it('a dead-lettered event that night is flagged for its club (§14.2)', async () => {
+    await keepClubBAwake();
+    await db.insert(eventsDeadLetter).values({ id: newId(), receivedAt: FRIDAY_NIGHT, payload: { clubId: clubB.id, type: 'bogus' }, error: 'unknown type' });
+    // Another night's dead letter is not counted for this night.
+    await db.insert(eventsDeadLetter).values({ id: newId(), receivedAt: new Date('2026-11-20T14:00:00Z'), payload: { clubId: clubB.id }, error: 'x' });
+    const result = await checkEventCompleteness(db, FRIDAY);
+    expect(result.deadLetters).toBe(1);
+    expect(await opsOf('dead_letter')).toMatchObject([{ kind: 'bot_error', clubId: clubB.id, detail: { nightDate: FRIDAY, rows: 1 } }]);
   });
 
   it('personal data pattern in props is flagged', async () => {
@@ -135,7 +145,7 @@ describe('nightly check (B2)', () => {
   it('the nightly job checks the previous night once', async () => {
     await keepClubBAwake();
     const saturdayMorning = new Date('2026-11-28T01:00:00Z'); // 08:00 Bangkok
-    expect(await runNightlyCheck(db, saturdayMorning)).toEqual({ nightDate: FRIDAY, missing: 0, silentClubs: [], piiInProps: 0, testInAggregates: 0 });
+    expect(await runNightlyCheck(db, saturdayMorning)).toEqual({ nightDate: FRIDAY, missing: 0, silentClubs: [], piiInProps: 0, testInAggregates: 0, deadLetters: 0 });
     expect(await runNightlyCheck(db, saturdayMorning)).toBeNull();
     expect(await db.query.platformFlags.findFirst({ where: eq(platformFlags.key, `nightly_check:${FRIDAY}`) })).toBeDefined();
     // Before 07:00 Bangkok the previous night may still be running: no check yet.

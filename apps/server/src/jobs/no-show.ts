@@ -1,7 +1,7 @@
 import { and, eq, gte, lte } from 'drizzle-orm';
 import { BookingError, getBookingView, releaseNoShow, type Actor } from '../bookings/service.js';
 import { alertNoArrival } from '../bot/alerts.js';
-import { bookings, clubs, type Booking, type Club } from '../db/schema.js';
+import { alerts, bookings, clubs, type Booking, type Club } from '../db/schema.js';
 import type { AppContext } from '../http/context.js';
 import { addDays, bangkokParts, toDateString } from '../lib/time.js';
 
@@ -41,7 +41,8 @@ function bangkokDate(at: Date): string {
 /**
  * The `no-show` job (B10): every confirmed booking past its release time, in a club with
  * `autoNoShow` (default on), becomes `no_show` and its table is released (`releaseNoShow`, one
- * transaction), then an urgent `no_arrival` alert is raised. With `only`, that one booking is released now
+ * transaction), then an urgent `no_arrival` alert is raised. With `autoNoShow` off the booking is
+ * kept and the urgent alert is raised once. With `only`, that one booking is released now
  * whatever its time (demo fast-forward). Returns the number released.
  */
 export async function releaseNoShows(ctx: AppContext, now: Date, only?: { clubId: string; bookingId: string }): Promise<number> {
@@ -53,7 +54,20 @@ export async function releaseNoShows(ctx: AppContext, now: Date, only?: { clubId
   const rows = await db.select({ booking: bookings, club: clubs }).from(bookings).innerJoin(clubs, eq(bookings.clubId, clubs.id)).where(where);
   let released = 0;
   for (const { booking, club } of rows) {
-    if (!only && (club.settings.autoNoShow === false || releaseAt(club, booking) > now)) continue;
+    if (!only && releaseAt(club, booking) > now) continue;
+    if (!only && club.settings.autoNoShow === false) {
+      // The club decides itself (plan B10): the table is kept, and the host is told once (spec §5.2
+      // step 9, §6.4 urgent "table not arrived at release time") to mark the no-show from the dashboard.
+      const [alerted] = await db
+        .select({ id: alerts.id })
+        .from(alerts)
+        .where(and(eq(alerts.clubId, club.id), eq(alerts.kind, 'no_arrival'), eq(alerts.bookingId, booking.id)))
+        .limit(1);
+      if (alerted) continue;
+      const view = await getBookingView(db, { clubId: club.id, id: booking.id });
+      if (view) await alertNoArrival(db, view, now);
+      continue;
+    }
     let after: Booking;
     try {
       after = await releaseNoShow(db, club.id, booking.id, SYSTEM, now);

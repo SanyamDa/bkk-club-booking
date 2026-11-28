@@ -122,6 +122,14 @@ const strings = {
     th: 'คุณมีการจองอยู่แล้ว: โต๊ะ {code} คืน {night} ({status})',
   },
   noBooking: { en: 'You don’t have an upcoming booking.', th: 'คุณยังไม่มีการจองค่ะ' },
+  // Spec §7.2: max active bookings per guest per night.
+  bookOtherNight: { en: 'Book another night', th: 'จองคืนอื่น' },
+  // Spec §5.2 step 3.
+  seeFloorPlan: { en: 'See floor plan', th: 'ดูผังร้าน' },
+  nightLimit: {
+    en: 'You already have a booking on {night}. Please pick another night.',
+    th: 'คุณมีการจองคืน {night} อยู่แล้ว กรุณาเลือกคืนอื่น',
+  },
   status_held: { en: 'held, details needed', th: 'รอกรอกข้อมูล' },
   status_awaiting_payment: { en: 'waiting for deposit', th: 'รอชำระมัดจำ' },
   status_payment_review: { en: 'checking payment', th: 'กำลังตรวจสอบการชำระเงิน' },
@@ -131,11 +139,22 @@ const strings = {
     en: 'Got it, a host will reply here shortly.',
     th: 'รับทราบค่ะ พนักงานจะตอบกลับในแชทนี้เร็วๆ นี้ค่ะ',
   },
+  /** §5.3: the handoff reply outside the club's host hours. */
+  handoffAckOffHours: {
+    en: 'Got it, a host will reply here. Our hosts are online from {from}.',
+    th: 'รับทราบค่ะ พนักงานจะตอบกลับในแชทนี้ พนักงานของเราออนไลน์ตั้งแต่ {from} น. ค่ะ',
+  },
   slipWithoutBooking: {
     en: 'Thanks for the image. If it’s a payment slip, please start a booking first, or talk to a host.',
     th: 'ขอบคุณสำหรับรูปภาพค่ะ หากเป็นสลิปโอนเงิน กรุณาเริ่มจองก่อน หรือคุยกับพนักงานค่ะ',
   },
 
+  // §5.2 step 10: the optional next-day message.
+  afterVisit: {
+    en: 'Thanks for coming to {club} last night. We hope to see you again soon.',
+    th: 'ขอบคุณที่มาเที่ยว {club} เมื่อคืนนะคะ หวังว่าจะได้พบกันอีกเร็วๆ นี้ค่ะ',
+  },
+  bookAgain: { en: 'Book again', th: 'จองอีกครั้ง' },
   // B10: reminder, running late, guest cancel
   reminder: {
     en: 'See you tonight. Table {code}, please arrive by {time}.',
@@ -144,6 +163,14 @@ const strings = {
   runningLate: { en: 'Running late', th: 'มาสาย' },
   needToCancel: { en: 'Need to cancel', th: 'ต้องการยกเลิก' },
   cancelShort: { en: 'Cancel', th: 'ยกเลิก' },
+  // §5.3: [Change party size] on My booking.
+  changePax: { en: 'Change party size', th: 'เปลี่ยนจำนวนคน' },
+  askPaxChange: { en: 'How many guests now? Table {code} seats {min}–{max}.', th: 'ตอนนี้มากี่ท่านคะ? โต๊ะ {code} นั่งได้ {min}–{max} ท่าน' },
+  paxChanged: { en: 'Done: {code} on {night} is now for {pax} guests.', th: 'เรียบร้อยค่ะ โต๊ะ {code} คืน {night} เปลี่ยนเป็น {pax} ท่านแล้วค่ะ' },
+  paxTooMany: {
+    en: 'Table {code} seats up to {max}. For a bigger group, a host can move you to another table.',
+    th: 'โต๊ะ {code} นั่งได้สูงสุด {max} ท่าน หากมากกว่านี้ พนักงานช่วยย้ายโต๊ะให้ได้ค่ะ',
+  },
   askLate: { en: 'How late will you be?', th: 'จะมาสายประมาณเท่าไรคะ?' },
   late15: { en: '15 min', th: '15 นาที' },
   late30: { en: '30 min', th: '30 นาที' },
@@ -169,6 +196,8 @@ const strings = {
 
   // B10b: data removal and marketing opt-out (spec §14.9, §5.5).
   myData: { en: 'My data', th: 'ข้อมูลของฉัน' },
+  // Spec §5.3: the language switch in the menu, labelled in the language it switches to.
+  switchLang: { en: 'ภาษาไทย', th: 'English' },
   myDataPrompt: {
     en: 'You can stop promotional messages, or ask us to remove your data.',
     th: 'คุณสามารถหยุดรับข้อความโปรโมชัน หรือขอให้เราลบข้อมูลของคุณได้ค่ะ',

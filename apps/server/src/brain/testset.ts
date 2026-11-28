@@ -139,6 +139,8 @@ export async function evaluateCases(opts: {
   today: string;
   tableCodes: readonly string[];
   cases: readonly TestCase[];
+  /** §5.4: the club's voice, as the live bot sends it. */
+  tone?: 'formal' | 'casual';
 }): Promise<EvalResult> {
   const { client, judge, brain, today, tableCodes } = opts;
   const results: CaseResult[] = [];
@@ -153,7 +155,7 @@ export async function evaluateCases(opts: {
         instructions: AI_INSTRUCTIONS,
         brain,
         tools: TOOL_DEFINITIONS,
-        userContent: aiUserContent(today, c.lang === 'en' ? 'en' : 'th', c.question),
+        userContent: aiUserContent(today, c.lang === 'en' ? 'en' : 'th', c.question, opts.tone),
       });
       ({ outcome, answer } = outcomeOf(reply, { today, tableCodes }));
     } catch (err) {
@@ -407,6 +409,7 @@ export async function runPendingTestRuns(db: Db, deps: TestRunDeps, now: Date): 
         today: ctx.today,
         tableCodes: ctx.tableCodes,
         cases: await clubTestCases(db, club.id),
+        tone: club.settings.tone,
       });
       await db
         .update(brainTestRuns)
